@@ -1,0 +1,6 @@
+{
+  "name": "نظام الإدارة التجارية والمحاسبية المتكامل",
+  "description": "نظام ERP متكامل لإدارة الصيدلية، البقالة، قطع الغيار، والأمانات بنظام القيد المزدوج والعمل دون إنترنت",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

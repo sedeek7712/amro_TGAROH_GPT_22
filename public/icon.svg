@@ -1,0 +1,49 @@
+
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#064e3b" />
+      <stop offset="50%" stop-color="#047857" />
+      <stop offset="100%" stop-color="#022c22" />
+    </linearGradient>
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fcd34d" />
+      <stop offset="50%" stop-color="#f59e0b" />
+      <stop offset="100%" stop-color="#d97706" />
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#059669" />
+    </linearGradient>
+    <filter id="shadow" x="-10%" y="-10%" width="130%" height="130%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#000000" flood-opacity="0.45" />
+    </filter>
+  </defs>
+
+  <!-- Background Base -->
+  <rect width="512" height="512" rx="96" fill="url(#bgGrad)" />
+
+  <g transform="translate(0, 0)" filter="url(#shadow)">
+    <!-- Rounded Outer Shield / Frame -->
+    <rect x="76" y="76" width="360" height="360" rx="64" fill="#0f172a" fill-opacity="0.35" stroke="url(#accentGrad)" stroke-width="6"/>
+
+    <!-- Central Isometric ERP Layers / Inventory & Finance Symbol -->
+    <!-- Top Diamond / Layer -->
+    <path d="M 256 120 L 370 185 L 256 250 L 142 185 Z" fill="url(#goldGrad)" />
+    <!-- Middle Layer -->
+    <path d="M 142 215 L 256 280 L 370 215 L 370 235 L 256 300 L 142 235 Z" fill="url(#accentGrad)" />
+    <!-- Bottom Layer -->
+    <path d="M 142 265 L 256 330 L 370 265 L 370 285 L 256 350 L 142 285 Z" fill="#10b981" />
+
+    <!-- Sparkle / Tech Node dots -->
+    <circle cx="256" cy="185" r="14" fill="#ffffff" />
+    <circle cx="195" cy="215" r="7" fill="#fcd34d" />
+    <circle cx="317" cy="215" r="7" fill="#fcd34d" />
+
+    <!-- Subtle Chart Bars overlay at base -->
+    <rect x="200" y="370" width="22" height="32" rx="4" fill="#34d399" opacity="0.9" />
+    <rect x="232" y="356" width="22" height="46" rx="4" fill="#f59e0b" opacity="0.9" />
+    <rect x="264" y="342" width="22" height="60" rx="4" fill="#10b981" opacity="0.9" />
+    <rect x="296" y="362" width="22" height="40" rx="4" fill="#6ee7b7" opacity="0.9" />
+  </g>
+</svg>

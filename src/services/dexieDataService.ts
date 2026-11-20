@@ -2590,6 +2590,8 @@ export class DexieDataService implements IDataService {
         });
 
         const todayStr = new Date().toISOString().split('T')[0];
+        // تُوزع تعديلات الفاتورة (الخصم والضريبة) نسبياً على تكلفة التوريد حتى تطابق قيمة المخزون القيد المحاسبي.
+        const inventoryCostFactor = invoice.subtotal > 0 ? invoice.total / invoice.subtotal : 1;
 
         // أ. فحص الأصناف وتحديث الأرصدة والتشغيلات
         for (const item of itemsWithBatches) {
@@ -2620,14 +2622,26 @@ export class DexieDataService implements IDataService {
             }
           }
 
+          const landedUnitCost = roundMoney(item.costPrice * inventoryCostFactor, 4);
+          if (!Number.isFinite(landedUnitCost) || landedUnitCost < 0) {
+            throw new FinancialValidationError(`تكلفة التوريد النهائية للصنف (${product.nameAr}) غير صالحة.`);
+          }
+
           if (item.batchNumber && item.expiryDate) {
             if (!product.batches) product.batches = [];
-            const existingBatch = product.batches.find(
-              (b) => b.batchNumber === item.batchNumber
-            );
+            const existingBatch = product.batches.find((b) => b.batchNumber === item.batchNumber);
             if (existingBatch) {
-              existingBatch.quantity = roundMoney(existingBatch.quantity + item.quantity, 4);
-              existingBatch.costPrice = item.costPrice;
+              if (existingBatch.expiryDate !== item.expiryDate) {
+                throw new FinancialValidationError(`رقم التشغيلة (${item.batchNumber}) مستخدم بتاريخ صلاحية مختلف.`);
+              }
+              const previousQuantity = existingBatch.quantity;
+              const previousValue = previousQuantity * existingBatch.costPrice;
+              const addedValue = item.quantity * landedUnitCost;
+              const nextQuantity = roundMoney(previousQuantity + item.quantity, 4);
+              existingBatch.costPrice = nextQuantity > 0
+                ? roundMoney((previousValue + addedValue) / nextQuantity, 4)
+                : landedUnitCost;
+              existingBatch.quantity = nextQuantity;
             } else {
               product.batches.push({
                 id: storage.generateUUID(),
@@ -2635,18 +2649,26 @@ export class DexieDataService implements IDataService {
                 batchNumber: item.batchNumber,
                 expiryDate: item.expiryDate,
                 quantity: item.quantity,
-                costPrice: item.costPrice,
+                costPrice: landedUnitCost,
               });
             }
             product.currentStock = roundMoney(
               product.batches.reduce((sum, b) => sum + b.quantity, 0),
               4
             );
+            const inventoryValue = product.batches.reduce((sum, batch) => sum + batch.quantity * batch.costPrice, 0);
+            product.purchasePrice = product.currentStock > 0
+              ? roundMoney(inventoryValue / product.currentStock, 4)
+              : landedUnitCost;
           } else {
-            product.currentStock = roundMoney(product.currentStock + item.quantity, 4);
+            const previousQuantity = product.currentStock;
+            const previousValue = previousQuantity * product.purchasePrice;
+            const nextQuantity = roundMoney(previousQuantity + item.quantity, 4);
+            product.purchasePrice = nextQuantity > 0
+              ? roundMoney((previousValue + item.quantity * landedUnitCost) / nextQuantity, 4)
+              : landedUnitCost;
+            product.currentStock = nextQuantity;
           }
-
-          product.purchasePrice = item.costPrice;
           validateProductStockConsistency(product);
           await db.products.put(product);
         }

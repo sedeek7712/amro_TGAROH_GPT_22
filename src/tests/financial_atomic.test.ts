@@ -64,7 +64,13 @@ describe('Financial Atomicity, Cash Vouchers + JVs, Stock Batch Integrity & Idem
       passwordHash: await hashPassword('Admin#Fin2026!'),
     };
     await db.users.put(admin);
-    await authService.setAuthenticatedUserForSession(admin);
+    const login = await authService.authenticate({
+      username: admin.username,
+      password: 'Admin#Fin2026!',
+      users: [admin],
+      onUserUpdated: async (updated) => { await db.users.put(updated); },
+    });
+    assert.equal(login.success, true);
 
     // تمويل الصندوق cb-1 برصيد افتتاحي معلوم للاختبارات المالية
     await db.cashBoxes.update('cb-1', { balance: 10000 });

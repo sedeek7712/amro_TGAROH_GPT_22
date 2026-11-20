@@ -2925,7 +2925,7 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.journalEntries, db.accounts, db.outbox, db.auditLogs, db.sequences],
+      [db.journalEntries, db.accounts, db.cashBoxes, db.outbox, db.auditLogs, db.sequences],
       async () => {
         const original = await db.journalEntries.get(originalEntryId);
         if (!original) {
@@ -2989,10 +2989,30 @@ export class DexieDataService implements IDataService {
 
         for (const line of reversedLines) {
           const acc = await db.accounts.get(line.accountCode);
+          const delta = roundMoney((Number(line.debit) || 0) - (Number(line.credit) || 0));
           if (acc) {
-            const delta = roundMoney((Number(line.debit) || 0) - (Number(line.credit) || 0));
             acc.balance = roundMoney(acc.balance + delta);
             await db.accounts.put(acc);
+          }
+
+          const linkedBoxes = await db.cashBoxes.where('accountCode').equals(line.accountCode).toArray();
+          if (linkedBoxes.length > 0) {
+            const branchBoxes = linkedBoxes.filter((box) => box.branchId === originalBranchId || box.isCentral);
+            if (branchBoxes.length !== 1) {
+              throw new FinancialValidationError(
+                `لا يمكن عكس القيد بأمان: حساب الصندوق (${line.accountCode}) لا يرتبط بصندوق واحد محدد في الفرع الأصلي.`
+              );
+            }
+            const linkedBox = branchBoxes[0];
+            if (linkedBox.isCentral) assertPermission(actor, 'cashbox:central_access');
+            const nextCashBalance = roundMoney(linkedBox.balance + delta);
+            if (nextCashBalance < 0) {
+              throw new FinancialValidationError(
+                `سيؤدي عكس القيد إلى جعل رصيد الصندوق (${linkedBox.nameAr}) سالباً؛ أُلغيت العملية بالكامل.`
+              );
+            }
+            linkedBox.balance = nextCashBalance;
+            await db.cashBoxes.put(linkedBox);
           }
         }
 

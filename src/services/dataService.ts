@@ -119,6 +119,64 @@ export interface IDataService {
   exportBackupJSON(): Promise<string>;
   importBackupJSON(jsonContent: string): Promise<{ success: boolean; error?: string }>;
 
+  // واجهات العمليات الذرية المستخدمة مباشرة من شاشات النظام.
+  // وجودها في العقد يمنع ربط الواجهة بكلاس تخزين محدد.
+  createSalesInvoiceAtomic(params: {
+    invoice: Invoice;
+    totalCogs: number;
+    stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
+
+  createPurchaseInvoiceAtomic(params: {
+    invoice: Invoice;
+    itemsWithBatches: Array<{
+      productId: string;
+      quantity: number;
+      costPrice: number;
+      batchNumber?: string;
+      expiryDate?: string;
+    }>;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
+
+  saveProductAtomic(product: Product, isUpdate?: boolean): Promise<Product>;
+  deleteProductAtomic(productId: string): Promise<void>;
+  adjustProductStockAtomic(params: {
+    productId: string;
+    deltaQuantity: number;
+    reason: string;
+    batchNumber?: string;
+    expiryDate?: string;
+  }): Promise<Product>;
+  createAccountAtomic(account: Account): Promise<Account>;
+  createJournalEntryAtomic(entry: JournalEntry): Promise<JournalEntry>;
+  reverseJournalEntryAtomic(originalEntryId: string, reversalReason: string): Promise<JournalEntry>;
+  createCashBoxAtomic(box: CashBox): Promise<CashBox>;
+  createCashVoucherAtomic(params: {
+    voucher: PaymentVoucher;
+  }): Promise<{ success: boolean; voucher: PaymentVoucher; journalEntry: JournalEntry }>;
+  createAmanatDepositAtomic(params: {
+    record: AmanatRecord;
+    cashBoxId?: string;
+  }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
+  returnAmanatAtomic(params: {
+    recordId: string;
+    cashBoxId?: string;
+    recipientSignatureName?: string;
+  }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
+  savePartyAtomic(party: Party, isUpdate?: boolean): Promise<Party>;
+  saveUserAtomic(user: SystemUser): Promise<SystemUser>;
+  createUserAtomic(params: {
+    username: string;
+    fullName: string;
+    role: SystemUser['role'];
+    allowedActivities: CommercialActivityId[];
+    branchId: string;
+    allowedBranches?: string[];
+    plainPassword: string;
+  }): Promise<SystemUser>;
+
   // تصفير الدفاتر للبدء النظيف
   resetToCleanBooks(): Promise<void>;
 }

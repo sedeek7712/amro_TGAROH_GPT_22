@@ -70,7 +70,7 @@ async function runE2ETestSuite() {
     users: [adminActor],
     onUserUpdated: async (updated) => { await db.users.put(updated); },
   });
-  assert.equal(login.success, true);
+  assert(login.success === true, 'E2E administrator login must succeed');
 
   // تمويل رصيد افتتاحي للصندوق cb-1 لتغطية مشتريات الاختبار النقدية وفق ضوابط FIN-03
   await db.cashBoxes.update('cb-1', { balance: 10000 });

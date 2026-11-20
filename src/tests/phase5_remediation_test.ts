@@ -25,7 +25,7 @@ import { authService, hashPassword } from '../services/authService';
 import { storage } from '../services/storageService';
 import { syncQueueService } from '../services/syncQueueService';
 import { dexieDataService } from '../services/dexieDataService';
-import { OutboxQueueItem, JournalEntry, Invoice } from '../types/erp';
+import { OutboxQueueItem, JournalEntry, Invoice, SystemUser } from '../types/erp';
 
 interface TestResult {
   scenarioNumber: number;
@@ -249,13 +249,13 @@ async function runTestSuite() {
   try {
     // تسجيل دخول اختباري فعلي؛ لا نسمح للاختبار بتجاوز شرط الجلسة الموثقة.
     const syncTestPassword = 'Sync#Idempotency2026!';
-    const syncTestAdmin = {
+    const syncTestAdmin: SystemUser = {
       id: 'usr-phase5-sync-admin',
       tenantId: 'tenant_main',
       username: 'phase5_sync_admin',
       fullName: 'مدير اختبار المزامنة',
       role: 'ADMIN' as const,
-      allowedActivities: ['pharmacy', 'grocery', 'bike_parts', 'equipment_parts'] as const,
+      allowedActivities: ['pharmacy', 'grocery', 'bike_parts', 'equipment_parts'],
       branchId: 'branch_main',
       allowedBranches: ['branch_main'],
       active: true,

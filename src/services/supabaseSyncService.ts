@@ -70,7 +70,7 @@ export class SupabaseSyncService {
   public getConfig(): SupabaseSyncConfig {
     const deviceId = this.getOrCreateDeviceId();
     const deviceName = this.getDeviceName();
-    const activeTenant = authService.getActiveTenantIdSync() || 'tenant_main';
+    const activeTenant = authService.getActiveTenantIdSync() || '';
 
     const defaultConfig: SupabaseSyncConfig = {
       supabaseUrl: '',
@@ -109,7 +109,7 @@ export class SupabaseSyncService {
     const merged: SupabaseSyncConfig = {
       ...current,
       ...newConfig,
-      tenantId: newConfig.tenantId?.trim() || current.tenantId || 'tenant_main',
+      tenantId: newConfig.tenantId?.trim() || current.tenantId || '',
       tableCursors: newConfig.tableCursors ?? current.tableCursors ?? {},
     };
     localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify(merged));
@@ -160,19 +160,36 @@ export class SupabaseSyncService {
    * التحقق من تطابق معرف المؤسسة مع الجلسة المصادق عليها (SYNC-05)
    */
   private resolveEffectiveTenant(config: SupabaseSyncConfig): { ok: boolean; tenantId: string; error?: string } {
-    const authTenant = authService.getActiveTenantIdSync();
+    const session = authService.getCurrentSessionSync();
+    const authTenant = authService.getActiveTenantIdSync()?.trim();
     const configured = config.tenantId?.trim();
-    if (authTenant && configured && configured !== 'tenant_default' && configured !== authTenant) {
+    if (!session || !authTenant) {
+      return { ok: false, tenantId: '', error: 'المزامنة السحابية متوقفة: يلزم تسجيل دخول موثق مرتبط بمؤسسة.' };
+    }
+    if (configured && configured !== authTenant) {
       return {
         ok: false,
         tenantId: authTenant,
         error: `حظر عزل المؤسسات: المؤسسة المضبوطة (${configured}) لا تطابق مؤسسة الجلسة المصادق عليها (${authTenant}).`,
       };
     }
+    // المفتاح العام ليس JWT لمستخدم ولا يحمل مطالبات المؤسسة والدور المطلوبة بواسطة سياسات قاعدة البيانات.
+    // لا يوجد حالياً تكامل مصادقة سحابي يوفر JWT مستخدم؛ لا نرسل بيانات محلية بهوية مجهولة.
     return {
-      ok: true,
-      tenantId: authTenant || configured || 'tenant_main',
+      ok: false,
+      tenantId: authTenant,
+      error: 'المزامنة السحابية معطلة بأمان: يلزم ربط مصادقة سحابية حقيقية وإرسال JWT للمستخدم؛ المفتاح العام وحده لا يكفي.',
     };
+  }
+
+  private resolveEffectiveBranch(config: SupabaseSyncConfig): { ok: boolean; branchId: string; error?: string } {
+    const session = authService.getCurrentSessionSync();
+    const branchId = config.branchId?.trim() || session?.branchId?.trim() || '';
+    if (!session || !branchId) return { ok: false, branchId: '', error: 'لا يوجد فرع موثق للمزامنة السحابية.' };
+    if (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(branchId)) {
+      return { ok: false, branchId: '', error: 'فرع المزامنة السحابية غير مصرح به للمستخدم الحالي.' };
+    }
+    return { ok: true, branchId };
   }
 
   /**

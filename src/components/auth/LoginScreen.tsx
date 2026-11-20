@@ -30,12 +30,14 @@ import { dataService } from '../../services/dataService';
 import { storage } from '../../services/storageService';
 import { useDexieInitStatus, useLiveUsers } from '../../hooks/useLiveDexie';
 import { SystemUser } from '../../types/erp';
+import { desktopAuthAdapter } from '../../services/desktopAuthAdapter';
+import { DesktopLoginScreen } from './DesktopLoginScreen';
 
 interface LoginScreenProps {
-  onLogin: (user: SystemUser) => void;
+  onLogin: (user: SystemUser, token?: string) => void;
 }
 
-export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
+const BrowserLoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
   const initStatus = useDexieInitStatus();
   const liveUsers = useLiveUsers();
 
@@ -416,4 +418,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
       </div>
     </div>
   );
+};
+
+
+/** Choose a single authentication provider based on the actual runtime. */
+export const LoginScreen: React.FC<LoginScreenProps> = (props) => {
+  if (desktopAuthAdapter.isAvailable()) {
+    return <DesktopLoginScreen onLogin={(user, token) => props.onLogin(user, token)} />;
+  }
+  return <BrowserLoginScreen {...props} />;
 };

@@ -27,6 +27,9 @@ jobs:
       - name: Verify SQLite schema, transactions, persistence and backup
         run: python scripts/verify_sqlite_schema.py
 
+      - name: Verify SQLite application runtime, migrations and restart persistence
+        run: node scripts/verify_sqlite_runtime.mjs
+
       - name: Install dependencies
         run: npm ci
 

@@ -1704,16 +1704,22 @@ export class DexieDataService implements IDataService {
 
   public async updateAmanatRecord(record: AmanatRecord): Promise<void> {
     await this.ensureReady();
-    const { actor, tenantId, branchId } = this.requireAuthorizedActor('amanat:manage');
+    const { actor, tenantId } = this.requireAuthorizedActor('amanat:manage');
     await db.transaction('rw', [db.amanatRecords, db.outbox, db.auditLogs], async () => {
-      await db.amanatRecords.put(record);
+      const existing = await db.amanatRecords.get(record.id);
+      if (!existing) throw new FinancialValidationError('سجل الأمانة المطلوب تحديثه غير موجود.');
+      const targetBranchId = existing.branchId?.trim() || record.branchId?.trim() || '';
+      assertBranchAccess(actor, targetBranchId, { requireTarget: true });
+      if (!targetBranchId) throw new FinancialValidationError('سجل الأمانة غير مربوط بفرع.');
+      const persistedRecord: AmanatRecord = { ...record, branchId: targetBranchId };
+      await db.amanatRecords.put(persistedRecord);
       await syncQueueService.enqueue({
         tenantId,
-        branchId,
+        branchId: targetBranchId,
         entityType: 'AMANAT',
-        entityId: record.id,
+        entityId: persistedRecord.id,
         action: 'UPDATE',
-        payload: record as unknown as Record<string, unknown>,
+        payload: persistedRecord as unknown as Record<string, unknown>,
       });
       await db.auditLogs.put({
         id: storage.generateUUID(),
@@ -1721,9 +1727,9 @@ export class DexieDataService implements IDataService {
         userId: actor.id,
         userName: actor.fullName,
         tenantId,
-        branchId,
+        branchId: targetBranchId,
         action: 'تحديث أمانة',
-        details: `تحديث سجل أمانة ${record.recordNumber}`,
+        details: `تحديث سجل أمانة ${persistedRecord.recordNumber}`,
       });
     });
   }

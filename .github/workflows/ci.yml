@@ -58,3 +58,23 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 14
+
+  sqlite-electron-runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Setup Electron embedded Node.js line
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.3'
+
+      - name: Verify SQLite persistence and migrations on Node 24
+        run: node scripts/verify_sqlite_runtime.mjs
+
+      - name: Verify main-process authentication on Node 24
+        run: node scripts/verify_sqlite_auth.mjs
+
+      - name: Check Electron main, preload and security modules
+        run: node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/security/authentication.mjs

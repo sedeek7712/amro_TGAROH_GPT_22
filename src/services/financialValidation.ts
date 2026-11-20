@@ -65,6 +65,26 @@ export function validateSalesInvoiceInput(params: {
     }
   }
 
+  const invoiceQuantities = new Map<string, number>();
+  for (const item of invoice.items) {
+    invoiceQuantities.set(item.productId, (invoiceQuantities.get(item.productId) || 0) + item.quantity);
+  }
+  const deductionQuantities = new Map<string, number>();
+  for (const deduction of stockDeductions) {
+    deductionQuantities.set(
+      deduction.productId,
+      (deductionQuantities.get(deduction.productId) || 0) + deduction.quantity
+    );
+  }
+  if (invoiceQuantities.size !== deductionQuantities.size) {
+    throw new FinancialValidationError('بنود الفاتورة لا تطابق بنود خصم المخزون.');
+  }
+  for (const [productId, quantity] of invoiceQuantities) {
+    if (Math.abs(quantity - (deductionQuantities.get(productId) || 0)) > 0.0001) {
+      throw new FinancialValidationError(`كمية الصنف (${productId}) لا تطابق كمية خصم المخزون.`);
+    }
+  }
+
   if (
     !isFiniteNonNegative(invoice.subtotal) ||
     !isFiniteNonNegative(invoice.discount) ||

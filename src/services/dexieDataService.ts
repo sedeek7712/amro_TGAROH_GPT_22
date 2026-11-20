@@ -580,7 +580,8 @@ export class DexieDataService implements IDataService {
 
   public async updateBranch(branch: Branch): Promise<void> {
     await this.ensureReady();
-    const { actor, tenantId } = this.requireAuthorizedActor('branches:manage');
+    const { actor, tenantId } = this.requireAuthorizedActor('branches:manage', branch.id);
+    assertBranchAccess(actor, branch.id);
 
     await db.transaction('rw', [db.branches, db.outbox, db.auditLogs], async () => {
       await db.branches.put(branch);
@@ -961,6 +962,7 @@ export class DexieDataService implements IDataService {
   // --- العملاء والموردون ---
   public async getParties(type?: 'CUSTOMER' | 'SUPPLIER'): Promise<Party[]> {
     await this.ensureReady();
+    this.requireAuthorizedActor('party:view');
     if (type) {
       return await db.parties.where('type').equals(type).toArray();
     }

@@ -1933,6 +1933,7 @@ export class DexieDataService implements IDataService {
       accounts: await db.accounts.toArray(),
       activities: await db.activities.toArray(),
       products: await db.products.toArray(),
+      productBatches: await db.productBatches.toArray(),
       parties: await db.parties.toArray(),
       invoices: await db.invoices.toArray(),
       journalEntries: await db.journalEntries.toArray(),
@@ -2011,6 +2012,7 @@ export class DexieDataService implements IDataService {
           db.accounts,
           db.activities,
           db.products,
+          db.productBatches,
           db.parties,
           db.invoices,
           db.journalEntries,
@@ -2039,6 +2041,10 @@ export class DexieDataService implements IDataService {
           if (Array.isArray(d.products)) {
             await db.products.clear();
             if (d.products.length > 0) await db.products.bulkPut(d.products);
+          }
+          if (Array.isArray(d.productBatches)) {
+            await db.productBatches.clear();
+            if (d.productBatches.length > 0) await db.productBatches.bulkPut(d.productBatches);
           }
           if (Array.isArray(d.parties)) {
             await db.parties.clear();

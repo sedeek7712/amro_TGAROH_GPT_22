@@ -1560,7 +1560,7 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.amanatRecords, db.journalEntries, db.cashBoxes, db.accounts, db.outbox, db.auditLogs, db.sequences],
+      [db.amanatRecords, db.journalEntries, db.cashBoxes, db.accounts, db.outbox, db.auditLogs, db.sequences, db.branches],
       async () => {
         const record = await db.amanatRecords.get(params.recordId);
         if (!record) {
@@ -2947,7 +2947,7 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.journalEntries, db.accounts, db.cashBoxes, db.outbox, db.auditLogs, db.sequences],
+      [db.journalEntries, db.accounts, db.cashBoxes, db.outbox, db.auditLogs, db.sequences, db.branches],
       async () => {
         const original = await db.journalEntries.get(originalEntryId);
         if (!original) {

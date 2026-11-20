@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { AlertCircle, Building2, Eye, EyeOff, KeyRound, Lock, LogIn, ShieldCheck, User } from 'lucide-react';
+import { AlertCircle, Building2, Eye, EyeOff, KeyRound, Lock, LogIn, ShieldCheck } from 'lucide-react';
 import { validatePasswordStrength } from '../../services/authService';
 import { desktopAuthAdapter } from '../../services/desktopAuthAdapter';
 import type { CommercialActivityId, SystemUser, UserRole } from '../../types/erp';

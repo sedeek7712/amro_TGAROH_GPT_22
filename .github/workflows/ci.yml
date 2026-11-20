@@ -45,6 +45,9 @@ jobs:
       - name: TypeScript typecheck / lint
         run: npm run lint
 
+      - name: Verify UI data-service boundary
+        run: npm run verify:architecture
+
       - name: Run unit & regression tests (node:test)
         run: npm test
 

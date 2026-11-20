@@ -84,3 +84,27 @@ jobs:
 
       - name: Check Electron main, preload and security modules
         run: node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/security/authentication.mjs
+
+  windows-exe-preview:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Install locked application dependencies
+        run: npm ci
+      - name: Build React renderer
+        run: npm run build
+      - name: Package Windows x64 NSIS preview
+        run: npx --yes electron-builder@26.18.1 --win nsis --x64 --publish never
+      - name: Upload Windows EXE preview artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: amro-windows-exe-shell-preview-${{ github.sha }}
+          path: release/windows-preview/*.exe
+          if-no-files-found: error
+          retention-days: 14

@@ -435,6 +435,24 @@ export class DexieDataService implements IDataService {
     return { actor, tenantId, branchId };
   }
 
+  private assertCashBoxBranchAccess(
+    actor: SystemUser,
+    cashBox: CashBox | undefined,
+    targetBranchId: string
+  ): asserts cashBox is CashBox {
+    if (!cashBox) throw new FinancialValidationError('الصندوق المحدد غير موجود.');
+    const boxBranchId = cashBox.branchId?.trim();
+    if (cashBox.isCentral) {
+      assertPermission(actor, 'cashbox:central_access');
+      return;
+    }
+    if (!boxBranchId) throw new FinancialValidationError('الصندوق غير مربوط بفرع؛ يجب تصحيح ربطه قبل استخدامه.');
+    assertBranchAccess(actor, boxBranchId);
+    if (boxBranchId !== targetBranchId) {
+      throw new FinancialValidationError('لا يمكن تنفيذ حركة مالية على صندوق تابع لفرع آخر.');
+    }
+  }
+
   private async getValidAccountCodesSet(): Promise<Set<string>> {
     const accounts = await db.accounts.toArray();
     return new Set(accounts.map((a) => a.code));
@@ -1116,9 +1134,10 @@ export class DexieDataService implements IDataService {
 
   public async updateCashBoxBalance(id: string, deltaBalance: number): Promise<void> {
     await this.ensureReady();
-    this.requireAuthorizedActor('journal:post');
+    const { actor, branchId } = this.requireAuthorizedActor('journal:post');
     await db.transaction('rw', db.cashBoxes, async () => {
       const box = await db.cashBoxes.get(id);
+      this.assertCashBoxBranchAccess(actor, box, branchId);
       if (box) {
         const nextBalance = roundMoney(box.balance + deltaBalance);
         if (nextBalance < 0) {
@@ -1165,6 +1184,7 @@ export class DexieDataService implements IDataService {
         }
 
         const cashBox = await db.cashBoxes.get(voucher.cashBoxId);
+        this.assertCashBoxBranchAccess(actor, cashBox, branchId);
         const targetAccount = await db.accounts.get(voucher.accountCode);
 
         validateVoucherInput({
@@ -1389,6 +1409,7 @@ export class DexieDataService implements IDataService {
         }
 
         const cashBox = record.type === 'CASH' ? await db.cashBoxes.get(effectiveCashBoxId) : undefined;
+        if (record.type === 'CASH') this.assertCashBoxBranchAccess(actor, cashBox, branchId);
         validateAmanatDepositInput({ record, cashBox });
 
         if (!record.recordNumber || !record.recordNumber.trim()) {
@@ -1403,6 +1424,7 @@ export class DexieDataService implements IDataService {
         let createdEntry: JournalEntry | undefined;
         const persistedRecord: AmanatRecord = {
           ...record,
+          branchId,
           status: 'HELD',
           cashBoxId: record.type === 'CASH' ? cashBox!.id : undefined,
           amount: record.type === 'CASH' ? roundMoney(record.amount) : 0,
@@ -1533,7 +1555,6 @@ export class DexieDataService implements IDataService {
     await this.ensureReady();
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('amanat:manage');
 
-    const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
     const terminalCode = storage.getTerminalCode();
 
     return await db.transaction(
@@ -1544,13 +1565,20 @@ export class DexieDataService implements IDataService {
         if (!record) {
           throw new FinancialValidationError('سجل الأمانة المطلوب غير موجود.');
         }
+        const recordBranchId = record.branchId?.trim();
+        assertBranchAccess(actor, recordBranchId || '', { requireTarget: true });
+        if (!recordBranchId) throw new FinancialValidationError('سجل الأمانة غير مربوط بفرع ولا يمكن إرجاعه بأمان.');
+        const recordBranch = await db.branches.get(recordBranchId);
+        if (!recordBranch) throw new FinancialValidationError('فرع سجل الأمانة غير موجود.');
 
         const effectiveBoxId = params.cashBoxId || record.cashBoxId || 'cb-1';
         const cashBox = record.type === 'CASH' ? await db.cashBoxes.get(effectiveBoxId) : undefined;
+        if (record.type === 'CASH') this.assertCashBoxBranchAccess(actor, cashBox, recordBranchId);
         validateAmanatReturnInput({ record, cashBox });
 
         const updatedRecord: AmanatRecord = {
           ...record,
+          branchId: recordBranchId,
           status: 'RETURNED',
           returnedDate: new Date().toISOString().split('T')[0],
           recipientSignatureName: params.recipientSignatureName || record.depositorName,
@@ -1568,7 +1596,7 @@ export class DexieDataService implements IDataService {
 
           const entryNumber = await this.allocateSequenceNumberAtomic(
             'JV',
-            activeBranch.code || 'BR01',
+            recordBranch.code || 'BR01',
             terminalCode,
             tenantId
           );
@@ -1578,7 +1606,7 @@ export class DexieDataService implements IDataService {
             date: updatedRecord.returnedDate!,
             description: `رد وتسليم أمانة نقدية رقم ${updatedRecord.recordNumber} - ${updatedRecord.depositorName}`,
             costCenterId: 'general',
-            branchId,
+            branchId: recordBranchId,
             lines: [
               {
                 id: storage.generateUUID(),
@@ -1624,7 +1652,7 @@ export class DexieDataService implements IDataService {
         await db.outbox.put({
           id: storage.generateUUID(),
           tenantId,
-          branchId,
+          branchId: recordBranchId,
           entityType: 'AMANAT',
           entityId: updatedRecord.id,
           action: 'UPDATE',
@@ -1640,7 +1668,7 @@ export class DexieDataService implements IDataService {
           await db.outbox.put({
             id: storage.generateUUID(),
             tenantId,
-            branchId,
+            branchId: recordBranchId,
             entityType: 'JOURNAL_ENTRY',
             entityId: returnEntry.id,
             action: 'CREATE',
@@ -1660,7 +1688,7 @@ export class DexieDataService implements IDataService {
           userId: actor.id,
           userName: actor.fullName,
           tenantId,
-          branchId,
+          branchId: recordBranchId,
           action: 'رد وتسليم أمانة',
           details: `رد أمانة رقم ${updatedRecord.recordNumber} للمودع ${updatedRecord.depositorName}`,
         });
@@ -2132,12 +2160,8 @@ export class DexieDataService implements IDataService {
           }
         }
 
-        const targetCashBox =
-          invoice.paidAmount > 0 && invoice.cashBoxId
-            ? await db.cashBoxes.get(invoice.cashBoxId)
-            : invoice.cashBoxId
-            ? await db.cashBoxes.get(invoice.cashBoxId)
-            : undefined;
+        const targetCashBox = invoice.cashBoxId ? await db.cashBoxes.get(invoice.cashBoxId) : undefined;
+        if (invoice.paidAmount > 0) this.assertCashBoxBranchAccess(actor, targetCashBox, branchId);
 
         validateSalesInvoiceInput({
           invoice,
@@ -2514,12 +2538,8 @@ export class DexieDataService implements IDataService {
           }
         }
 
-        const targetCashBox =
-          invoice.paidAmount > 0 && invoice.cashBoxId
-            ? await db.cashBoxes.get(invoice.cashBoxId)
-            : invoice.cashBoxId
-            ? await db.cashBoxes.get(invoice.cashBoxId)
-            : undefined;
+        const targetCashBox = invoice.cashBoxId ? await db.cashBoxes.get(invoice.cashBoxId) : undefined;
+        if (invoice.paidAmount > 0) this.assertCashBoxBranchAccess(actor, targetCashBox, branchId);
 
         validatePurchaseInvoiceInput({
           invoice,
@@ -2855,7 +2875,6 @@ export class DexieDataService implements IDataService {
   ): Promise<JournalEntry> {
     await this.ensureReady();
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('journal:reverse');
-    const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
     const terminalCode = storage.getTerminalCode();
 
     if (!reversalReason || !reversalReason.trim()) {
@@ -2873,7 +2892,11 @@ export class DexieDataService implements IDataService {
         if (original.status === 'REVERSED') {
           throw new FinancialValidationError('تم عكس هذا القيد مسبقاً.');
         }
-        assertBranchAccess(actor, original.branchId || '', { requireTarget: true });
+        const originalBranchId = original.branchId?.trim();
+        assertBranchAccess(actor, originalBranchId || '', { requireTarget: true });
+        if (!originalBranchId) throw new FinancialValidationError('القيد الأصلي غير مربوط بفرع؛ لا يمكن عكسه بأمان.');
+        const originalBranch = await db.branches.get(originalBranchId);
+        if (!originalBranch) throw new FinancialValidationError('فرع القيد الأصلي غير موجود.');
         if (original.isAutoGenerated || (original.referenceType && original.referenceType !== 'MANUAL')) {
           throw new FinancialValidationError(
             'لا يمكن عكس قيد ناتج عن فاتورة أو سند أو أمانة من شاشة القيود؛ اعكس المستند الأصلي من وحدته حتى تُعكس آثاره على المخزون والصندوق والأرصدة معاً.'
@@ -2882,7 +2905,7 @@ export class DexieDataService implements IDataService {
 
         const reversalNumber = await this.allocateSequenceNumberAtomic(
           'REV',
-          activeBranch.code || 'BR01',
+          originalBranch.code || 'BR01',
           terminalCode,
           tenantId
         );
@@ -2909,7 +2932,7 @@ export class DexieDataService implements IDataService {
           date: new Date().toISOString().split('T')[0],
           description: `قيد عكسي لتصحيح القيد ${original.entryNumber} - السبب: ${reversalReason}`,
           costCenterId: original.costCenterId,
-          branchId: original.branchId || branchId,
+          branchId: originalBranchId,
           lines: reversedLines,
           status: 'POSTED',
           referenceType: original.referenceType,
@@ -2951,7 +2974,7 @@ export class DexieDataService implements IDataService {
         await db.outbox.put({
           id: storage.generateUUID(),
           tenantId,
-          branchId: original.branchId || branchId,
+          branchId: originalBranchId,
           entityType: 'JOURNAL_ENTRY',
           entityId: original.id,
           action: 'UPDATE',
@@ -2969,7 +2992,7 @@ export class DexieDataService implements IDataService {
           userId: actor.id,
           userName: actor.fullName,
           tenantId,
-          branchId,
+          branchId: originalBranchId,
           action: 'عكس قيد محاسبي',
           details: `إنشاء القيد العكسي ${reversalNumber} لتصحيح ${original.entryNumber}`,
         });

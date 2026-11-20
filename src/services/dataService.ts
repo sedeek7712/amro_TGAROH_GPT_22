@@ -64,6 +64,7 @@ export interface IDataService {
     invoice: Invoice;
     totalCogs: number;
     stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
 
   createPurchaseInvoiceAtomic(params: {
@@ -75,6 +76,7 @@ export interface IDataService {
       batchNumber?: string;
       expiryDate?: string;
     }>;
+    clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
 
   createJournalEntryAtomic(entry: JournalEntry): Promise<JournalEntry>;
@@ -119,27 +121,7 @@ export interface IDataService {
   exportBackupJSON(): Promise<string>;
   importBackupJSON(jsonContent: string): Promise<{ success: boolean; error?: string }>;
 
-  // واجهات العمليات الذرية المستخدمة مباشرة من شاشات النظام.
-  // وجودها في العقد يمنع ربط الواجهة بكلاس تخزين محدد.
-  createSalesInvoiceAtomic(params: {
-    invoice: Invoice;
-    totalCogs: number;
-    stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
-    clientRequestId?: string;
-  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
-
-  createPurchaseInvoiceAtomic(params: {
-    invoice: Invoice;
-    itemsWithBatches: Array<{
-      productId: string;
-      quantity: number;
-      costPrice: number;
-      batchNumber?: string;
-      expiryDate?: string;
-    }>;
-    clientRequestId?: string;
-  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
-
+  // واجهات المجال التي تحتاجها الشاشات، مستقلة عن مزود التخزين.
   saveProductAtomic(product: Product, isUpdate?: boolean): Promise<Product>;
   deleteProductAtomic(productId: string): Promise<void>;
   adjustProductStockAtomic(params: {
@@ -150,8 +132,6 @@ export interface IDataService {
     expiryDate?: string;
   }): Promise<Product>;
   createAccountAtomic(account: Account): Promise<Account>;
-  createJournalEntryAtomic(entry: JournalEntry): Promise<JournalEntry>;
-  reverseJournalEntryAtomic(originalEntryId: string, reversalReason: string): Promise<JournalEntry>;
   createCashBoxAtomic(box: CashBox): Promise<CashBox>;
   createCashVoucherAtomic(params: {
     voucher: PaymentVoucher;

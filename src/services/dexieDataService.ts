@@ -19,6 +19,7 @@ import {
   Invoice,
   JournalEntry,
   JournalEntryLine,
+  StockDeductionRecorded,
   CashBox,
   PaymentVoucher,
   AmanatRecord,
@@ -2176,8 +2177,10 @@ export class DexieDataService implements IDataService {
           cashBox: targetCashBox,
         });
 
-        // ب. التحقق من المخزون وتطبيق خصم التشغيلات وFEFO
+        // ب. التحقق من المخزون وتطبيق خصم التشغيلات وFEFO مع احتساب التكلفة من المصدر الفعلي
         const todayStr = new Date().toISOString().split('T')[0];
+        let actualTotalCogs = 0;
+        const recordedStockDeductions: StockDeductionRecorded[] = [];
 
         for (const deduction of stockDeductions) {
           const product = await db.products.get(deduction.productId);
@@ -2215,6 +2218,17 @@ export class DexieDataService implements IDataService {
                   `الكمية المتاحة في التشغيلة (${batch.batchNumber}) هي ${batch.quantity} فقط.`
                 );
               }
+              if (!Number.isFinite(batch.costPrice) || batch.costPrice < 0) {
+                throw new FinancialValidationError(`تكلفة التشغيلة (${batch.batchNumber}) غير صالحة.`);
+              }
+              actualTotalCogs += deduction.quantity * batch.costPrice;
+              recordedStockDeductions.push({
+                productId: product.id,
+                batchNumber: batch.batchNumber,
+                expiryDate: batch.expiryDate,
+                quantity: deduction.quantity,
+                unitCost: batch.costPrice,
+              });
               batch.quantity = roundMoney(batch.quantity - deduction.quantity, 4);
             } else {
               const validBatches = product.batches
@@ -2232,6 +2246,17 @@ export class DexieDataService implements IDataService {
               for (const batch of validBatches) {
                 if (remainingToDeduct <= 0) break;
                 const deductFromThis = Math.min(batch.quantity, remainingToDeduct);
+                if (!Number.isFinite(batch.costPrice) || batch.costPrice < 0) {
+                  throw new FinancialValidationError(`تكلفة التشغيلة (${batch.batchNumber}) غير صالحة.`);
+                }
+                actualTotalCogs += deductFromThis * batch.costPrice;
+                recordedStockDeductions.push({
+                  productId: product.id,
+                  batchNumber: batch.batchNumber,
+                  expiryDate: batch.expiryDate,
+                  quantity: deductFromThis,
+                  unitCost: batch.costPrice,
+                });
                 batch.quantity = roundMoney(batch.quantity - deductFromThis, 4);
                 remainingToDeduct = roundMoney(remainingToDeduct - deductFromThis, 4);
               }
@@ -2242,12 +2267,25 @@ export class DexieDataService implements IDataService {
               4
             );
           } else {
+            if (!Number.isFinite(product.purchasePrice) || product.purchasePrice < 0) {
+              throw new FinancialValidationError(`تكلفة الصنف (${product.nameAr}) غير صالحة.`);
+            }
+            actualTotalCogs += deduction.quantity * product.purchasePrice;
+            recordedStockDeductions.push({
+              productId: product.id,
+              quantity: deduction.quantity,
+              unitCost: product.purchasePrice,
+            });
             product.currentStock = roundMoney(product.currentStock - deduction.quantity, 4);
           }
 
           validateProductStockConsistency(product);
           await db.products.put(product);
         }
+
+        const normalizedCogs = roundMoney(actualTotalCogs);
+        invoice.totalCogs = normalizedCogs;
+        invoice.stockDeductionsRecorded = recordedStockDeductions;
 
         // ج. تخصيص رقم الفاتورة إذا كان مفقوداً أو مكرراً
         const sameNumberInv = invoice.invoiceNumber
@@ -2293,8 +2331,6 @@ export class DexieDataService implements IDataService {
 
         const normalizedTotal = roundMoney(invoice.total);
         const normalizedPaid = roundMoney(invoice.paidAmount);
-        const normalizedCogs = roundMoney(totalCogs);
-
         if (normalizedPaid > 0 && targetCashBox) {
           const boxAccount = targetCashBox.accountCode;
           const acc = await db.accounts.get(boxAccount);

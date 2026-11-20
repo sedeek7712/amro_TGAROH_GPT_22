@@ -53,17 +53,24 @@ async function runE2ETestSuite() {
   await dexieDataService.initialize();
   const existingUsers = await db.users.toArray();
   const baseAdmin = existingUsers.find((u) => u.role === 'ADMIN') || storage.getUsers()[0];
+  const e2ePassword = 'Admin#E2E2026!';
   const adminActor = {
     ...baseAdmin,
     active: true,
     tenantId: 'tenant_main',
     branchId: 'branch_main',
     allowedBranches: ['branch_main'],
-    passwordHash: baseAdmin.passwordHash || (await hashPassword('Admin#E2E2026!')),
+    passwordHash: await hashPassword(e2ePassword),
     mustChangePassword: false,
   };
   await db.users.put(adminActor);
-  await authService.setAuthenticatedUserForSession(adminActor);
+  const login = await authService.authenticate({
+    username: adminActor.username,
+    password: e2ePassword,
+    users: [adminActor],
+    onUserUpdated: async (updated) => { await db.users.put(updated); },
+  });
+  assert.equal(login.success, true);
 
   // تمويل رصيد افتتاحي للصندوق cb-1 لتغطية مشتريات الاختبار النقدية وفق ضوابط FIN-03
   await db.cashBoxes.update('cb-1', { balance: 10000 });

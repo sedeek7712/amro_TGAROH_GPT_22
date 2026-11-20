@@ -709,6 +709,7 @@ export class DexieDataService implements IDataService {
 
   public async getProductById(id: string): Promise<Product | undefined> {
     await this.ensureReady();
+    this.requireAuthorizedActor('inventory:view');
     return await db.products.get(id);
   }
 
@@ -935,6 +936,7 @@ export class DexieDataService implements IDataService {
 
   public async getPartyById(id: string): Promise<Party | undefined> {
     await this.ensureReady();
+    this.requireAuthorizedActor('party:view');
     return await db.parties.get(id);
   }
 
@@ -1003,7 +1005,10 @@ export class DexieDataService implements IDataService {
 
   public async getInvoiceById(id: string): Promise<Invoice | undefined> {
     await this.ensureReady();
-    return await db.invoices.get(id);
+    const { actor } = this.requireAuthorizedActor('invoices:view');
+    const invoice = await db.invoices.get(id);
+    if (!invoice) return undefined;
+    return filterRecordsByBranchScope([invoice], actor)[0];
   }
 
   public async addInvoice(invoice: Invoice): Promise<void> {
@@ -1047,7 +1052,10 @@ export class DexieDataService implements IDataService {
 
   public async getJournalEntryById(id: string): Promise<JournalEntry | undefined> {
     await this.ensureReady();
-    return await db.journalEntries.get(id);
+    const { actor } = this.requireAuthorizedActor('view:accounting');
+    const entry = await db.journalEntries.get(id);
+    if (!entry) return undefined;
+    return filterRecordsByBranchScope([entry], actor)[0];
   }
 
   public async addJournalEntry(entry: JournalEntry): Promise<void> {
@@ -1348,7 +1356,10 @@ export class DexieDataService implements IDataService {
 
   public async getAmanatById(id: string): Promise<AmanatRecord | undefined> {
     await this.ensureReady();
-    return await db.amanatRecords.get(id);
+    const { actor } = this.requireAuthorizedActor('amanat:view');
+    const record = await db.amanatRecords.get(id);
+    if (!record) return undefined;
+    return filterRecordsByBranchScope([record], actor)[0];
   }
 
   public async createAmanatDepositAtomic(params: {
@@ -1795,8 +1806,10 @@ export class DexieDataService implements IDataService {
 
   public async getCurrentUser(): Promise<SystemUser> {
     const actor = authService.getCurrentActorSync();
-    if (actor) return actor;
-    return storage.getCurrentUser();
+    if (!actor || !authService.getCurrentSessionSync()) {
+      throw new Error('لا يوجد مستخدم مسجل الدخول حالياً.');
+    }
+    return actor;
   }
 
   public async setCurrentUser(user: SystemUser): Promise<void> {
@@ -1815,14 +1828,14 @@ export class DexieDataService implements IDataService {
   }
 
   public async logAction(action: string, details: string): Promise<void> {
-    const actor = authService.getCurrentActorSync();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('view:dashboard');
     const log: SystemAuditLog = {
       id: storage.generateUUID(),
       timestamp: new Date().toISOString(),
-      userId: actor?.id || 'anonymous',
-      userName: actor?.fullName || 'مستخدم غير مصادق',
-      tenantId: actor?.tenantId || 'tenant_main',
-      branchId: actor?.branchId || storage.getActiveBranchId(),
+      userId: actor.id,
+      userName: actor.fullName,
+      tenantId,
+      branchId,
       action,
       details,
     };
@@ -1845,10 +1858,17 @@ export class DexieDataService implements IDataService {
       dependsOn?: string[];
     }
   ): Promise<void> {
-    await syncQueueService.enqueue(item);
+    const { tenantId, branchId } = this.requireAuthorizedActor('sync:manage', item.branchId);
+    await syncQueueService.enqueue({ ...item, tenantId, branchId });
   }
 
   public async markOutboxSynced(id: string): Promise<void> {
+    const { tenantId, actor } = this.requireAuthorizedActor('sync:manage');
+    const item = await db.outbox.get(id);
+    if (!item || item.tenantId !== tenantId) {
+      throw new Error('حظر أمني: عنصر المزامنة غير موجود ضمن المؤسسة الحالية.');
+    }
+    assertBranchAccess(actor, item.branchId || actor.branchId || storage.getActiveBranchId());
     await syncQueueService.markSynced(id);
   }
 

@@ -1,0 +1,16 @@
+export {};
+
+declare global {
+  interface Window {
+    readonly amroDesktop?: {
+      getRuntimeStatus(): Promise<{
+        ready: boolean;
+        databaseFile: string;
+        schemaVersion: number;
+        sqliteVersion: string;
+      }>;
+      createBackup(): Promise<{ success: boolean; filename?: string }>;
+      openBackupFolder(): Promise<{ success: boolean; error?: string }>;
+    };
+  }
+}

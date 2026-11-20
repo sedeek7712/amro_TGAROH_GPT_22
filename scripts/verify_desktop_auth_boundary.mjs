@@ -32,6 +32,13 @@ if (!/requireBridge\(\)/.test(adapter)) {
   failures.push('Desktop adapter must fail closed when the Electron bridge is absent.');
 }
 
+if (!/if\s*\(typeof window !== 'undefined' && window\.amroDesktop\) return;[\s\S]{0,180}let isMounted = true;/.test(read('src/hooks/useLiveDexie.ts'))) {
+  failures.push('Live Dexie hooks must not open IndexedDB in the Electron runtime.');
+}
+if (!/if\s*\(typeof window !== 'undefined' && window\.amroDesktop\) return;[\s\S]{0,150}const timer = setInterval/.test(read('src/hooks/useLiveDexie.ts'))) {
+  failures.push('Dexie init polling must be disabled in the Electron runtime.');
+}
+
 if (failures.length) {
   console.error('FAIL: desktop authentication boundary');
   failures.forEach((message) => console.error(' - ' + message));

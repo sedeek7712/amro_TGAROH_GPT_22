@@ -9,8 +9,6 @@ declare global {
         schemaVersion: number;
         sqliteVersion: string;
       }>;
-      createBackup(): Promise<{ success: boolean; filename?: string }>;
-      openBackupFolder(): Promise<{ success: boolean; error?: string }>;
     };
   }
 }

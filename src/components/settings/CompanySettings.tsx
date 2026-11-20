@@ -5,9 +5,10 @@
 import React, { useState, useRef } from 'react';
 import {
   Building2, Save, CheckCircle, Image, X, Phone, Mail,
-  MapPin, FileText, Hash, Globe,
+  MapPin, FileText, Hash, Globe, AlertCircle,
 } from 'lucide-react';
 import { storage, CompanyProfile } from '../../services/storageService';
+import { CURRENCY_PRESETS, SupportedCurrencyCode } from '../../config/currency';
 
 interface CompanySettingsProps {
   onRefresh: () => void;
@@ -16,6 +17,7 @@ interface CompanySettingsProps {
 export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) => {
   const [profile, setProfile] = useState<CompanyProfile>(() => storage.getCompanyProfile());
   const [saved, setSaved] = useState(false);
+  const [logoError, setLogoError] = useState<string | null>(null);
   const [logoPreview, setLogoPreview] = useState<string | null>(profile.logo || null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -24,11 +26,24 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
     setSaved(false);
   };
 
+  const handleCurrencyPresetChange = (code: SupportedCurrencyCode) => {
+    const preset = CURRENCY_PRESETS[code];
+    if (!preset) return;
+    setProfile((prev) => ({
+      ...prev,
+      currencyCode: preset.code,
+      currency: preset.nameAr,
+      currencySymbol: preset.symbol,
+    }));
+    setSaved(false);
+  };
+
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setLogoError(null);
     const file = e.target.files?.[0];
     if (!file) return;
     if (file.size > 2 * 1024 * 1024) {
-      alert('حجم الصورة يجب أن يكون أقل من 2 ميجابايت');
+      setLogoError('حجم الصورة يجب أن يكون أقل من 2 ميجابايت');
       return;
     }
     const reader = new FileReader();
@@ -103,6 +118,12 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
               </button>
             )}
             <p className="text-[10px] text-slate-400">PNG/JPG، الحجم الأقصى 2MB</p>
+            {logoError && (
+              <div className="flex items-center gap-1.5 text-rose-700 bg-rose-50 border border-rose-200 rounded-lg px-2.5 py-1.5 text-[11px]">
+                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                <span>{logoError}</span>
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -152,8 +173,22 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
       {/* العملة */}
       <div className="bg-white rounded-2xl border border-slate-200 p-5 shadow-sm space-y-4">
         <h2 className="text-sm font-bold text-slate-900 border-b border-slate-100 pb-3 flex items-center gap-2">
-          <FileText className="w-4 h-4 text-slate-500" /> العملة
+          <FileText className="w-4 h-4 text-slate-500" /> العملة الموحدة (CFG-01)
         </h2>
+        <div className="space-y-1.5">
+          <label className="text-xs font-semibold text-slate-700">العملة المعتمدة</label>
+          <select
+            value={profile.currencyCode || 'SAR'}
+            onChange={(e) => handleCurrencyPresetChange(e.target.value as SupportedCurrencyCode)}
+            className="w-full px-3 py-2 text-sm border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 bg-slate-50 text-slate-900 font-semibold"
+          >
+            {Object.values(CURRENCY_PRESETS).map((preset) => (
+              <option key={preset.code} value={preset.code}>
+                {preset.code} — {preset.nameAr} ({preset.symbol})
+              </option>
+            ))}
+          </select>
+        </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {[
             { label: 'اسم العملة', field: 'currency' as keyof CompanyProfile, placeholder: 'ريال سعودي' },

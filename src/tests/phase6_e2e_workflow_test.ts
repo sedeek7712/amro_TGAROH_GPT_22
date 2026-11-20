@@ -23,7 +23,8 @@ if (typeof globalThis.localStorage === 'undefined' || !globalThis.localStorage) 
 import { db } from '../db/erpDatabase';
 import { storage } from '../services/storageService';
 import { dexieDataService } from '../services/dexieDataService';
-import { accounting } from '../services/accountingEngine';
+import { authService, hashPassword } from '../services/authService';
+import { ROLE_ALLOWED_VIEWS } from '../config/rbac';
 import { Product, Invoice, AmanatRecord, Party, JournalEntryLine } from '../types/erp';
 
 interface TestResult {
@@ -48,8 +49,24 @@ async function runE2ETestSuite() {
   console.log('بدء تشغيل حزمة اختبارات دورة العمل الميدانية الشاملة (المرحلة 6)');
   console.log('================================================================\n');
 
-  // تهيئة قواعد البيانات والمصادر الأولية
+  // تهيئة قواعد البيانات والمصادر الأولية وتوثيق جلسة المدير المعتمد للاختبار
   await dexieDataService.initialize();
+  const existingUsers = await db.users.toArray();
+  const baseAdmin = existingUsers.find((u) => u.role === 'ADMIN') || storage.getUsers()[0];
+  const adminActor = {
+    ...baseAdmin,
+    active: true,
+    tenantId: 'tenant_main',
+    branchId: 'branch_main',
+    allowedBranches: ['branch_main'],
+    passwordHash: baseAdmin.passwordHash || (await hashPassword('Admin#E2E2026!')),
+    mustChangePassword: false,
+  };
+  await db.users.put(adminActor);
+  await authService.setAuthenticatedUserForSession(adminActor);
+
+  // تمويل رصيد افتتاحي للصندوق cb-1 لتغطية مشتريات الاختبار النقدية وفق ضوابط FIN-03
+  await db.cashBoxes.update('cb-1', { balance: 10000 });
 
   // -------------------------------------------------------------------------
   // 1. دورة الصيدلية والتشغيلات وتطبيق FEFO
@@ -581,12 +598,13 @@ async function runE2ETestSuite() {
       notes: 'أمانة سفر مؤقتة تسلم لصاحبها بالهوية',
     };
 
-    // 1. تسجيل إيداع الأمانة النقدية
-    const depositEntryId = accounting.postCashAmanatDeposit(cashAmanatRecord, 'cb-1');
-    storage.addAmanatRecord(cashAmanatRecord);
-    await db.amanatRecords.put(cashAmanatRecord);
+    // 1. تسجيل إيداع الأمانة النقدية عبر المعاملة الذرية الموحدة
+    const depResult = await dexieDataService.createAmanatDepositAtomic({
+      record: cashAmanatRecord,
+      cashBoxId: 'cb-1',
+    });
 
-    const depositEntry = storage.getJournalEntries().find((j) => j.id === depositEntryId);
+    const depositEntry = depResult.journalEntry;
     assert(!!depositEntry, 'يجب ترحيل قيد إيداع الأمانة النقدية');
 
     const cashDebitLine = depositEntry?.lines.find((l: JournalEntryLine) => l.accountCode === '1101');
@@ -596,18 +614,14 @@ async function runE2ETestSuite() {
     assert(liabilityCreditLine?.credit === 5000, 'الطرف الدائن يجب أن يكون أمانات نقدية للغير 2102 بمبلغ 5000');
     assert(depositEntry?.costCenterId === 'general', 'مركز التكلفة يجب أن يكون general وليس أي نشاط تجاري');
 
-    // 2. رد الأمانة النقدية وإبراء الذمة
-    const returnedRecord: AmanatRecord = {
-      ...cashAmanatRecord,
-      status: 'RETURNED',
-      returnedDate: new Date().toISOString().split('T')[0],
-    };
+    // 2. رد الأمانة النقدية وإبراء الذمة عبر المعاملة الذرية
+    const retResult = await dexieDataService.returnAmanatAtomic({
+      recordId: depResult.record.id,
+      cashBoxId: 'cb-1',
+      recipientSignatureName: 'أحمد صالح المهري',
+    });
 
-    const returnEntryId = accounting.postCashAmanatReturn(returnedRecord, 'cb-1');
-    storage.updateAmanatRecord(returnedRecord);
-    await db.amanatRecords.put(returnedRecord);
-
-    const returnEntry = storage.getJournalEntries().find((j) => j.id === returnEntryId);
+    const returnEntry = retResult.journalEntry;
     assert(!!returnEntry, 'يجب ترحيل قيد تسوية واسترداد الأمانة');
 
     const liabilityDebitLine = returnEntry?.lines.find((l: JournalEntryLine) => l.accountCode === '2102');
@@ -639,7 +653,7 @@ async function runE2ETestSuite() {
   // 7. دورة الأمانات العينية (Physical Item Custody)
   // -------------------------------------------------------------------------
   try {
-    const initialJournalCount = storage.getJournalEntries().length;
+    const initialJournalCount = (await db.journalEntries.toArray()).length;
     const initialProductsCount = (await db.products.toArray()).length;
 
     const physicalAmanatRecord: AmanatRecord = {
@@ -657,26 +671,23 @@ async function runE2ETestSuite() {
       notes: 'حفظ في الخزنة الأمنية رقم 3',
     };
 
-    storage.addAmanatRecord(physicalAmanatRecord);
-    await db.amanatRecords.put(physicalAmanatRecord);
+    await dexieDataService.createAmanatDepositAtomic({ record: physicalAmanatRecord });
 
     const savedAmanat = await db.amanatRecords.get(physicalAmanatRecord.id);
     assert(savedAmanat?.status === 'HELD', 'يجب حفظ الأمانة العينية بحالة HELD');
 
     // التحقق الصارم: الأمانة العينية يجب ألا تنشئ أي قيد مالي أو تغير في المخزون التجاري
-    const postJournalCount = storage.getJournalEntries().length;
+    const postJournalCount = (await db.journalEntries.toArray()).length;
     const postProductsCount = (await db.products.toArray()).length;
 
     assert(postJournalCount === initialJournalCount, 'الأمانات العينية ممنوع أن تنشئ أي قيد محاسبي في الدفاتر المالية');
     assert(postProductsCount === initialProductsCount, 'الأمانات العينية ممنوع أن تدخل في جدول المخزون السلعي التجاري');
 
     // إرجاع الأمانة العينية
-    if (savedAmanat) {
-      savedAmanat.status = 'RETURNED';
-      savedAmanat.returnedDate = new Date().toISOString().split('T')[0];
-      await db.amanatRecords.put(savedAmanat);
-      storage.updateAmanatRecord(savedAmanat);
-    }
+    await dexieDataService.returnAmanatAtomic({
+      recordId: physicalAmanatRecord.id,
+      recipientSignatureName: 'سعيد عبد الله الحضرمي',
+    });
 
     const finalAmanat = await db.amanatRecords.get(physicalAmanatRecord.id);
     assert(finalAmanat?.status === 'RETURNED', 'يجب أن تصبح حالة الأمانة العينية RETURNED بعد التسليم');
@@ -704,7 +715,7 @@ async function runE2ETestSuite() {
   // 8. التحقق من سلامة ميزان المراجعة وتوازن القيد المزدوج الإجمالي
   // -------------------------------------------------------------------------
   try {
-    const allEntries = storage.getJournalEntries();
+    const allEntries = await db.journalEntries.toArray();
     assert(allEntries.length > 0, 'يجب توفر قيود مرحلة في الدفاتر');
 
     let totalLedgerDebit = 0;
@@ -751,7 +762,8 @@ async function runE2ETestSuite() {
   // 9. التحقق من التصحيح بالقيد العكسي دون المساس بالقيد الأصلي
   // -------------------------------------------------------------------------
   try {
-    const sampleEntry = storage.getJournalEntries().find((j) => j.status === 'POSTED');
+    const entriesInDb = await db.journalEntries.toArray();
+    const sampleEntry = entriesInDb.find((j) => j.status === 'POSTED');
     assert(!!sampleEntry, 'يجب توفر قيد مرحل لاختبار العكس');
 
     const originalId = sampleEntry!.id;
@@ -790,15 +802,7 @@ async function runE2ETestSuite() {
   // 10. التحقق من حماية مسارات الواجهة ومصفوفة الصلاحيات (RBAC Navigation Guard)
   // -------------------------------------------------------------------------
   try {
-    // مصفوفة الصلاحيات المعتمدة في الواجهة
-    const roleAllowedViews: Record<string, string[]> = {
-      ADMIN: ['dashboard', 'pos', 'inventory', 'accounting', 'amanat', 'reports', 'users', 'sync'],
-      ACCOUNTANT: ['dashboard', 'pos', 'inventory', 'accounting', 'amanat', 'reports', 'sync'],
-      CASHIER: ['dashboard', 'pos', 'inventory'],
-      INVENTORY_KEEPER: ['dashboard', 'inventory', 'reports'],
-    };
-
-    const cashierViews = roleAllowedViews['CASHIER'];
+    const cashierViews = ROLE_ALLOWED_VIEWS.CASHIER;
 
     assert(cashierViews.includes('pos'), 'الكاشير يجب أن يصل لنقاط البيع');
     assert(cashierViews.includes('inventory'), 'الكاشير يجب أن يصل للمخزون');
@@ -806,8 +810,8 @@ async function runE2ETestSuite() {
     assert(!cashierViews.includes('users'), 'الكاشير ممنوع قطعياً من إدارة المستخدمين والصلاحيات');
     assert(!cashierViews.includes('reports'), 'الكاشير ممنوع من التقارير المالية والأرباح');
 
-    const adminViews = roleAllowedViews['ADMIN'];
-    assert(adminViews.length === 8, 'المدير العام يملك الصلاحية الكاملة على جميع شاشات النظام');
+    const adminViews = ROLE_ALLOWED_VIEWS.ADMIN;
+    assert(adminViews.length === 12, `المدير العام يملك الصلاحية الكاملة على جميع شاشات النظام (12 شاشة)، الفعلي: ${adminViews.length}`);
 
     testResults.push({
       stepNumber: 10,

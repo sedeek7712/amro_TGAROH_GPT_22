@@ -21,7 +21,9 @@ import {
   Check,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { accounting } from '../../services/accountingEngine';
+import { dexieDataService } from '../../services/dexieDataService';
+import { authService } from '../../services/authService';
+import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveAmanatRecords, useLiveCashBoxes } from '../../hooks/useLiveDexie';
 import { AmanatRecord, AmanatType, AmanatStatus } from '../../types/erp';
 import { AmanatReceiptModal } from '../common/AmanatReceiptModal';
@@ -37,6 +39,8 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
   const [selectedRecordToPrint, setSelectedRecordToPrint] = useState<AmanatRecord | null>(null);
   const [returnConfirmRecord, setReturnConfirmRecord] = useState<AmanatRecord | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [returnError, setReturnError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // حقول نموذج إيداع الأمانة
   const [depositorName, setDepositorName] = useState('');
@@ -51,7 +55,8 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
 
   const records = useLiveAmanatRecords();
   const cashBoxes = useLiveCashBoxes();
-  const currentUser = storage.getCurrentUser();
+  const currentUser = authService.getCurrentActorSync() || storage.getCurrentUser();
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   // تصفية السجلات
   const filteredRecords = records.filter((r) => {
@@ -80,8 +85,9 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
   const heldItemsCount = records.filter((r) => r.status === 'HELD' && r.type === 'ITEM').length;
   const returnedCount = records.filter((r) => r.status === 'RETURNED').length;
 
-  const handleCreateDeposit = (e: React.FormEvent) => {
+  const handleCreateDeposit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError(null);
     if (!depositorName.trim() || !depositorPhone.trim()) {
       setFormError('يرجى إدخال اسم المودع ورقم الهاتف.');
@@ -94,73 +100,79 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
       return;
     }
 
-    const count = records.length + 1;
-    const recordNumber = `AMN-${new Date().getFullYear()}-${String(count).padStart(5, '0')}`;
-
+    const targetBox = depositType === 'CASH' ? cashBoxId || cashBoxes[0]?.id || 'cb-1' : undefined;
     const newRecord: AmanatRecord = {
       id: storage.generateUUID(),
-      recordNumber,
-      depositorName,
-      depositorPhone,
-      depositorNationalId: depositorNationalId || undefined,
+      recordNumber: '',
+      depositorName: depositorName.trim(),
+      depositorPhone: depositorPhone.trim(),
+      depositorNationalId: depositorNationalId.trim() || undefined,
       type: depositType,
       amount: parsedAmount,
-      itemDescription: depositType === 'ITEM' ? itemDescription : undefined,
-      itemSerial: depositType === 'ITEM' ? itemSerial : undefined,
+      itemDescription: depositType === 'ITEM' ? itemDescription.trim() : undefined,
+      itemSerial: depositType === 'ITEM' ? itemSerial.trim() || undefined : undefined,
       status: 'HELD',
       receivedDate: new Date().toISOString().split('T')[0],
       receivedBy: currentUser?.fullName || 'الموظف المختص',
-      notes: notes || undefined,
+      cashBoxId: targetBox,
+      notes: notes.trim() || undefined,
     };
 
-    // إن كانت أمانة نقدية، نرحل قيداً محاسبياً تلقائياً لحفظ الالتزام في الخصوم المتداولة
-    if (depositType === 'CASH') {
-      const targetBox = cashBoxId || cashBoxes[0]?.id || 'cb-1';
-      accounting.postCashAmanatDeposit(newRecord, targetBox);
+    setIsSubmitting(true);
+    try {
+      const res = await dexieDataService.createAmanatDepositAtomic({
+        record: newRecord,
+        cashBoxId: targetBox,
+      });
+      setIsDepositModalOpen(false);
+      setSelectedRecordToPrint(res.record);
+
+      // تصفير النموذج
+      setDepositorName('');
+      setDepositorPhone('');
+      setDepositorNationalId('');
+      setAmount('');
+      setItemDescription('');
+      setItemSerial('');
+      setNotes('');
+      setFormError(null);
+      onRefresh();
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'تعذر تسجيل إيداع الأمانة.');
+    } finally {
+      setIsSubmitting(false);
     }
-
-    storage.addAmanatRecord(newRecord);
-    setIsDepositModalOpen(false);
-    setSelectedRecordToPrint(newRecord);
-
-    // تصفير النموذج
-    setDepositorName('');
-    setDepositorPhone('');
-    setDepositorNationalId('');
-    setAmount('');
-    setItemDescription('');
-    setItemSerial('');
-    setNotes('');
-    setFormError(null);
-    onRefresh();
   };
 
   // فتح نافذة تأكيد تسليم الأمانة وإبراء الذمة
   const handleReturnAmanat = (record: AmanatRecord) => {
+    setReturnError(null);
     setReturnConfirmRecord(record);
   };
 
   // تنفيذ تسليم الأمانة بعد التأكيد في الواجهة
-  const confirmReturnAmanat = () => {
-    if (!returnConfirmRecord) return;
+  const confirmReturnAmanat = async () => {
+    if (!returnConfirmRecord || isSubmitting) return;
     const record = returnConfirmRecord;
+    setReturnError(null);
+    setIsSubmitting(true);
 
-    const updated: AmanatRecord = {
-      ...record,
-      status: 'RETURNED',
-      returnedDate: new Date().toISOString().split('T')[0],
-    };
-
-    // إن كانت أمانة نقدية، نرحل قيد صرف تسوية الأمانة
-    if (record.type === 'CASH') {
-      const targetBox = cashBoxes[0]?.id || 'cb-1';
-      accounting.postCashAmanatReturn(updated, targetBox);
+    try {
+      const targetBox =
+        record.type === 'CASH' ? record.cashBoxId || cashBoxes[0]?.id || 'cb-1' : undefined;
+      const res = await dexieDataService.returnAmanatAtomic({
+        recordId: record.id,
+        cashBoxId: targetBox,
+        recipientSignatureName: record.depositorName,
+      });
+      setSelectedRecordToPrint(res.record);
+      setReturnConfirmRecord(null);
+      onRefresh();
+    } catch (err: unknown) {
+      setReturnError(err instanceof Error ? err.message : 'تعذر تنفيذ عملية تسليم الأمانة.');
+    } finally {
+      setIsSubmitting(false);
     }
-
-    storage.updateAmanatRecord(updated);
-    setSelectedRecordToPrint(updated);
-    setReturnConfirmRecord(null);
-    onRefresh();
   };
 
   return (
@@ -173,7 +185,7 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
             <DollarSign className="w-4 h-4 text-purple-600" />
           </div>
           <div className="text-2xl font-bold font-mono tabular-nums text-purple-950">
-            {heldCashTotal.toFixed(2)} <span className="text-xs font-normal text-slate-500">ر.س</span>
+            {heldCashTotal.toFixed(2)} <span className="text-xs font-normal text-slate-500">{currencySymbol}</span>
           </div>
           <div className="text-[11px] text-purple-700 mt-2">
             معزولة كخصوم في الحساب المحاسبي (2102)
@@ -307,7 +319,7 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
                     <td className="py-3 px-4">
                       {r.type === 'CASH' ? (
                         <div className="font-mono tabular-nums font-bold text-slate-900 text-sm">
-                          {r.amount.toFixed(2)} ر.س
+                          {r.amount.toFixed(2)} {currencySymbol}
                         </div>
                       ) : (
                         <div>
@@ -450,7 +462,7 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
               {depositType === 'CASH' ? (
                 <div className="p-3 bg-purple-50 rounded-lg border border-purple-200 space-y-3">
                   <div>
-                    <label className="block font-semibold text-purple-900 mb-1">المبلغ المودع نقداً (ر.س) *</label>
+                    <label className="block font-semibold text-purple-900 mb-1">المبلغ المودع نقداً ({currencySymbol}) *</label>
                     <input
                       type="number"
                       step="any"
@@ -524,10 +536,11 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 text-white font-bold rounded-lg transition-colors flex items-center gap-1.5"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-purple-700 hover:bg-purple-800 disabled:bg-slate-300 text-white font-bold rounded-lg transition-colors flex items-center gap-1.5"
                 >
                   <Check className="w-4 h-4" />
-                  <span>حفظ وإصدار سند الأمانة</span>
+                  <span>{isSubmitting ? 'جارٍ الحفظ...' : 'حفظ وإصدار سند الأمانة'}</span>
                 </button>
               </div>
             </form>
@@ -543,6 +556,12 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
               <ShieldCheck className="w-6 h-6 shrink-0" />
               <h3 className="text-base font-bold text-slate-900">تأكيد تسليم الأمانة وإبراء الذمة</h3>
             </div>
+            {returnError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{returnError}</span>
+              </div>
+            )}
             <p className="text-sm text-slate-600 leading-relaxed">
               هل تؤكد تسليم وإبراء ذمة الأمانة رقم{' '}
               <span className="font-mono font-bold text-slate-900">({returnConfirmRecord.recordNumber})</span>{' '}
@@ -550,25 +569,29 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
               <span className="font-bold text-slate-900">({returnConfirmRecord.depositorName})</span>؟
               {returnConfirmRecord.type === 'CASH' && (
                 <span className="block mt-2 text-xs font-semibold text-purple-700 bg-purple-50 p-2 rounded">
-                  سيتم توليد قيد صرف محاسبي لتسوية التزام الأمانة وخفض الصندوق بمبلغ ({returnConfirmRecord.amount.toFixed(2)} ر.س).
+                  سيتم توليد قيد صرف محاسبي لتسوية التزام الأمانة وخفض الصندوق بمبلغ ({returnConfirmRecord.amount.toFixed(2)} {currencySymbol}).
                 </span>
               )}
             </p>
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
               <button
                 type="button"
-                onClick={() => setReturnConfirmRecord(null)}
+                onClick={() => {
+                  setReturnError(null);
+                  setReturnConfirmRecord(null);
+                }}
                 className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors text-xs font-semibold"
               >
                 إلغاء
               </button>
               <button
                 type="button"
+                disabled={isSubmitting}
                 onClick={confirmReturnAmanat}
-                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg transition-colors text-xs font-bold flex items-center gap-1.5"
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg transition-colors text-xs font-bold flex items-center gap-1.5"
               >
                 <Check className="w-4 h-4" />
-                <span>تأكيد التسليم والإبراء</span>
+                <span>{isSubmitting ? 'جارٍ التسليم...' : 'تأكيد التسليم والإبراء'}</span>
               </button>
             </div>
           </div>

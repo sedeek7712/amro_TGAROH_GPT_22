@@ -26,6 +26,7 @@ import {
   Download,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
+import { getActiveCurrencyConfig } from '../../config/currency';
 
 export interface CustomerNotificationModalProps {
   isOpen: boolean;
@@ -70,6 +71,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   const activeBranch = storage.getBranches().find((b) => b.id === storage.getActiveBranchId());
   const companyName = 'نظام الإدارة التجارية والمحاسبية المتكامل';
   const branchName = activeBranch ? activeBranch.nameAr : 'الفرع الرئيسي';
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   const docTypeLabels: Record<CustomerNotificationModalProps['documentType'], string> = {
     INVOICE: 'فاتورة مبيعات ضريبية',
@@ -98,7 +100,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     }
 
     if (amount !== undefined && amount !== null) {
-      lines.push(`💰 المبلغ: *${amount.toFixed(2)} ر.س*`);
+      lines.push(`💰 المبلغ: *${amount.toFixed(2)} ${currencySymbol}*`);
     }
 
     if (itemsSummary) {
@@ -106,7 +108,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     }
 
     if (balanceRemaining !== undefined && balanceRemaining !== null) {
-      lines.push(`📊 الرصيد المتبقي بذمتكم: *${balanceRemaining.toFixed(2)} ر.س*`);
+      lines.push(`📊 الرصيد المتبقي بذمتكم: *${balanceRemaining.toFixed(2)} ${currencySymbol}*`);
     }
 
     if (notes && notes.trim()) {
@@ -143,9 +145,8 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     }
   };
 
-  const handleSendWhatsApp = () => {
+  const buildWhatsAppUrl = (): string => {
     let cleanPhone = phone.replace(/[^\d+]/g, '');
-    // إن لم يبتدئ بمفتاح دولي، نضيف الافتراضي إذا لزم
     if (cleanPhone.startsWith('05')) {
       cleanPhone = '966' + cleanPhone.slice(1);
     } else if (cleanPhone.startsWith('7') && cleanPhone.length === 9) {
@@ -153,11 +154,9 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     }
 
     const encoded = encodeURIComponent(customMessage);
-    const waUrl = cleanPhone
+    return cleanPhone
       ? `https://wa.me/${cleanPhone}?text=${encoded}`
       : `https://api.whatsapp.com/send?text=${encoded}`;
-
-    window.open(waUrl, '_blank');
   };
 
   const handleShareNative = async () => {
@@ -242,7 +241,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
             {amount !== undefined && (
               <div className="flex items-center gap-1 text-emerald-800 font-bold">
                 <span>المبلغ:</span>
-                <span className="font-mono text-sm tabular-nums">{amount.toFixed(2)} ر.س</span>
+                <span className="font-mono text-sm tabular-nums">{amount.toFixed(2)} {currencySymbol}</span>
               </div>
             )}
           </div>
@@ -270,14 +269,15 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
           {/* Action Buttons */}
           <div className="space-y-2 pt-2 border-t border-slate-100">
             {/* Primary Action: WhatsApp */}
-            <button
-              type="button"
-              onClick={handleSendWhatsApp}
+            <a
+              href={buildWhatsAppUrl()}
+              target="_blank"
+              rel="noopener noreferrer"
               className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 text-sm"
             >
               <Send className="w-4 h-4" />
               <span>إرسال إشعار عبر واتساب مباشرة (WhatsApp)</span>
-            </button>
+            </a>
 
             {/* Secondary Actions: Copy & Native Share & Print */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">

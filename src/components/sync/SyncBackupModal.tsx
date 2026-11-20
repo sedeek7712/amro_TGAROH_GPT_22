@@ -58,6 +58,14 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
   const [activeTab, setActiveTab] = useState<SyncTab>('outbox');
   const [outboxFilter, setOutboxFilter] = useState<OutboxQueueItem['status'] | 'all'>('all');
   const liveOutboxItems = useLiveOutbox(outboxFilter);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error' | 'info'; text: string } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{
+    title: string;
+    message: string;
+    danger?: boolean;
+    onConfirm: () => Promise<void> | void;
+  } | null>(null);
+  const [isWorking, setIsWorking] = useState(false);
 
   // حالة الفروع ونقاط البيع
   const [activeBranchId, setActiveBranchId] = useState<string>(() => storage.getActiveBranchId());
@@ -142,43 +150,61 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
   };
 
   const handleRetryFailed = async () => {
+    setFeedback(null);
     const count = await syncQueueService.retryFailedItems();
     if (count > 0) {
-      alert(`تمت إعادة جدولة ${count} حركة متعثرة لإعادة المحاولة فوراً.`);
+      setFeedback({ type: 'success', text: `تمت إعادة جدولة ${count} حركة متعثرة لإعادة المحاولة فوراً.` });
     } else {
-      alert('لا توجد حركات متعثرة حالياً.');
+      setFeedback({ type: 'info', text: 'لا توجد حركات متعثرة حالياً.' });
     }
     onRefresh();
   };
 
-  const handlePurgeOldSynced = async () => {
-    if (confirm('هل ترغب بتنظيف سجلات طابور المزامنة الناجحة التي مر عليها أكثر من 30 يوماً؟ لن يتم مس أي سجل معلق أو فاشل.')) {
-      const count = await syncQueueService.purgeOldSyncedRecords(30);
-      alert(`تم تنظيف ${count} سجل مزامنة ناجح وقديم.`);
-      onRefresh();
-    }
+  const handlePurgeOldSynced = () => {
+    setConfirmModal({
+      title: 'تنظيف سجلات المزامنة القديمة',
+      message: 'هل ترغب بتنظيف سجلات طابور المزامنة الناجحة التي مر عليها أكثر من 30 يوماً؟ لن يتم مس أي سجل معلق أو فاشل.',
+      onConfirm: async () => {
+        const count = await syncQueueService.purgeOldSyncedRecords(30);
+        setFeedback({ type: 'success', text: `تم تنظيف ${count} سجل مزامنة ناجح وقديم.` });
+        onRefresh();
+      },
+    });
   };
 
   // دوال إدارة الفروع ونقاط البيع
-  const handleSelectActiveBranch = (branchId: string) => {
-    storage.setActiveBranchId(branchId);
-    setActiveBranchId(branchId);
-    const cfg = djangoSync.getConfig();
-    cfg.branchId = branchId;
-    djangoSync.saveConfig(cfg);
-    alert(`تم تحويل نقطة البيع / الجهاز الحالي ليعمل تحت مظلة الفرع: ${branches.find((b) => b.id === branchId)?.nameAr || branchId}`);
-    onRefresh();
+  const handleSelectActiveBranch = async (branchId: string) => {
+    setFeedback(null);
+    try {
+      await dexieDataService.setActiveBranchId(branchId);
+      setActiveBranchId(branchId);
+      const cfg = djangoSync.getConfig();
+      cfg.branchId = branchId;
+      djangoSync.saveConfig(cfg);
+      setFeedback({
+        type: 'success',
+        text: `تم تحويل نقطة البيع / الجهاز الحالي ليعمل تحت مظلة الفرع: ${branches.find((b) => b.id === branchId)?.nameAr || branchId}`,
+      });
+      onRefresh();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'غير مصرح بالوصول إلى هذا الفرع.';
+      setFeedback({ type: 'error', text: msg });
+    }
   };
 
   const handleCreateBranch = async (e: React.FormEvent) => {
     e.preventDefault();
+    setFeedback(null);
     if (!newBranchName.trim()) {
-      alert('يرجى كتابة اسم الفرع.');
+      setFeedback({ type: 'error', text: 'يرجى كتابة اسم الفرع.' });
       return;
     }
     const cleanCode = (newBranchCode.trim() || `BR${String(branches.length + 1).padStart(2, '0')}`).toUpperCase();
     if (branches.some((b) => b.code === cleanCode)) {
-      alert(`كود الفرع (${cleanCode}) مسجل مسبقاً! يرجى اختيار كود فريد لمنع تداخل أرقام الفواتير.`);
+      setFeedback({
+        type: 'error',
+        text: `كود الفرع (${cleanCode}) مسجل مسبقاً! يرجى اختيار كود فريد لمنع تداخل أرقام الفواتير.`,
+      });
       return;
     }
 
@@ -193,15 +219,23 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
       createdAt: new Date().toISOString(),
     };
 
-    await dexieDataService.addBranch(branch);
-    setShowAddBranch(false);
-    setNewBranchName('');
-    setNewBranchCode('');
-    setNewBranchAddress('');
-    setNewBranchPhone('');
-    setNewBranchIsMain(false);
-    alert(`تمت إضافة الفرع (${branch.nameAr}) بنجاح وتسجيله في طابور Outbox!`);
-    onRefresh();
+    try {
+      await dexieDataService.addBranch(branch);
+      setShowAddBranch(false);
+      setNewBranchName('');
+      setNewBranchCode('');
+      setNewBranchAddress('');
+      setNewBranchPhone('');
+      setNewBranchIsMain(false);
+      setFeedback({
+        type: 'success',
+        text: `تمت إضافة الفرع (${branch.nameAr}) بنجاح وتسجيله في طابور Outbox!`,
+      });
+      onRefresh();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'تعذر إضافة الفرع.';
+      setFeedback({ type: 'error', text: msg });
+    }
   };
 
   // دوال Supabase
@@ -219,7 +253,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
 
   const handleSaveSupabaseConfig = () => {
     supabaseSync.saveConfig(supabaseConfig);
-    alert('تم حفظ إعدادات الربط السحابي (Supabase) واسم الجهاز بنجاح.');
+    setFeedback({ type: 'success', text: 'تم حفظ إعدادات الربط السحابي (Supabase) واسم الجهاز بنجاح.' });
   };
 
   const handleFullCloudSync = async () => {
@@ -247,14 +281,18 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
 
   const handlePullDeltaOnly = async () => {
     setIsSyncingCloud(true);
+    setFeedback(null);
     try {
       const res = await supabaseSync.pullDeltaFromSupabase();
-      alert(`اكتمل جلب التحديثات السحابية: تم تنزيل وتحديث ${res.pulled} سجل، ورُصد ${res.conflicts} تعارض لحماية التعديلات المحلية.`);
+      setFeedback({
+        type: res.errors.length > 0 ? 'error' : 'success',
+        text: `اكتمل جلب التحديثات السحابية: تم تنزيل وتحديث ${res.pulled} سجل، ورُصد ${res.conflicts} تعارض لحماية التعديلات المحلية.${res.errors.length ? ' (' + res.errors[0] + ')' : ''}`,
+      });
       setSupabaseConfig(supabaseSync.getConfig());
       onRefresh();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'خطأ غير متوقع';
-      alert(`فشل جلب التحديثات: ${msg}`);
+      setFeedback({ type: 'error', text: `فشل جلب التحديثات: ${msg}` });
     } finally {
       setIsSyncingCloud(false);
     }
@@ -286,38 +324,57 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
 
   const handleSaveConfig = () => {
     djangoSync.saveConfig(syncConfig);
-    alert('تم حفظ إعدادات خادم Django بنجاح.');
+    setFeedback({ type: 'success', text: 'تم حفظ إعدادات خادم Django بنجاح.' });
   };
 
-  // النسخ الاحتياطي JSON
-  const handleDownloadJsonBackup = () => {
-    const jsonStr = storage.exportFullBackupJSON();
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `multi_activity_erp_backup_${new Date().toISOString().split('T')[0]}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+  // النسخ الاحتياطي JSON عبر المحرك الذري Dexie
+  const handleDownloadJsonBackup = async () => {
+    setFeedback(null);
+    setIsWorking(true);
+    try {
+      const jsonStr = await dexieDataService.exportBackupJSON();
+      const blob = new Blob([jsonStr], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `multi_activity_erp_backup_${new Date().toISOString().split('T')[0]}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setFeedback({ type: 'success', text: 'تم تصدير النسخة الاحتياطية الكاملة مع التحقق Checksum بنجاح.' });
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'تعذر تصدير النسخة الاحتياطية.';
+      setFeedback({ type: 'error', text: msg });
+    } finally {
+      setIsWorking(false);
+    }
   };
 
   const handleImportJsonBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    e.target.value = '';
 
     const reader = new FileReader();
     reader.onload = (event) => {
       const content = event.target?.result as string;
       if (content) {
-        if (confirm('تنبيه: سيؤدي استيراد النسخة الاحتياطية إلى استبدال البيانات الحالية. هل ترغب بالاستمرار؟')) {
-          const res = storage.importBackupJSON(content);
-          if (res.success) {
-            alert('تم استيراد النسخة الاحتياطية بنجاح!');
-            onRefresh();
-          } else {
-            alert(`فشل استيراد النسخة الاحتياطية: ${res.error || 'الملف تالف أو غير صالح'}`);
-          }
-        }
+        setConfirmModal({
+          title: 'تأكيد استعادة النسخة الاحتياطية',
+          message: 'تنبيه: سيؤدي استيراد النسخة الاحتياطية إلى استبدال البيانات الحالية في IndexedDB بعد التحقق من سلامة Checksum. هل ترغب بالاستمرار؟',
+          danger: true,
+          onConfirm: async () => {
+            const res = await dexieDataService.importBackupJSON(content);
+            if (res.success) {
+              setFeedback({ type: 'success', text: 'تمت استعادة النسخة الاحتياطية بنجاح!' });
+              onRefresh();
+            } else {
+              setFeedback({
+                type: 'error',
+                text: `فشل استيراد النسخة الاحتياطية: ${res.error || 'الملف تالف أو غير صالح'}`,
+              });
+            }
+          },
+        });
       }
     };
     reader.readAsText(file);
@@ -330,15 +387,21 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
   };
 
   const handleResetCleanBooks = () => {
-    if (
-      confirm(
-        'تحذير فائق الأهمية: هل أنت متأكد من تصفير كافة المعاملات والبدء بدفاتر بيضاء نظيفة تماماً؟'
-      )
-    ) {
-      storage.resetToCleanBooks();
-      alert('تمت تهيئة الدفاتر من جديد نظيفة وبيضاء بنجاح.');
-      onRefresh();
-    }
+    setConfirmModal({
+      title: 'تحذير: تصفير الدفاتر التشغيلية',
+      message: 'تحذير فائق الأهمية: هل أنت متأكد من تصفير كافة المعاملات والبدء بدفاتر بيضاء نظيفة تماماً؟ لا يمكن التراجع عن هذه العملية.',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          await dexieDataService.resetToCleanBooks();
+          setFeedback({ type: 'success', text: 'تمت تهيئة الدفاتر من جديد نظيفة وبيضاء بنجاح.' });
+          onRefresh();
+        } catch (err: unknown) {
+          const msg = err instanceof Error ? err.message : 'تعذر تصفير الدفاتر.';
+          setFeedback({ type: 'error', text: msg });
+        }
+      },
+    });
   };
 
   const entityLabels: Record<string, string> = {
@@ -392,6 +455,35 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
           </button>
         </div>
       </div>
+
+      {feedback && (
+        <div
+          role="alert"
+          className={`flex items-center justify-between gap-3 px-4 py-3 rounded-xl border text-xs font-bold ${
+            feedback.type === 'error'
+              ? 'bg-rose-50 border-rose-200 text-rose-800'
+              : feedback.type === 'success'
+              ? 'bg-emerald-50 border-emerald-200 text-emerald-800'
+              : 'bg-blue-50 border-blue-200 text-blue-800'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {feedback.type === 'error' ? (
+              <AlertCircle className="w-4 h-4 shrink-0" />
+            ) : (
+              <CheckCircle className="w-4 h-4 shrink-0" />
+            )}
+            <span>{feedback.text}</span>
+          </div>
+          <button
+            type="button"
+            onClick={() => setFeedback(null)}
+            className="text-current opacity-70 hover:opacity-100 px-2"
+          >
+            إغلاق
+          </button>
+        </div>
+      )}
 
       {/* Tabs Navigation */}
       <div className="flex items-center gap-2 border-b border-slate-200 pb-2 overflow-x-auto">
@@ -1594,6 +1686,49 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
             </div>
             <div className="p-4 overflow-y-auto flex-1 bg-slate-950 font-mono text-amber-300 text-xs leading-relaxed select-text">
               <pre>{sqlScript}</pre>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Confirmation Modal replacing window.confirm */}
+      {confirmModal && (
+        <div className="fixed inset-0 z-50 bg-slate-900/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+            <div className="flex items-center gap-2.5">
+              <div className={`p-2 rounded-lg ${confirmModal.danger ? 'bg-rose-100 text-rose-700' : 'bg-blue-100 text-blue-700'}`}>
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <h3 className="font-bold text-sm text-slate-900">{confirmModal.title}</h3>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">{confirmModal.message}</p>
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                disabled={isWorking}
+                onClick={() => setConfirmModal(null)}
+                className="px-4 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100 rounded-lg"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={isWorking}
+                onClick={async () => {
+                  setIsWorking(true);
+                  try {
+                    await confirmModal.onConfirm();
+                  } finally {
+                    setIsWorking(false);
+                    setConfirmModal(null);
+                  }
+                }}
+                className={`px-4 py-2 text-xs font-bold text-white rounded-lg ${
+                  confirmModal.danger ? 'bg-rose-600 hover:bg-rose-700' : 'bg-slate-900 hover:bg-slate-800'
+                }`}
+              >
+                {isWorking ? 'جارٍ التنفيذ...' : 'تأكيد'}
+              </button>
             </div>
           </div>
         </div>

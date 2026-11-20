@@ -21,7 +21,8 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { accounting } from '../../services/accountingEngine';
+import { dexieDataService } from '../../services/dexieDataService';
+import { getActiveCurrencyConfig } from '../../config/currency';
 import {
   useLiveCashBoxes,
   useLiveVouchers,
@@ -36,10 +37,14 @@ interface CashManagerProps {
 }
 
 export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
+  const currencySymbol = getActiveCurrencyConfig().symbol;
   const [activeTab, setActiveTab] = useState<'boxes' | 'receipts' | 'payments'>('boxes');
   const [isVoucherModalOpen, setIsVoucherModalOpen] = useState(false);
   const [voucherType, setVoucherType] = useState<VoucherType>('RECEIPT');
   const [voucherError, setVoucherError] = useState<string | null>(null);
+  const [boxError, setBoxError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [printableVoucher, setPrintableVoucher] = useState<PaymentVoucher | null>(null);
 
   // حقول نموذج السند
   const [voucherAmount, setVoucherAmount] = useState('');
@@ -119,129 +124,92 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
   };
 
   const handlePrintVoucher = (v: PaymentVoucher) => {
-    const isReceipt = v.type === 'RECEIPT';
-    const box = cashBoxes.find((b) => b.id === v.cashBoxId);
-    const printWindow = window.open('', '_blank', 'width=800,height=600');
-    if (!printWindow) {
-      window.print();
-      return;
-    }
-    printWindow.document.write(`
-      <!DOCTYPE html>
-      <html dir="rtl" lang="ar">
-        <head>
-          <title>${isReceipt ? 'سند قبض' : 'سند صرف'} - ${v.voucherNumber}</title>
-          <style>
-            body { font-family: system-ui, -apple-system, sans-serif; direction: rtl; padding: 24px; color: #1e293b; }
-            .header { text-align: center; border-bottom: 2px solid #0f172a; padding-bottom: 12px; margin-bottom: 20px; }
-            .header h1 { margin: 0; font-size: 20px; color: #0f172a; }
-            .header p { margin: 4px 0 0; color: #64748b; font-size: 13px; }
-            .badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-weight: bold; font-size: 14px; margin-top: 8px; }
-            .badge-rcv { background: #dcfce7; color: #166534; }
-            .badge-pay { background: #fee2e2; color: #991b1b; }
-            .info-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 13px; margin-bottom: 20px; }
-            .info-item { padding: 8px 12px; background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 6px; }
-            .amount-box { text-align: center; background: #0f172a; color: #fff; padding: 16px; border-radius: 8px; font-size: 20px; font-weight: bold; margin-bottom: 20px; }
-            .signatures { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-top: 50px; text-align: center; font-size: 12px; color: #475569; }
-            .sig-line { border-top: 1px dashed #94a3b8; margin-top: 40px; padding-top: 6px; }
-          </style>
-        </head>
-        <body>
-          <div class="header">
-            <h1>المؤسسة التجارية المتكاملة للأنشطة المتعددة</h1>
-            <p>سجل تجاري موحد | نظام محاسبي مزدوج معتمد</p>
-            <div class="badge ${isReceipt ? 'badge-rcv' : 'badge-pay'}">
-              ${isReceipt ? 'سند قبض مالي رسمي' : 'سند صرف مالي رسمي'}
-            </div>
-          </div>
-
-          <div class="info-grid">
-            <div class="info-item"><strong>رقم السند:</strong> ${v.voucherNumber}</div>
-            <div class="info-item"><strong>التاريخ:</strong> ${v.date}</div>
-            <div class="info-item"><strong>${isReceipt ? 'المستلم منه:' : 'المصروف له:'}</strong> ${v.partyName}</div>
-            <div class="info-item"><strong>الصندوق / الحساب:</strong> ${box?.nameAr || '-'}</div>
-            <div class="info-item" style="grid-column: span 2;"><strong>البيان والشرح:</strong> ${v.description}</div>
-          </div>
-
-          <div class="amount-box">
-            المبلغ: ${v.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} ر.س
-          </div>
-
-          <div class="signatures">
-            <div>المحاسب المسؤول<div class="sig-line">التوقيع</div></div>
-            <div>أمين الصندوق<div class="sig-line">التوقيع</div></div>
-            <div>المستلم / الطرف المعني<div class="sig-line">التوقيع والختم</div></div>
-          </div>
-          <script>
-            window.onload = function() { window.print(); }
-          </script>
-        </body>
-      </html>
-    `);
-    printWindow.document.close();
+    setPrintableVoucher(v);
   };
 
-  const handleSaveVoucher = (e: React.FormEvent) => {
+  const handleSaveVoucher = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+    setVoucherError(null);
+
     const amt = Number(voucherAmount);
-    if (!amt || amt <= 0) {
+    if (!Number.isFinite(amt) || amt <= 0) {
       setVoucherError('يرجى إدخال مبلغ مالي صحيح أكبر من الصفر.');
       return;
     }
 
-    const count = vouchers.length + 1;
-    const prefix = voucherType === 'RECEIPT' ? 'RCV' : 'PAY';
-    const voucherNumber = `${prefix}-${new Date().getFullYear()}-${String(count).padStart(5, '0')}`;
+    if (!voucherAccountCode) {
+      setVoucherError('يرجى اختيار الحساب المقابل في الدليل المحاسبي.');
+      return;
+    }
 
+    if (!voucherDescription.trim()) {
+      setVoucherError('يرجى إدخال وصف السند وسبب الحركة.');
+      return;
+    }
+
+    const activeBranch = await dexieDataService.getActiveBranch();
     const newVoucher: PaymentVoucher = {
       id: storage.generateUUID(),
-      voucherNumber,
+      voucherNumber: '',
       type: voucherType,
       date: voucherDate,
       amount: amt,
       cashBoxId: voucherCashBoxId || cashBoxes[0]?.id || 'cb-1',
+      branchId: activeBranch.id,
       partyId: voucherPartyId || undefined,
       partyName: voucherPartyName || (voucherType === 'RECEIPT' ? 'عميل / مودع' : 'مستفيد'),
       accountCode: voucherAccountCode,
-      description: voucherDescription || (voucherType === 'RECEIPT' ? 'قبض نقدي' : 'صرف نقدي'),
+      description: voucherDescription.trim(),
       costCenterId: voucherCostCenter,
     };
 
-    // ترحيل القيد المحاسبي المزدوج
-    if (voucherType === 'RECEIPT') {
-      const jvId = accounting.postReceiptVoucher(newVoucher);
-      newVoucher.journalEntryId = jvId;
-    } else {
-      const jvId = accounting.postPaymentVoucher(newVoucher);
-      newVoucher.journalEntryId = jvId;
+    setIsSubmitting(true);
+    try {
+      const result = await dexieDataService.createCashVoucherAtomic({ voucher: newVoucher });
+      setIsVoucherModalOpen(false);
+      onRefresh();
+      handleNotifyVoucher(result.voucher);
+    } catch (err: unknown) {
+      setVoucherError(err instanceof Error ? err.message : 'فشل ترحيل السند المالي.');
+    } finally {
+      setIsSubmitting(false);
     }
-
-    storage.addVoucher(newVoucher);
-    setIsVoucherModalOpen(false);
-    onRefresh();
-
-    // فتح نافذة إشعار العميل مباشرة لراحة المستخدم
-    handleNotifyVoucher(newVoucher);
   };
 
-  const handleSaveNewCashBox = (e: React.FormEvent) => {
+  const handleSaveNewCashBox = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!boxName.trim() || !boxCode.trim()) return;
+    if (isSubmitting) return;
+    setBoxError(null);
 
+    if (!boxName.trim() || !boxCode.trim()) {
+      setBoxError('يرجى إدخال اسم الصندوق والكود التعريفي.');
+      return;
+    }
+
+    const activeBranch = await dexieDataService.getActiveBranch();
     const newBox: CashBox = {
       id: storage.generateUUID(),
       code: boxCode.trim(),
       nameAr: boxName.trim(),
       accountCode: '1101',
+      branchId: activeBranch.id,
       balance: 0,
       isDefault: false,
     };
 
-    storage.saveCashBoxes([...cashBoxes, newBox]);
-    setIsAddBoxModalOpen(false);
-    setBoxCode('');
-    setBoxName('');
-    onRefresh();
+    setIsSubmitting(true);
+    try {
+      await dexieDataService.createCashBoxAtomic(newBox);
+      setIsAddBoxModalOpen(false);
+      setBoxCode('');
+      setBoxName('');
+      onRefresh();
+    } catch (err: unknown) {
+      setBoxError(err instanceof Error ? err.message : 'تعذر إضافة الصندوق النقدي.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -335,7 +303,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
                 <div className="mt-4 pt-4 border-t border-slate-100">
                   <div className="text-[11px] text-slate-500 mb-1">الرصيد النقدي الفعلي المتاح:</div>
                   <div className="text-2xl font-bold font-mono tabular-nums text-slate-900">
-                    {box.balance.toFixed(2)} <span className="text-xs font-normal text-slate-500">ر.س</span>
+                    {box.balance.toFixed(2)} <span className="text-xs font-normal text-slate-500">{currencySymbol}</span>
                   </div>
                 </div>
               </div>
@@ -414,7 +382,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
                         <td className="py-3 px-4 text-slate-700">{v.description}</td>
                         <td className="py-3 px-4 text-slate-600">{box?.nameAr || '-'}</td>
                         <td className="py-3 px-4 text-center font-mono tabular-nums font-bold text-slate-900">
-                          {v.amount.toFixed(2)} ر.س
+                          {v.amount.toFixed(2)} {currencySymbol}
                         </td>
                         <td className="py-3 px-4 text-center">
                           <div className="flex items-center justify-center gap-1.5">
@@ -476,11 +444,11 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
               )}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">المبلغ المالي (ر.س) *</label>
+                  <label className="block font-semibold text-slate-700 mb-1">المبلغ المالي ({currencySymbol}) *</label>
                   <input
                     type="number"
                     step="any"
-                    min="1"
+                    min="0.01"
                     required
                     value={voucherAmount}
                     onChange={(e) => setVoucherAmount(e.target.value)}
@@ -513,7 +481,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
                   >
                     {cashBoxes.map((b) => (
                       <option key={b.id} value={b.id}>
-                        {b.nameAr} ({b.balance.toFixed(2)} ر.س)
+                        {b.nameAr} ({b.balance.toFixed(2)} {currencySymbol})
                       </option>
                     ))}
                   </select>
@@ -615,6 +583,12 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
               </button>
             </div>
             <form onSubmit={handleSaveNewCashBox} className="p-5 space-y-3 text-xs">
+              {boxError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-center gap-1.5">
+                  <AlertCircle className="w-4 h-4 shrink-0" />
+                  <span>{boxError}</span>
+                </div>
+              )}
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">اسم الصندوق أو البنك *</label>
                 <input
@@ -645,11 +619,57 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
                 >
                   إلغاء
                 </button>
-                <button type="submit" className="px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded font-bold">
+                <button type="submit" disabled={isSubmitting} className="px-4 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded font-bold disabled:opacity-50">
                   إضافة
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Printable Voucher Preview Modal (No window.open) */}
+      {printableVoucher && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto no-print">
+          <div className="relative w-full max-w-md bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-200">
+            <div className="flex items-center justify-between px-5 py-3.5 bg-slate-900 text-white no-print">
+              <span className="font-bold text-xs">
+                {printableVoucher.type === 'RECEIPT' ? 'سند قبض مالي' : 'سند صرف مالي'} — {printableVoucher.voucherNumber}
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => window.print()}
+                  className="flex items-center gap-1 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded"
+                >
+                  <Printer className="w-3.5 h-3.5" />
+                  <span>طباعة</span>
+                </button>
+                <button onClick={() => setPrintableVoucher(null)} className="text-slate-400 hover:text-white">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+            <div className="p-6 text-xs text-slate-800 space-y-4 printable-area bg-white">
+              <div className="text-center border-b-2 border-slate-900 pb-3">
+                <h2 className="text-base font-extrabold text-slate-900">المؤسسة التجارية المتكاملة للأنشطة المتعددة</h2>
+                <div className={`inline-block mt-2 px-3 py-1 rounded font-bold ${
+                  printableVoucher.type === 'RECEIPT' ? 'bg-emerald-100 text-emerald-800' : 'bg-rose-100 text-rose-800'
+                }`}>
+                  {printableVoucher.type === 'RECEIPT' ? 'سند قبض مالي رسمي' : 'سند صرف مالي رسمي'}
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                <div><strong>رقم السند:</strong> <span className="font-mono">{printableVoucher.voucherNumber}</span></div>
+                <div><strong>التاريخ:</strong> <span className="font-mono">{printableVoucher.date}</span></div>
+                <div><strong>{printableVoucher.type === 'RECEIPT' ? 'المستلم منه:' : 'المصروف له:'}</strong> {printableVoucher.partyName}</div>
+                <div><strong>الصندوق:</strong> {cashBoxes.find((b) => b.id === printableVoucher.cashBoxId)?.nameAr || '-'}</div>
+                <div className="col-span-2"><strong>البيان:</strong> {printableVoucher.description}</div>
+              </div>
+              <div className="text-center bg-slate-900 text-white py-3 rounded-lg text-base font-extrabold font-mono">
+                المبلغ: {printableVoucher.amount.toFixed(2)} {currencySymbol}
+              </div>
+            </div>
           </div>
         </div>
       )}

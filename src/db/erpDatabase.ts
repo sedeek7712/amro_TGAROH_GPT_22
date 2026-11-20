@@ -1,11 +1,11 @@
 /**
  * نظام الإدارة التجارية والمحاسبية المتكامل
  * محرك قاعدة البيانات المحلية المتقدم (Dexie / IndexedDB Engine)
- * يوفر تخزيناً علائقياً مفهرساً عالي الأداء مع دعم المعاملات الذرية وطابور Outbox
- * يدعم الترحيل الآمن من قواعد البيانات والمفاتيح السابقة دون فقدان أي بيانات
+ * يدعم المعاملات الذرية (ACID Transactions)، العدادات المتسلسلة الآمنة (FIN-01)،
+ * وطابور Outbox مع حجز العاملين (SYNC-06).
  */
 
-import Dexie, { type Table } from 'dexie';
+import Dexie, { type IndexableType, type Table } from 'dexie';
 import {
   CommercialActivity,
   Account,
@@ -22,6 +22,7 @@ import {
   OutboxQueueItem,
   SyncConflict,
   Branch,
+  DocumentSequence,
 } from '../types/erp';
 
 export class MultiActivityErpDatabase extends Dexie {
@@ -40,11 +41,12 @@ export class MultiActivityErpDatabase extends Dexie {
   outbox!: Table<OutboxQueueItem, string>;
   syncConflicts!: Table<SyncConflict, string>;
   branches!: Table<Branch, string>;
+  sequences!: Table<DocumentSequence, string>;
 
   constructor() {
     super('MultiActivityErpDB');
 
-    // تحديد المخطط العلائقي والفهارس (Schema v1)
+    // Schema v1
     this.version(1).stores({
       activities: 'id, code, costCenterCode',
       accounts: 'code, type, parentCode, isLeaf',
@@ -61,69 +63,79 @@ export class MultiActivityErpDatabase extends Dexie {
       outbox: 'id, entityType, entityId, status, createdAt, idempotencyKey',
     });
 
-    // الترقية إلى Schema v2 لدعم عزل المؤسسات المتعددة (Multi-Tenancy) وترتيب الأولويات
+    // Schema v2: Multi-Tenancy & Priority
     this.version(2).stores({
       outbox: 'id, tenantId, entityType, entityId, status, createdAt, idempotencyKey, priority',
     });
 
-    // الترقية إلى Schema v3 لدعم إدارة وتوثيق التعارضات (Sync Conflicts) والتبعيات
+    // Schema v3: Sync Conflicts
     this.version(3).stores({
       outbox: 'id, tenantId, entityType, entityId, status, createdAt, idempotencyKey, priority',
       syncConflicts: 'id, tenantId, entityType, entityId, status, detectedAt',
     });
 
-    // الترقية إلى Schema v4 لدعم تعدد الفروع ونقاط البيع والأجهزة (Multi-Branch Architecture)
-    this.version(4).stores({
-      branches: 'id, code, isMain, active',
-      invoices: 'id, invoiceNumber, type, activityId, partyId, date, paymentMethod, branchId',
-      journalEntries: 'id, entryNumber, date, status, costCenterId, referenceType, referenceId, branchId',
-      vouchers: 'id, voucherNumber, type, date, cashBoxId, partyId, branchId',
-      cashBoxes: 'id, code, accountCode, branchId',
-      outbox: 'id, tenantId, entityType, entityId, status, createdAt, idempotencyKey, priority, branchId',
-      syncConflicts: 'id, tenantId, entityType, entityId, status, detectedAt, branchId',
-    }).upgrade(async (trans) => {
-      // ترحيل آمن وتأسيس الفرع الرئيسي الافتراضي
-      const branchesTable = trans.table('branches');
-      const count = await branchesTable.count();
-      if (count === 0) {
-        await branchesTable.add({
-          id: 'branch_main',
-          code: 'BR01',
-          nameAr: 'الفرع الرئيسي',
-          isMain: true,
-          active: true,
-          createdAt: new Date().toISOString(),
-        });
-      }
+    // Schema v4: Multi-Branch
+    this.version(4)
+      .stores({
+        branches: 'id, code, isMain, active',
+        invoices: 'id, invoiceNumber, type, activityId, partyId, date, paymentMethod, branchId',
+        journalEntries: 'id, entryNumber, date, status, costCenterId, referenceType, referenceId, branchId',
+        vouchers: 'id, voucherNumber, type, date, cashBoxId, partyId, branchId',
+        cashBoxes: 'id, code, accountCode, branchId',
+        outbox: 'id, tenantId, entityType, entityId, status, createdAt, idempotencyKey, priority, branchId',
+        syncConflicts: 'id, tenantId, entityType, entityId, status, detectedAt, branchId',
+      })
+      .upgrade(async (trans) => {
+        const branchesTable = trans.table('branches');
+        const count = await branchesTable.count();
+        if (count === 0) {
+          await branchesTable.add({
+            id: 'branch_main',
+            code: 'BR01',
+            nameAr: 'الفرع الرئيسي',
+            isMain: true,
+            active: true,
+            createdAt: new Date().toISOString(),
+          });
+        }
 
-      // إسناد معرف الفرع الرئيسي لجميع السجلات السابقة دون فقدان أي سجل
-      const invoicesTable = trans.table('invoices');
-      await invoicesTable.toCollection().modify((inv: Record<string, unknown>) => {
-        if (!inv.branchId) inv.branchId = 'branch_main';
+        const assignMainBranch = async (tableName: string) => {
+          await trans
+            .table(tableName)
+            .toCollection()
+            .modify((rec: Record<string, unknown>) => {
+              if (!rec.branchId) rec.branchId = 'branch_main';
+            });
+        };
+        await assignMainBranch('invoices');
+        await assignMainBranch('journalEntries');
+        await assignMainBranch('vouchers');
+        await assignMainBranch('cashBoxes');
       });
 
-      const journalsTable = trans.table('journalEntries');
-      await journalsTable.toCollection().modify((je: Record<string, unknown>) => {
-        if (!je.branchId) je.branchId = 'branch_main';
+    // Schema v5: عدادات متسلسلة ذرية (FIN-01) + فهارس المستخدمين والتدقيق (SEC-01/SEC-02/SYNC-05)
+    this.version(5)
+      .stores({
+        sequences: 'key',
+        users: 'id, username, role, active, tenantId, branchId',
+        auditLogs: 'id, timestamp, userId, action, tenantId, branchId',
+      })
+      .upgrade(async (trans) => {
+        await trans
+          .table('users')
+          .toCollection()
+          .modify((u: Record<string, unknown>) => {
+            if (!u.branchId) u.branchId = 'branch_main';
+            if (!Array.isArray(u.allowedBranches) || u.allowedBranches.length === 0) {
+              u.allowedBranches = [String(u.branchId || 'branch_main')];
+            }
+            if (!u.tenantId) u.tenantId = 'tenant_main';
+          });
       });
-
-      const vouchersTable = trans.table('vouchers');
-      await vouchersTable.toCollection().modify((v: Record<string, unknown>) => {
-        if (!v.branchId) v.branchId = 'branch_main';
-      });
-
-      const cashBoxesTable = trans.table('cashBoxes');
-      await cashBoxesTable.toCollection().modify((cb: Record<string, unknown>) => {
-        if (!cb.branchId) cb.branchId = 'branch_main';
-      });
-    });
   }
 }
 
-// الاسم المعياري الجديد لقاعدة البيانات
 export const db = new MultiActivityErpDatabase();
-
-// الحفاظ على الاسم القديم كاسم بديل للتوافق البرمجي دون كسر أي مراجع
 export { MultiActivityErpDatabase as AlharajErpDatabase };
 
 /**
@@ -146,7 +158,6 @@ export async function migrateLegacyIndexedDbIfNeeded(): Promise<{
       return { migrated: false, legacyFound: false, verified: true, stats };
     }
 
-    console.log('[Migration] Legacy database AlharajErpDB found. Starting safe non-destructive migration...');
     const legacyDb = new Dexie('AlharajErpDB');
     legacyDb.version(1).stores({
       activities: 'id, code, costCenterCode',
@@ -190,26 +201,27 @@ export async function migrateLegacyIndexedDbIfNeeded(): Promise<{
 
       const legacyCount = await legacyTable.count();
       const currentNewCount = await newTable.count();
-
       stats[tableName] = { before: legacyCount, migrated: 0 };
 
       if (legacyCount > 0 && currentNewCount < legacyCount) {
         const records = await legacyTable.toArray();
-        await newTable.bulkPut(records);
-        stats[tableName].migrated = records.length;
-        anyMigrated = true;
+        const existingKeys = new Set(await newTable.toCollection().primaryKeys());
+        const keyPath = newTable.schema.primKey.keyPath as string;
+        const missingRecords = records.filter((r: Record<string, unknown>) => !existingKeys.has(r[keyPath] as IndexableType));
+        if (missingRecords.length > 0) {
+          await newTable.bulkPut(missingRecords);
+          stats[tableName].migrated = missingRecords.length;
+          anyMigrated = true;
+        }
       }
 
-      // التحقق من سلامة وأعداد السجلات بعد الترحيل
       const finalCount = await newTable.count();
       if (finalCount < legacyCount) {
         allVerified = false;
-        console.error(`[Migration] Verification failed for table ${tableName}: legacy=${legacyCount}, new=${finalCount}`);
       }
     }
 
     legacyDb.close();
-    console.log('[Migration] Migration completed. Database AlharajErpDB remains preserved and intact.', stats);
     return { migrated: anyMigrated, legacyFound: true, verified: allVerified, stats };
   } catch (err) {
     console.warn('[Migration] Error checking or migrating legacy IndexedDB:', err);
@@ -223,11 +235,8 @@ export async function migrateLegacyIndexedDbIfNeeded(): Promise<{
 export async function requestPersistentStorage(): Promise<boolean> {
   if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persist) {
     try {
-      const isPersisted = await navigator.storage.persist();
-      console.log(`[Storage] Persistent storage granted: ${isPersisted}`);
-      return isPersisted;
-    } catch (err) {
-      console.warn('[Storage] Could not request persistent storage:', err);
+      return await navigator.storage.persist();
+    } catch {
       return false;
     }
   }

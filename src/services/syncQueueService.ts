@@ -11,6 +11,8 @@
 
 import { db } from '../db/erpDatabase';
 import { OutboxQueueItem, SyncConflict } from '../types/erp';
+import { authService } from './authService';
+import { PermissionError } from '../config/rbac';
 import { storage } from './storageService';
 
 export interface QueueStats {
@@ -26,14 +28,18 @@ export type QueueSubscriber = (stats: QueueStats) => void;
 class SyncQueueService {
   private subscribers: Set<QueueSubscriber> = new Set();
   private maxRetries = 5;
-  private defaultTenantId = 'tenant_default';
+  private defaultTenantId = 'tenant_main';
 
   /**
-   * الحصول على معرّف المؤسسة الحالي
+   * الحصول على معرّف المؤسسة الحالي من الجلسة الموثقة
    */
-  public getCurrentTenantId(): string {
-    const user = storage.getCurrentUser();
-    return (user as { tenantId?: string }).tenantId || this.defaultTenantId;
+  public getCurrentTenantId(requireAuth = false): string {
+    const authTenant = authService.getActiveTenantIdSync();
+    if (authTenant) return authTenant;
+    if (requireAuth) {
+      throw new PermissionError('حظر أمني: لا يمكن تنفيذ المزامنة دون جلسة مستخدم مصادق عليها ومرتبطة بمؤسسة.', 'sync:manage');
+    }
+    return this.defaultTenantId;
   }
 
   /**
@@ -71,69 +77,66 @@ class SyncQueueService {
     priority?: number;
     idempotencyKey?: string;
     tenantId?: string;
+    branchId?: string;
     dependsOn?: string[];
   }): Promise<OutboxQueueItem> {
-    const tenantId = params.tenantId || this.getCurrentTenantId();
+    const tenantId = params.tenantId?.trim() || this.getCurrentTenantId();
 
     // مفتاح حتمي ثابت ومستقر: يعتمد على المؤسسة، نوع الكيان، معرّفه الثابت والإجراء
-    // لا يحتوي على أي قيم متغيرة كالتوقيت أو الأرقام العشوائية لضمان سلامة إعادة المحاولات
     const idempotencyKey =
       params.idempotencyKey ||
       `${tenantId}_${params.entityType}_${params.entityId}_${params.action}`;
 
-    // فحص ما إذا كان هناك سجل سابق في الطابور بنفس المفتاح والمؤسسة
-    const existing = await db.outbox
-      .where('idempotencyKey')
-      .equals(idempotencyKey)
-      .filter((i) => i.tenantId === tenantId)
-      .first();
+    const saved = await db.transaction('rw', db.outbox, async () => {
+      const existing = await db.outbox
+        .where('idempotencyKey')
+        .equals(idempotencyKey)
+        .filter((i) => i.tenantId === tenantId)
+        .first();
 
-    if (existing) {
-      if (existing.status !== 'SYNCED') {
-        // تحديث الحمولة والتبعيات دون تكرار العنصر في الطابور
-        existing.payload = params.payload;
-        if (params.dependsOn) existing.dependsOn = params.dependsOn;
-        if (params.priority) existing.priority = params.priority;
-        await db.outbox.put(existing);
+      if (existing) {
+        if (existing.status !== 'SYNCED') {
+          existing.payload = params.payload;
+          if (params.dependsOn) existing.dependsOn = params.dependsOn;
+          if (params.priority) existing.priority = params.priority;
+          if (params.branchId) existing.branchId = params.branchId;
+          await db.outbox.put(existing);
+        }
+        return existing;
       }
-      return existing;
-    }
 
-    const id = storage.generateUUID();
-    const createdAt = new Date().toISOString();
-    const priority = params.priority || this.getDefaultPriority(params.entityType);
+      const id = storage.generateUUID();
+      const createdAt = new Date().toISOString();
+      const priority = params.priority || this.getDefaultPriority(params.entityType);
 
-    const item: OutboxQueueItem = {
-      id,
-      tenantId,
-      entityType: params.entityType,
-      entityId: params.entityId,
-      action: params.action,
-      payload: params.payload,
-      createdAt,
-      status: 'PENDING',
-      idempotencyKey,
-      retryCount: 0,
-      priority,
-      dependsOn: params.dependsOn && params.dependsOn.length > 0 ? params.dependsOn : undefined,
-    };
+      const item: OutboxQueueItem = {
+        id,
+        tenantId,
+        branchId: params.branchId,
+        entityType: params.entityType,
+        entityId: params.entityId,
+        action: params.action,
+        payload: params.payload,
+        createdAt,
+        status: 'PENDING',
+        idempotencyKey,
+        retryCount: 0,
+        priority,
+        dependsOn: params.dependsOn && params.dependsOn.length > 0 ? params.dependsOn : undefined,
+      };
 
-    await db.outbox.put(item);
+      await db.outbox.put(item);
+      return item;
+    });
+
     this.notifySubscribers();
-    return item;
+    return saved;
   }
 
   /**
-   * جلب العناصر الجاهزة للمزامنة مع التحقق الصارم من التبعيات (Dependency-Aware Sync)
-   * يضمن:
-   * 1. عدم إرسال الفاتورة أو السند قبل اكتمال مزامنة العميل أو الصنف التابع له.
-   * 2. عدم تعطيل حركات مستقلة في حال فشل أو تعثر حركة أخرى غير مرتبطة بها.
+   * فرز وتصفية العناصر الجاهزة للمزامنة دون تعديل الحالة
    */
-  public async getReadyToSyncItems(limit = 50): Promise<OutboxQueueItem[]> {
-    const now = new Date().toISOString();
-    const allItems = await db.outbox.toArray();
-
-    // حصر الكيانات التي لا تزال معلقة أو قيد المزامنة أو فاشلة حالياً
+  private filterAndSortReadyItems(allItems: OutboxQueueItem[], nowIso: string, limit: number): OutboxQueueItem[] {
     const unSyncedEntityIds = new Set<string>();
     for (const item of allItems) {
       if (item.status === 'PENDING' || item.status === 'SYNCING' || item.status === 'FAILED') {
@@ -141,33 +144,20 @@ class SyncQueueService {
       }
     }
 
-    const allPending = allItems.filter((i) => i.status === 'PENDING');
-
-    // تصفية العناصر الجاهزة زمنياً وفق سياسة Exponential Backoff والواعية بالتبعيات
-    const readyItems = allPending.filter((item) => {
-      // 1. فحص توقيت إعادة المحاولة
-      if (item.nextRetryAt && item.nextRetryAt > now) {
+    const readyItems = allItems.filter((item) => {
+      if (item.status !== 'PENDING') return false;
+      if (item.nextRetryAt && item.nextRetryAt > nowIso) {
         return false;
       }
-
-      // 2. فحص التبعيات: إذا كان العنصر يعتمد على كيانات لم تُزامن بعد، يتم تعليقه
       if (item.dependsOn && item.dependsOn.length > 0) {
         const hasUnresolvedDependency = item.dependsOn.some((depId) => unSyncedEntityIds.has(depId));
         if (hasUnresolvedDependency) {
-          // يتم تخطي هذا العنصر حتى تكتمل مزامنة أصله، دون حجب العناصر المستقلة الأخرى
           return false;
         }
       }
-
       return true;
     });
 
-    // ترتيب العناصر بحسب الأسبقية الهندسية:
-    // 1: الحسابات والصناديق أولاً
-    // 2: العملاء والأصناف ثانياً
-    // 3: الفواتير والسندات ثالثاً
-    // 4: القيود المحاسبية رابعاً
-    // ثم بحسب الأقدمية الزمنية (FIFO)
     readyItems.sort((a, b) => {
       const pA = a.priority ?? this.getDefaultPriority(a.entityType);
       const pB = b.priority ?? this.getDefaultPriority(b.entityType);
@@ -180,16 +170,83 @@ class SyncQueueService {
   }
 
   /**
+   * جلب العناصر الجاهزة للمزامنة مع التحقق الصارم من التبعيات (Dependency-Aware Sync)
+   */
+  public async getReadyToSyncItems(limit = 50): Promise<OutboxQueueItem[]> {
+    const nowIso = new Date().toISOString();
+    const allItems = await db.outbox.toArray();
+    return this.filterAndSortReadyItems(allItems, nowIso, limit);
+  }
+
+  /**
+   * حجز العناصر الجاهزة ذرياً لعامل مزامنة محدد (Atomic Lease Claim - SYNC-06)
+   * يمنع تسابق العمال أو تكرار سحب نفس العنصر عند تزامن دورتين متقاربتين
+   */
+  public async claimReadyToSyncItems(
+    workerId: string,
+    limit = 25,
+    leaseMs = 60_000
+  ): Promise<OutboxQueueItem[]> {
+    const owner = workerId.trim() || 'worker_default';
+    const claimed = await db.transaction('rw', db.outbox, async () => {
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
+
+      const allItems = await db.outbox.toArray();
+
+      // تحرير أي حجز منتهي الصلاحية قبل الاستعلام
+      for (const item of allItems) {
+        if (item.status === 'SYNCING' && item.leaseExpiresAt && item.leaseExpiresAt < nowIso) {
+          item.status = 'PENDING';
+          item.leaseOwner = undefined;
+          item.leaseExpiresAt = undefined;
+          await db.outbox.put(item);
+        }
+      }
+
+      const candidates = this.filterAndSortReadyItems(allItems, nowIso, limit);
+      const result: OutboxQueueItem[] = [];
+
+      for (const candidate of candidates) {
+        const current = await db.outbox.get(candidate.id);
+        if (!current || current.status !== 'PENDING') continue;
+
+        const updated: OutboxQueueItem = {
+          ...current,
+          status: 'SYNCING',
+          leaseOwner: owner,
+          leaseExpiresAt,
+          lastAttemptAt: nowIso,
+        };
+        await db.outbox.put(updated);
+        result.push({ ...updated });
+      }
+
+      return result;
+    });
+
+    if (claimed.length > 0) {
+      this.notifySubscribers();
+    }
+    return claimed;
+  }
+
+  /**
    * تعليم مجموعة عناصر بأنها قيد المزامنة حالياً لمنع التكرار
    */
-  public async markSyncing(ids: string[]): Promise<void> {
-    const now = new Date().toISOString();
+  public async markSyncing(ids: string[], workerId = 'worker_default', leaseMs = 60_000): Promise<void> {
+    const nowMs = Date.now();
+    const now = new Date(nowMs).toISOString();
+    const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
     await db.transaction('rw', db.outbox, async () => {
       for (const id of ids) {
         const item = await db.outbox.get(id);
         if (item && item.status === 'PENDING') {
           item.status = 'SYNCING';
           item.lastAttemptAt = now;
+          item.leaseOwner = workerId;
+          item.leaseExpiresAt = leaseExpiresAt;
           await db.outbox.put(item);
         }
       }
@@ -198,15 +255,20 @@ class SyncQueueService {
   }
 
   /**
-   * استعادة السجلات العالقة بحالة SYNCING عند تشغيل التطبيق أو بعد انقطاع الاتصال المفاجئ
-   * إذا تجاوزت المدة منذ محاولة الإرسال السابقة مهلة القفل (leaseTimeoutMinutes)، يتم إرجاعها إلى PENDING
+   * استعادة السجلات العالقة بحالة SYNCING عند تشغيل التطبيق أو انتهاء مهلة الحجز (Lease Expiry)
    */
   public async recoverStuckSyncingItems(leaseTimeoutMinutes = 2): Promise<number> {
-    const cutoffTime = new Date(Date.now() - leaseTimeoutMinutes * 60 * 1000).toISOString();
+    const nowMs = Date.now();
+    const nowIso = new Date(nowMs).toISOString();
+    const cutoffTime = new Date(nowMs - leaseTimeoutMinutes * 60 * 1000).toISOString();
+
     const stuckItems = await db.outbox
       .where('status')
       .equals('SYNCING')
-      .filter((item) => !item.lastAttemptAt || item.lastAttemptAt < cutoffTime)
+      .filter((item) => {
+        if (item.leaseExpiresAt && item.leaseExpiresAt < nowIso) return true;
+        return !item.lastAttemptAt || item.lastAttemptAt < cutoffTime;
+      })
       .toArray();
 
     if (stuckItems.length === 0) return 0;
@@ -216,6 +278,8 @@ class SyncQueueService {
       for (const item of stuckItems) {
         item.status = 'PENDING';
         item.nextRetryAt = undefined;
+        item.leaseOwner = undefined;
+        item.leaseExpiresAt = undefined;
         await db.outbox.put(item);
         recovered++;
       }
@@ -227,44 +291,51 @@ class SyncQueueService {
   }
 
   /**
-   * تأكيد نجاح المزامنة بعد استلام استجابة مؤكدة من الخادم
+   * تأكيد نجاح المزامنة بعد استلام إقرار مؤكد وصريح من الخادم
    */
   public async markSynced(id: string, serverTimestamp?: string): Promise<void> {
-    const item = await db.outbox.get(id);
-    if (item) {
-      item.status = 'SYNCED';
-      item.syncedAt = serverTimestamp || new Date().toISOString();
-      item.errorMessage = undefined;
-      await db.outbox.put(item);
-      this.notifySubscribers();
-    }
+    await db.transaction('rw', db.outbox, async () => {
+      const item = await db.outbox.get(id);
+      if (item) {
+        item.status = 'SYNCED';
+        item.syncedAt = serverTimestamp || new Date().toISOString();
+        item.errorMessage = undefined;
+        item.leaseOwner = undefined;
+        item.leaseExpiresAt = undefined;
+        await db.outbox.put(item);
+      }
+    });
+    this.notifySubscribers();
   }
 
   /**
    * تسجيل فشل المزامنة وتطبيق خوارزمية التراجع الأسي (Exponential Backoff)
    */
   public async markFailed(id: string, errorMessage: string, isPermanent = false): Promise<void> {
-    const item = await db.outbox.get(id);
-    if (!item) return;
+    await db.transaction('rw', db.outbox, async () => {
+      const item = await db.outbox.get(id);
+      if (!item) return;
 
-    item.retryCount = (item.retryCount || 0) + 1;
-    item.errorMessage = errorMessage;
-    item.lastAttemptAt = new Date().toISOString();
+      item.retryCount = (item.retryCount || 0) + 1;
+      item.errorMessage = errorMessage;
+      item.lastAttemptAt = new Date().toISOString();
+      item.leaseOwner = undefined;
+      item.leaseExpiresAt = undefined;
 
-    if (isPermanent || item.retryCount >= this.maxRetries) {
-      item.status = 'FAILED';
-      item.nextRetryAt = undefined;
-      console.warn(`[SyncQueue] Item ${id} (${item.entityType}) marked permanently FAILED after ${item.retryCount} attempts: ${errorMessage}`);
-    } else {
-      // حساب التراجع الأسي: 1s, 2s, 4s, 8s, 16s... بحد أقصى 60 ثانية
-      const backoffMs = Math.min(1000 * Math.pow(2, item.retryCount), 60000);
-      const nextDate = new Date(Date.now() + backoffMs);
-      item.nextRetryAt = nextDate.toISOString();
-      item.status = 'PENDING';
-      console.log(`[SyncQueue] Item ${id} scheduled for retry #${item.retryCount} at ${item.nextRetryAt} (+${backoffMs / 1000}s)`);
-    }
+      if (isPermanent || item.retryCount >= this.maxRetries) {
+        item.status = 'FAILED';
+        item.nextRetryAt = undefined;
+        console.warn(`[SyncQueue] Item ${id} (${item.entityType}) marked permanently FAILED after ${item.retryCount} attempts: ${errorMessage}`);
+      } else {
+        const backoffMs = Math.min(1000 * Math.pow(2, item.retryCount), 60000);
+        const nextDate = new Date(Date.now() + backoffMs);
+        item.nextRetryAt = nextDate.toISOString();
+        item.status = 'PENDING';
+        console.log(`[SyncQueue] Item ${id} scheduled for retry #${item.retryCount} at ${item.nextRetryAt} (+${backoffMs / 1000}s)`);
+      }
 
-    await db.outbox.put(item);
+      await db.outbox.put(item);
+    });
     this.notifySubscribers();
   }
 
@@ -272,15 +343,20 @@ class SyncQueueService {
    * إعادة ضبط العناصر الفاشلة للتمكن من إعادة محاولتها يدوياً
    */
   public async retryFailedItems(): Promise<number> {
-    const failedItems = await db.outbox.where('status').equals('FAILED').toArray();
-    let count = 0;
-    for (const item of failedItems) {
-      item.status = 'PENDING';
-      item.nextRetryAt = undefined;
-      item.errorMessage = undefined;
-      await db.outbox.put(item);
-      count++;
-    }
+    const count = await db.transaction('rw', db.outbox, async () => {
+      const failedItems = await db.outbox.where('status').equals('FAILED').toArray();
+      let updatedCount = 0;
+      for (const item of failedItems) {
+        item.status = 'PENDING';
+        item.nextRetryAt = undefined;
+        item.errorMessage = undefined;
+        item.leaseOwner = undefined;
+        item.leaseExpiresAt = undefined;
+        await db.outbox.put(item);
+        updatedCount++;
+      }
+      return updatedCount;
+    });
     this.notifySubscribers();
     return count;
   }

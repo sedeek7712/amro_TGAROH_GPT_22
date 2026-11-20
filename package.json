@@ -8,7 +8,11 @@
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test src/tests/*.test.ts",
+    "test:legacy": "tsx src/tests/phase5_remediation_test.ts && tsx src/tests/phase6_e2e_workflow_test.ts",
+    "verify": "npm run lint && npm test && npm run test:legacy && npm run build"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

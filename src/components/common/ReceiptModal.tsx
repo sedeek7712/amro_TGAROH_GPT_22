@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { Invoice, CommercialActivity } from '../../types/erp';
 import { Printer, X, CheckCircle, MessageSquare } from 'lucide-react';
 import { CustomerNotificationModal } from './CustomerNotificationModal';
+import { getActiveCurrencyConfig } from '../../config/currency';
 
 interface ReceiptModalProps {
   invoice: Invoice | null;
@@ -17,6 +18,7 @@ interface ReceiptModalProps {
 export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, activity, onClose }) => {
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   if (!invoice) return null;
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   const handlePrint = () => {
     window.print();
@@ -145,27 +147,27 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, activity, o
           <div className="border-t border-slate-200 pt-3 space-y-1.5 text-xs">
             <div className="flex justify-between text-slate-600">
               <span>المجموع الفرعي:</span>
-              <span className="font-mono tabular-nums">{invoice.subtotal.toFixed(2)} ر.س</span>
+              <span className="font-mono tabular-nums">{invoice.subtotal.toFixed(2)} {currencySymbol}</span>
             </div>
             {invoice.discount > 0 && (
               <div className="flex justify-between text-rose-600">
                 <span>الخصم الممنوح:</span>
-                <span className="font-mono tabular-nums">-{invoice.discount.toFixed(2)} ر.س</span>
+                <span className="font-mono tabular-nums">-{invoice.discount.toFixed(2)} {currencySymbol}</span>
               </div>
             )}
             <div className="flex justify-between text-base font-extrabold text-slate-900 border-t border-slate-200 pt-2">
               <span>الإجمالي النهائي:</span>
-              <span className="font-mono tabular-nums text-emerald-700">{invoice.total.toFixed(2)} ر.س</span>
+              <span className="font-mono tabular-nums text-emerald-700">{invoice.total.toFixed(2)} {currencySymbol}</span>
             </div>
             <div className="flex justify-between text-xs text-slate-600 pt-1">
               <span>المبلغ المسدد:</span>
-              <span className="font-mono tabular-nums font-semibold">{invoice.paidAmount.toFixed(2)} ر.س</span>
+              <span className="font-mono tabular-nums font-semibold">{invoice.paidAmount.toFixed(2)} {currencySymbol}</span>
             </div>
             {invoice.total - invoice.paidAmount > 0 && (
               <div className="flex justify-between text-xs text-rose-700 font-semibold">
                 <span>المتبقي آجل على العميل:</span>
                 <span className="font-mono tabular-nums">
-                  {(invoice.total - invoice.paidAmount).toFixed(2)} ر.س
+                  {(invoice.total - invoice.paidAmount).toFixed(2)} {currencySymbol}
                 </span>
               </div>
             )}

@@ -48,6 +48,9 @@ import {
 } from '../../hooks/useLiveDexie';
 import { CommercialActivityId, Party, JournalEntry } from '../../types/erp';
 import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
+import { authService } from '../../services/authService';
+import { hasPermission } from '../../config/rbac';
+import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 
 type ReportTab =
   | 'activity_profits'
@@ -58,7 +61,12 @@ type ReportTab =
   | 'amanat_custody';
 
 export const ReportsManager: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<ReportTab>('activity_profits');
+  const actor = authService.getCurrentActorSync() || storage.getCurrentUser();
+  const canViewProfits = hasPermission(actor, 'view:profits');
+  const currencySymbol = getActiveCurrencyConfig().symbol;
+  const [activeTab, setActiveTab] = useState<ReportTab>(
+    canViewProfits ? 'activity_profits' : 'trial_balance'
+  );
   const [printSize, setPrintSize] = useState<'A4' | '80mm'>('A4');
 
   // فلاتر كشف الحساب
@@ -322,14 +330,16 @@ export const ReportsManager: React.FC = () => {
 
       {/* Tabs Navigation (No Print) */}
       <div className="bg-slate-100 p-1.5 rounded-xl flex items-center gap-1 overflow-x-auto no-print text-xs font-bold text-slate-600">
-        <button
-          onClick={() => setActiveTab('activity_profits')}
-          className={`px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
-            activeTab === 'activity_profits' ? 'bg-white text-slate-900 shadow-sm' : 'hover:bg-slate-200/70'
-          }`}
-        >
-          أرباح وخسائر الأنشطة
-        </button>
+        {canViewProfits && (
+          <button
+            onClick={() => setActiveTab('activity_profits')}
+            className={`px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
+              activeTab === 'activity_profits' ? 'bg-white text-slate-900 shadow-sm' : 'hover:bg-slate-200/70'
+            }`}
+          >
+            أرباح وخسائر الأنشطة
+          </button>
+        )}
         <button
           onClick={() => setActiveTab('trial_balance')}
           className={`px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
@@ -375,7 +385,7 @@ export const ReportsManager: React.FC = () => {
       {/* ========================================================================= */}
       {/* 1. تقرير أرباح وخسائر الأنشطة التجارية الأربعة ومراكز التكلفة */}
       {/* ========================================================================= */}
-      {activeTab === 'activity_profits' && (
+      {activeTab === 'activity_profits' && canViewProfits && (
         <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm printable-area">
           {/* Header */}
           <div className="border-b-2 border-slate-800 pb-4 mb-6 text-center">
@@ -400,10 +410,10 @@ export const ReportsManager: React.FC = () => {
                   <div className="text-xs font-bold text-slate-700">{act.nameAr}</div>
                   <div className="text-[11px] font-mono text-slate-500">{act.costCenterCode}</div>
                   <div className="text-base font-black font-mono tabular-nums text-emerald-800 mt-2">
-                    {income.netProfit.toFixed(2)} <span className="text-[10px] font-normal text-slate-500">ر.س</span>
+                    {income.netProfit.toFixed(2)} <span className="text-[10px] font-normal text-slate-500">{currencySymbol}</span>
                   </div>
                   <div className="text-[10px] text-slate-500 mt-1">
-                    مبيعات: {income.totalRevenue.toFixed(2)} ر.س
+                    مبيعات: {income.totalRevenue.toFixed(2)} {currencySymbol}
                   </div>
                 </div>
               );
@@ -433,13 +443,13 @@ export const ReportsManager: React.FC = () => {
                       <td className="py-3 px-4 text-center font-mono font-bold text-slate-600">{act.costCenterCode}</td>
                       <td className="py-3 px-4 text-center font-mono">{itemsCount}</td>
                       <td className="py-3 px-4 text-center font-mono tabular-nums font-bold text-slate-900">
-                        {income.totalRevenue.toFixed(2)} ر.س
+                        {income.totalRevenue.toFixed(2)} {currencySymbol}
                       </td>
                       <td className="py-3 px-4 text-center font-mono tabular-nums text-rose-800">
-                        {income.totalExpenses.toFixed(2)} ر.س
+                        {income.totalExpenses.toFixed(2)} {currencySymbol}
                       </td>
                       <td className="py-3 px-4 text-center font-mono tabular-nums font-black text-emerald-800 text-sm">
-                        {income.netProfit.toFixed(2)} ر.س
+                        {income.netProfit.toFixed(2)} {currencySymbol}
                       </td>
                     </tr>
                   );
@@ -449,13 +459,13 @@ export const ReportsManager: React.FC = () => {
                 <tr className="border-t-2 border-slate-800 bg-slate-50 font-black text-slate-900 text-xs">
                   <td colSpan={3} className="py-3 px-4 text-left">الإجمالي العام للمنشأة:</td>
                   <td className="py-3 px-4 text-center font-mono tabular-nums">
-                    {activities.reduce((s, a) => s + accounting.getIncomeStatement(a.id, liveAccounts, liveJournalEntries).totalRevenue, 0).toFixed(2)} ر.س
+                    {activities.reduce((s, a) => s + accounting.getIncomeStatement(a.id, liveAccounts, liveJournalEntries).totalRevenue, 0).toFixed(2)} {currencySymbol}
                   </td>
                   <td className="py-3 px-4 text-center font-mono tabular-nums text-rose-800">
-                    {activities.reduce((s, a) => s + accounting.getIncomeStatement(a.id, liveAccounts, liveJournalEntries).totalExpenses, 0).toFixed(2)} ر.س
+                    {activities.reduce((s, a) => s + accounting.getIncomeStatement(a.id, liveAccounts, liveJournalEntries).totalExpenses, 0).toFixed(2)} {currencySymbol}
                   </td>
                   <td className="py-3 px-4 text-center font-mono tabular-nums text-emerald-800 text-sm">
-                    {activities.reduce((s, a) => s + accounting.getIncomeStatement(a.id, liveAccounts, liveJournalEntries).netProfit, 0).toFixed(2)} ر.س
+                    {activities.reduce((s, a) => s + accounting.getIncomeStatement(a.id, liveAccounts, liveJournalEntries).netProfit, 0).toFixed(2)} {currencySymbol}
                   </td>
                 </tr>
               </tfoot>
@@ -514,13 +524,13 @@ export const ReportsManager: React.FC = () => {
                     <td className="py-2.5 px-3 font-bold text-slate-900">{row.nameAr}</td>
                     <td className="py-2.5 px-3 text-slate-500 text-[11px]">{row.type}</td>
                     <td className="py-2.5 px-3 text-center font-mono tabular-nums">
-                      {row.debit > 0 ? `${row.debit.toFixed(2)} ر.س` : '-'}
+                      {row.debit > 0 ? `${row.debit.toFixed(2)} {currencySymbol}` : '-'}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono tabular-nums">
-                      {row.credit > 0 ? `${row.credit.toFixed(2)} ر.س` : '-'}
+                      {row.credit > 0 ? `${row.credit.toFixed(2)} {currencySymbol}` : '-'}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
-                      {row.balance.toFixed(2)} ر.س
+                      {row.balance.toFixed(2)} {currencySymbol}
                     </td>
                   </tr>
                 ))}
@@ -529,13 +539,13 @@ export const ReportsManager: React.FC = () => {
                 <tr className="border-t-2 border-slate-800 bg-slate-50 font-black text-xs">
                   <td colSpan={3} className="py-3 px-3">إجمالي حركات ميزان المراجعة:</td>
                   <td className="py-3 px-3 text-center font-mono tabular-nums text-emerald-800 text-sm">
-                    {trialBalanceData.totalDebit.toFixed(2)} ر.س
+                    {trialBalanceData.totalDebit.toFixed(2)} {currencySymbol}
                   </td>
                   <td className="py-3 px-3 text-center font-mono tabular-nums text-emerald-800 text-sm">
-                    {trialBalanceData.totalCredit.toFixed(2)} ر.س
+                    {trialBalanceData.totalCredit.toFixed(2)} {currencySymbol}
                   </td>
                   <td className="py-3 px-3 text-center font-mono tabular-nums font-bold">
-                    {trialBalanceData.diff.toFixed(2)} ر.س
+                    {trialBalanceData.diff.toFixed(2)} {currencySymbol}
                   </td>
                 </tr>
               </tfoot>
@@ -588,7 +598,7 @@ export const ReportsManager: React.FC = () => {
                     .filter((p) => p.type === partyTypeFilter)
                     .map((p) => (
                       <option key={p.id} value={p.id}>
-                        {p.nameAr} ({p.phone || 'بدون هاتف'}) - الرصيد: {p.balance.toFixed(2)} ر.س
+                        {p.nameAr} ({p.phone || 'بدون هاتف'}) - الرصيد: {p.balance.toFixed(2)} {currencySymbol}
                       </option>
                     ))}
                 </select>
@@ -675,7 +685,7 @@ export const ReportsManager: React.FC = () => {
                   <div>
                     <span className="text-slate-500">الرصيد الختامي: </span>
                     <span className="font-mono font-bold text-sm text-emerald-800">
-                      {statementData.finalBalance.toFixed(2)} ر.س
+                      {statementData.finalBalance.toFixed(2)} {currencySymbol}
                     </span>
                   </div>
                 </div>
@@ -716,7 +726,7 @@ export const ReportsManager: React.FC = () => {
                             {tr.credit > 0 ? `${tr.credit.toFixed(2)}` : '-'}
                           </td>
                           <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
-                            {tr.balanceAfter.toFixed(2)} ر.س
+                            {tr.balanceAfter.toFixed(2)} {currencySymbol}
                           </td>
                         </tr>
                       ))
@@ -726,7 +736,7 @@ export const ReportsManager: React.FC = () => {
                     <tr className="border-t-2 border-slate-800 bg-slate-50 font-black text-xs">
                       <td colSpan={4} className="py-3 px-3">الرصيد المستحق النهائي:</td>
                       <td colSpan={3} className="py-3 px-3 text-center font-mono tabular-nums text-sm text-emerald-800">
-                        {statementData.finalBalance.toFixed(2)} ر.س
+                        {statementData.finalBalance.toFixed(2)} {currencySymbol}
                       </td>
                     </tr>
                   </tfoot>
@@ -765,8 +775,8 @@ export const ReportsManager: React.FC = () => {
             <h2 className="text-lg font-black text-slate-900">نظام الإدارة التجارية والمحاسبية المتكامل</h2>
             <h3 className="text-base font-bold text-slate-800 mt-1">تقرير جرد المخزون السلعي وتقييم الأرصدة وتواريخ الصلاحية</h3>
             <p className="text-xs text-slate-500 mt-0.5">
-              إجمالي قيمة التكلفة: <strong className="text-slate-900 font-mono">{stockValuation.totalCost.toFixed(2)} ر.س</strong> | 
-              قيمة البيع المتوقعة: <strong className="text-emerald-800 font-mono">{stockValuation.totalRetail.toFixed(2)} ر.س</strong>
+              إجمالي قيمة التكلفة: <strong className="text-slate-900 font-mono">{stockValuation.totalCost.toFixed(2)} {currencySymbol}</strong> | 
+              قيمة البيع المتوقعة: <strong className="text-emerald-800 font-mono">{stockValuation.totalRetail.toFixed(2)} {currencySymbol}</strong>
             </p>
           </div>
 
@@ -871,7 +881,7 @@ export const ReportsManager: React.FC = () => {
                           {prod.sellPrice.toFixed(2)}
                         </td>
                         <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
-                          {totalCost.toFixed(2)} ر.س
+                          {totalCost.toFixed(2)} {currencySymbol}
                         </td>
                       </tr>
                     );
@@ -884,7 +894,7 @@ export const ReportsManager: React.FC = () => {
                   <td className="py-3 px-3 text-center font-mono tabular-nums">{stockValuation.totalQty}</td>
                   <td colSpan={3}></td>
                   <td className="py-3 px-3 text-center font-mono tabular-nums text-sm text-slate-900 font-extrabold">
-                    {stockValuation.totalCost.toFixed(2)} ر.س
+                    {stockValuation.totalCost.toFixed(2)} {currencySymbol}
                   </td>
                 </tr>
               </tfoot>
@@ -947,13 +957,13 @@ export const ReportsManager: React.FC = () => {
                         <td className="py-2.5 px-3 font-bold text-slate-900">{inv.partyName}</td>
                         <td className="py-2.5 px-3 text-center font-mono">{inv.date}</td>
                         <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
-                          {inv.total.toFixed(2)} ر.س
+                          {inv.total.toFixed(2)} {currencySymbol}
                         </td>
                         <td className="py-2.5 px-3 text-center font-mono tabular-nums text-emerald-800">
-                          {inv.paidAmount.toFixed(2)} ر.س
+                          {inv.paidAmount.toFixed(2)} {currencySymbol}
                         </td>
                         <td className="py-2.5 px-3 text-center font-mono tabular-nums text-rose-800">
-                          {remaining > 0 ? `${remaining.toFixed(2)} ر.س` : '-'}
+                          {remaining > 0 ? `${remaining.toFixed(2)} {currencySymbol}` : '-'}
                         </td>
                         <td className="py-2.5 px-3 text-center no-print">
                           <button
@@ -1032,7 +1042,7 @@ export const ReportsManager: React.FC = () => {
                       {r.type === 'CASH' ? 'أمانة نقدية' : 'أمانة عينية'}
                     </td>
                     <td className="py-2.5 px-3 font-bold text-slate-900">
-                      {r.type === 'CASH' ? `${r.amount.toFixed(2)} ر.س` : r.itemDescription}
+                      {r.type === 'CASH' ? `${r.amount.toFixed(2)} {currencySymbol}` : r.itemDescription}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono">{r.receivedDate}</td>
                     <td className="py-2.5 px-3 text-center font-bold">

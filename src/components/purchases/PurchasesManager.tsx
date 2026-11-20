@@ -19,9 +19,8 @@ import {
   Building2,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { inventory } from '../../services/inventoryService';
-import { accounting } from '../../services/accountingEngine';
 import { dexieDataService } from '../../services/dexieDataService';
+import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveInvoices, useLiveParties, useLiveCashBoxes, useLiveProducts } from '../../hooks/useLiveDexie';
 import { Invoice, InvoiceItem, ActivityId, PaymentMethod } from '../../types/erp';
 
@@ -61,11 +60,15 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
   const [itemBatch, setItemBatch] = useState('');
   const [itemExpiry, setItemExpiry] = useState('');
 
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [clientRequestId, setClientRequestId] = useState<string>(() => storage.generateUUID());
+
   const allInvoices = useLiveInvoices();
   const invoices = allInvoices.filter((inv) => inv.type === 'PURCHASE');
   const suppliers = useLiveParties('SUPPLIER');
   const cashBoxes = useLiveCashBoxes();
   const products = useLiveProducts(activityId);
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   // تصفية الفواتير
   const filteredInvoices = invoices.filter((inv) => {
@@ -131,6 +134,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
   const handleSavePurchaseInvoice = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError(null);
 
     if (items.length === 0) {
@@ -158,7 +162,6 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
     }
 
     const activeBranch = storage.getActiveBranch();
-    const invoiceNumber = storage.generateBranchInvoiceNumber('PUR', activeBranch.code, storage.getTerminalCode());
     const selectedSupplier = suppliers.find((s) => s.id === supplierId);
     const finalPartyName = selectedSupplier ? selectedSupplier.nameAr : supplierName || 'مورد عام';
 
@@ -183,7 +186,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
     // 2. إنشاء كائن الفاتورة
     const newInvoice: Invoice = {
       id: storage.generateUUID(),
-      invoiceNumber,
+      invoiceNumber: '',
       type: 'PURCHASE',
       activityId,
       branchId: activeBranch.id,
@@ -200,8 +203,9 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
       cashBoxId: cashBoxId || cashBoxes[0]?.id || 'cb-1',
     };
 
+    setIsSubmitting(true);
     try {
-      // 3. التنفيذ الذري المركب عبر DexieDataService (تحديث المخزون والتشغيلات والقيد المزدوج)
+      // 3. التنفيذ الذري المركب عبر DexieDataService (تحديث المخزون والتشغيلات والقيد المزدوج ومنع التكرار)
       await dexieDataService.createPurchaseInvoiceAtomic({
         invoice: newInvoice,
         itemsWithBatches: items.map((item) => ({
@@ -211,15 +215,19 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
           batchNumber: item.batchNumber,
           expiryDate: item.expiryDate,
         })),
+        clientRequestId,
       });
 
       setIsAddModalOpen(false);
       setItems([]);
       setFormError(null);
+      setClientRequestId(storage.generateUUID());
       onRefresh();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'حدث خطأ أثناء حفظ فاتورة المشتريات.';
       setFormError(msg);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -300,13 +308,13 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                       </span>
                     </td>
                     <td className="py-3 px-4 text-center font-mono tabular-nums font-bold text-slate-900">
-                      {inv.total.toFixed(2)} ر.س
+                      {inv.total.toFixed(2)} {currencySymbol}
                     </td>
                     <td className="py-3 px-4 text-center font-mono tabular-nums text-emerald-700 font-semibold">
-                      {inv.paidAmount.toFixed(2)} ر.س
+                      {inv.paidAmount.toFixed(2)} {currencySymbol}
                     </td>
                     <td className="py-3 px-4 text-center font-mono tabular-nums text-rose-700 font-bold">
-                      {(inv.total - inv.paidAmount).toFixed(2)} ر.س
+                      {(inv.total - inv.paidAmount).toFixed(2)} {currencySymbol}
                     </td>
                   </tr>
                 ))
@@ -550,7 +558,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                         </td>
                         <td className="py-2 px-3 text-center font-mono">{item.costPrice.toFixed(2)}</td>
                         <td className="py-2 px-3 text-center font-mono font-bold text-slate-900">
-                          {(item.quantity * item.costPrice).toFixed(2)} ر.س
+                          {(item.quantity * item.costPrice).toFixed(2)} {currencySymbol}
                         </td>
                         <td className="py-2 px-3 text-center">
                           <button
@@ -612,7 +620,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
               <div className="flex justify-between items-center pt-3 border-t border-slate-200">
                 <div className="text-sm font-extrabold text-slate-900">
-                  إجمالي الفاتورة: <span className="text-emerald-700 font-mono">{totalInvoice.toFixed(2)} ر.س</span>
+                  إجمالي الفاتورة: <span className="text-emerald-700 font-mono">{totalInvoice.toFixed(2)} {currencySymbol}</span>
                 </div>
                 <div className="flex gap-2">
                   <button
@@ -624,10 +632,11 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                   </button>
                   <button
                     type="submit"
-                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg flex items-center gap-1.5"
+                    disabled={isSubmitting}
+                    className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold rounded-lg flex items-center gap-1.5"
                   >
                     <Check className="w-4 h-4" />
-                    <span>حفظ وترحيل الفاتورة</span>
+                    <span>{isSubmitting ? 'جارٍ الترحيل...' : 'حفظ وترحيل الفاتورة'}</span>
                   </button>
                 </div>
               </div>

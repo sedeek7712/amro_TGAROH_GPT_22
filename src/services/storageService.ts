@@ -21,7 +21,8 @@ import {
   OutboxQueueItem,
   Branch,
 } from '../types/erp';
-import { db, requestPersistentStorage, migrateLegacyIndexedDbIfNeeded } from '../db/erpDatabase';
+import { db, requestPersistentStorage } from '../db/erpDatabase';
+import { DEFAULT_CURRENCY_CONFIG } from '../config/currency';
 
 // الأنشطة التجارية الأربعة الرسمية المستقلة فقط (الأمانات وحدة مستقلة لحفظ أموال وأصناف الغير)
 export const OFFICIAL_ACTIVITIES: CommercialActivity[] = [
@@ -129,9 +130,10 @@ const INITIAL_CASH_BOXES: CashBox[] = [
   { id: 'cb-2', code: 'BANK-01', nameAr: 'الحساب البنكي الأول', accountCode: '1102', balance: 0, isDefault: false, branchId: 'branch_main' },
 ];
 
-const INITIAL_USERS: SystemUser[] = [
+export const INITIAL_USERS: SystemUser[] = [
   {
     id: 'user-admin',
+    tenantId: 'tenant_main',
     username: 'admin',
     fullName: 'المدير العام (إدارة النظام)',
     role: 'ADMIN',
@@ -139,9 +141,11 @@ const INITIAL_USERS: SystemUser[] = [
     branchId: 'branch_main',
     allowedBranches: ['branch_main'],
     active: true,
+    mustChangePassword: true,
   },
   {
     id: 'user-accountant',
+    tenantId: 'tenant_main',
     username: 'accountant',
     fullName: 'المحاسب المالي العام',
     role: 'ACCOUNTANT',
@@ -149,9 +153,11 @@ const INITIAL_USERS: SystemUser[] = [
     branchId: 'branch_main',
     allowedBranches: ['branch_main'],
     active: true,
+    mustChangePassword: true,
   },
   {
     id: 'user-cashier',
+    tenantId: 'tenant_main',
     username: 'cashier',
     fullName: 'أمين نقطة البيع (كاشير)',
     role: 'CASHIER',
@@ -159,6 +165,7 @@ const INITIAL_USERS: SystemUser[] = [
     branchId: 'branch_main',
     allowedBranches: ['branch_main'],
     active: true,
+    mustChangePassword: true,
   },
 ];
 
@@ -171,6 +178,7 @@ export interface CompanyProfile {
   phone?: string;         // الهاتف
   email?: string;         // البريد
   taxNumber?: string;     // الرقم الضريبي
+  currencyCode?: string;  // رمز العملة القياسي (SAR افتراضي)
   currency: string;       // العملة (ريال سعودي افتراضي)
   currencySymbol: string; // رمز العملة (ر.س)
   website?: string;       // الموقع
@@ -280,25 +288,18 @@ class StorageService {
     return { migrated: keysMigrated.length > 0, keysMigrated };
   }
 
-  // تهيئة النظام وطلب التخزين الدائم ومزامنة IndexedDB
+  // تهيئة النظام دون فرض تسجيل دخول مدير عام تلقائياً ودون الكتابة فوق Dexie
   public initialize(): void {
     if (this.isInitialized) return;
     this.isInitialized = true;
 
-    // طلب حماية التخزين المحلي من الحذف
     requestPersistentStorage();
-
-    // تشغيل ترحيل المفاتيح القديمة دون مساس بالمفاتيح السابقة
     this.migrateLegacyLocalStorage();
-
-    // تشغيل ترحيل IndexedDB السابقة دون مساس بالقاعدة القديمة
-    migrateLegacyIndexedDbIfNeeded().catch((e) => console.warn('[Migration] Dexie legacy check skipped:', e));
 
     if (typeof localStorage !== 'undefined') {
       if (!localStorage.getItem(STORAGE_KEYS.ACCOUNTS)) {
         this.setItem(STORAGE_KEYS.ACCOUNTS, INITIAL_CHART_OF_ACCOUNTS);
       }
-      // فرض الأنشطة الأربعة الرسمية دائماً
       this.setItem(STORAGE_KEYS.ACTIVITIES, OFFICIAL_ACTIVITIES);
 
       if (!localStorage.getItem(STORAGE_KEYS.CASH_BOXES)) {
@@ -306,9 +307,6 @@ class StorageService {
       }
       if (!localStorage.getItem(STORAGE_KEYS.USERS)) {
         this.setItem(STORAGE_KEYS.USERS, INITIAL_USERS);
-      }
-      if (!localStorage.getItem(STORAGE_KEYS.CURRENT_USER)) {
-        this.setItem(STORAGE_KEYS.CURRENT_USER, INITIAL_USERS[0]);
       }
 
       if (!localStorage.getItem(STORAGE_KEYS.BRANCHES)) {
@@ -326,74 +324,6 @@ class StorageService {
       if (!localStorage.getItem(STORAGE_KEYS.AMANAT)) this.setItem(STORAGE_KEYS.AMANAT, []);
       if (!localStorage.getItem(STORAGE_KEYS.AUDIT_LOGS)) this.setItem(STORAGE_KEYS.AUDIT_LOGS, []);
       if (!localStorage.getItem(STORAGE_KEYS.OUTBOX)) this.setItem(STORAGE_KEYS.OUTBOX, []);
-    }
-
-    // مزامنة IndexedDB في الخلفية
-    this.syncToIndexedDB();
-  }
-
-  // بيانات الشركة القابلة للتخصيص
-  public getCompanyProfile(): CompanyProfile {
-    return this.getItem<CompanyProfile>(STORAGE_KEYS.COMPANY_PROFILE, {
-      nameAr: 'نظام الإدارة التجارية',
-      currency: 'ريال سعودي',
-      currencySymbol: 'ر.س',
-    });
-  }
-
-  public saveCompanyProfile(profile: CompanyProfile): void {
-    this.setItem(STORAGE_KEYS.COMPANY_PROFILE, profile);
-  }
-
-  // حفظ نسخة مطابقة في Dexie IndexedDB
-  private async syncToIndexedDB(): Promise<void> {
-    try {
-      const branches = this.getBranches();
-      const activities = this.getActivities();
-      const accounts = this.getAccounts();
-      const products = this.getProducts();
-      const parties = this.getParties();
-      const invoices = this.getInvoices();
-      const journalEntries = this.getJournalEntries();
-      const cashBoxes = this.getCashBoxes();
-      const vouchers = this.getVouchers();
-      const amanat = this.getAmanatRecords();
-      const users = this.getUsers();
-      const auditLogs = this.getAuditLogs();
-      const outbox = this.getOutboxQueue();
-
-      await db.transaction('rw', [
-        db.branches,
-        db.activities,
-        db.accounts,
-        db.products,
-        db.parties,
-        db.invoices,
-        db.journalEntries,
-        db.cashBoxes,
-        db.vouchers,
-        db.amanatRecords,
-        db.users,
-        db.auditLogs,
-        db.outbox,
-      ], async () => {
-        // تحديث تكميلي آمن (Upsert) دون مسح الجداول السابقة
-        await db.branches.bulkPut(branches);
-        await db.activities.bulkPut(activities);
-        await db.accounts.bulkPut(accounts);
-        if (products.length > 0) await db.products.bulkPut(products);
-        if (parties.length > 0) await db.parties.bulkPut(parties);
-        if (invoices.length > 0) await db.invoices.bulkPut(invoices);
-        if (journalEntries.length > 0) await db.journalEntries.bulkPut(journalEntries);
-        await db.cashBoxes.bulkPut(cashBoxes);
-        if (vouchers.length > 0) await db.vouchers.bulkPut(vouchers);
-        if (amanat.length > 0) await db.amanatRecords.bulkPut(amanat);
-        await db.users.bulkPut(users);
-        if (auditLogs.length > 0) await db.auditLogs.bulkPut(auditLogs);
-        if (outbox.length > 0) await db.outbox.bulkPut(outbox);
-      });
-    } catch (err) {
-      console.warn('[Storage] Background IndexedDB sync skipped:', err);
     }
   }
 
@@ -839,7 +769,8 @@ class StorageService {
     branchId?: string
   ): void {
     const queue = this.getOutboxQueue();
-    const tenantId = 'tenant_default';
+    const currentActor = this.getCurrentUser();
+    const tenantId = currentActor?.tenantId || 'tenant_main';
     const targetBranchId = branchId || this.getActiveBranchId();
     const idempotencyKey = `${tenantId}_${targetBranchId}_${entityType}_${entityId}_${action}`;
 
@@ -905,7 +836,17 @@ class StorageService {
   }
 
   public getCurrentUser(): SystemUser {
-    return this.getItem<SystemUser>(STORAGE_KEYS.CURRENT_USER, INITIAL_USERS[0]);
+    return this.getItem<SystemUser>(STORAGE_KEYS.CURRENT_USER, {
+      id: 'guest',
+      tenantId: 'tenant_main',
+      username: 'guest',
+      fullName: 'مستخدم غير مسجل',
+      role: 'CASHIER',
+      allowedActivities: [],
+      branchId: 'branch_main',
+      allowedBranches: ['branch_main'],
+      active: false,
+    });
   }
 
   public setCurrentUser(user: SystemUser): void {
@@ -1033,7 +974,6 @@ class StorageService {
         db.syncConflicts.bulkPut(d.syncConflicts).catch(() => {});
       }
 
-      this.syncToIndexedDB();
       this.logAction('استعادة نسخة احتياطية', 'تم التحقق من سلامة Checksum واستعادة البيانات وكافة السجلات بنجاح.');
       return { success: true };
     } catch (e: unknown) {
@@ -1066,8 +1006,9 @@ class StorageService {
   public getCompanyProfile(): CompanyProfile {
     return this.getItem<CompanyProfile>(STORAGE_KEYS.COMPANY_PROFILE, {
       nameAr: 'نظام الإدارة التجارية',
-      currency: 'ريال سعودي',
-      currencySymbol: 'ر.س',
+      currencyCode: DEFAULT_CURRENCY_CONFIG.code,
+      currency: DEFAULT_CURRENCY_CONFIG.nameAr,
+      currencySymbol: DEFAULT_CURRENCY_CONFIG.symbol,
     });
   }
 

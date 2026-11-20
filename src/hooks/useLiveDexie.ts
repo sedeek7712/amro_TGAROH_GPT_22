@@ -1,14 +1,14 @@
 /**
  * نظام الإدارة التجارية والمحاسبية المتكامل
- * خطافات التفاعل المباشر مع قاعدة بيانات Dexie (Live Dexie Reactive Hooks)
- * تتيح لجميع شاشات ومكونات React القراءة المباشرة من IndexedDB عبر Dexie
- * مع دعم العرض الأولي الفوري (0ms Instant Render) والتحديث التفاعلي التلقائي عند أي تعديل
+ * خطافات التفاعل المباشر مع قاعدة بيانات Dexie (Live Dexie Reactive Hooks - DB-01 / DB-03)
+ * تعتمد على Dexie كمصدر وحيد للحقيقة للكيانات التشغيلية دون العودة إلى localStorage عند خلو الجداول
  */
 
 import { useState, useEffect } from 'react';
 import { liveQuery } from 'dexie';
 import { db } from '../db/erpDatabase';
-import { storage } from '../services/storageService';
+import { dexieDataService, InitState } from '../services/dexieDataService';
+import { filterAuditLogsForUser } from '../config/rbac';
 import {
   Product,
   CommercialActivityId,
@@ -24,11 +24,10 @@ import {
   OutboxQueueItem,
   SyncConflict,
   Branch,
+  SystemUser,
+  SystemAuditLog,
 } from '../types/erp';
 
-/**
- * خطاف تجريدي لمراقبة استعلامات Dexie حياً وتحديث React State تلقائياً
- */
 export function useLiveDexie<T>(
   querier: () => Promise<T> | T,
   initialValue: T,
@@ -37,7 +36,6 @@ export function useLiveDexie<T>(
   const [data, setData] = useState<T>(initialValue);
 
   useEffect(() => {
-    // 1. تشغيل الاستعلام الأولي فوراً
     let isMounted = true;
     Promise.resolve(querier())
       .then((res) => {
@@ -47,7 +45,6 @@ export function useLiveDexie<T>(
       })
       .catch((err) => console.warn('[useLiveDexie] Initial query notice:', err));
 
-    // 2. الاشتراك في مراقب Dexie الحي (Live Query Subscription)
     const observable = liveQuery(querier);
     const subscription = observable.subscribe({
       next: (val) => {
@@ -70,191 +67,144 @@ export function useLiveDexie<T>(
   return data;
 }
 
-/**
- * مراقبة الأصناف والمخزون مباشرة من Dexie
- */
+export function useDexieInitStatus(): { state: InitState; error: string | null } {
+  const [status, setStatus] = useState<{ state: InitState; error: string | null }>({
+    state: dexieDataService.getInitState(),
+    error: dexieDataService.getInitError(),
+  });
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const nextState = dexieDataService.getInitState();
+      const nextError = dexieDataService.getInitError();
+      setStatus((prev) =>
+        prev.state === nextState && prev.error === nextError
+          ? prev
+          : { state: nextState, error: nextError }
+      );
+      if (nextState === 'READY' || nextState === 'FAILED') {
+        clearInterval(timer);
+      }
+    }, 50);
+
+    return () => clearInterval(timer);
+  }, []);
+
+  return status;
+}
+
 export function useLiveProducts(activityId?: CommercialActivityId | 'all'): Product[] {
-  const initial = storage.getProducts(activityId && activityId !== 'all' ? activityId : undefined);
-
   return useLiveDexie(
     async () => {
       if (activityId && activityId !== 'all') {
-        const list = await db.products.where('activityId').equals(activityId).toArray();
-        return list.length > 0 ? list : storage.getProducts(activityId);
+        return await db.products.where('activityId').equals(activityId).toArray();
       }
-      const list = await db.products.toArray();
-      return list.length > 0 ? list : storage.getProducts();
+      return await db.products.toArray();
     },
-    initial,
+    [],
     [activityId]
   );
 }
 
-/**
- * مراقبة الفواتير مباشرة من Dexie
- */
 export function useLiveInvoices(activityId?: CommercialActivityId | 'all'): Invoice[] {
-  const initial = storage.getInvoices(activityId && activityId !== 'all' ? activityId : undefined);
-
   return useLiveDexie(
     async () => {
-      let list: Invoice[];
       if (activityId && activityId !== 'all') {
-        list = await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date');
-      } else {
-        list = await db.invoices.toCollection().reverse().sortBy('date');
+        return await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date');
       }
-      return list.length > 0 ? list : storage.getInvoices(activityId && activityId !== 'all' ? activityId : undefined);
+      return await db.invoices.toCollection().reverse().sortBy('date');
     },
-    initial,
+    [],
     [activityId]
   );
 }
 
-/**
- * مراقبة دليل الحسابات وأرصدة الأستاذ مباشرة من Dexie
- */
 export function useLiveAccounts(): Account[] {
-  const initial = storage.getAccounts();
-
-  return useLiveDexie(
-    async () => {
-      const list = await db.accounts.toArray();
-      return list.length > 0 ? list : storage.getAccounts();
-    },
-    initial,
-    []
-  );
+  return useLiveDexie(async () => await db.accounts.toArray(), [], []);
 }
 
-/**
- * مراقبة دفتر اليومية والقيود المحاسبية مباشرة من Dexie
- */
 export function useLiveJournalEntries(costCenterId?: CostCenterId | 'all'): JournalEntry[] {
-  const initial = storage.getJournalEntries(costCenterId && costCenterId !== 'all' ? costCenterId : undefined);
-
   return useLiveDexie(
     async () => {
-      let list: JournalEntry[];
       if (costCenterId && costCenterId !== 'all') {
-        list = await db.journalEntries.where('costCenterId').equals(costCenterId).reverse().sortBy('date');
-      } else {
-        list = await db.journalEntries.toCollection().reverse().sortBy('date');
+        return await db.journalEntries
+          .where('costCenterId')
+          .equals(costCenterId)
+          .reverse()
+          .sortBy('date');
       }
-      return list.length > 0 ? list : storage.getJournalEntries(costCenterId && costCenterId !== 'all' ? costCenterId : undefined);
+      return await db.journalEntries.toCollection().reverse().sortBy('date');
     },
-    initial,
+    [],
     [costCenterId]
   );
 }
 
-/**
- * مراقبة العملاء والموردين مباشرة من Dexie
- */
 export function useLiveParties(type?: PartyType): Party[] {
-  const initial = storage.getParties(type);
-
   return useLiveDexie(
     async () => {
-      let list: Party[];
       if (type) {
-        list = await db.parties.where('type').equals(type).toArray();
-      } else {
-        list = await db.parties.toArray();
+        return await db.parties.where('type').equals(type).toArray();
       }
-      return list.length > 0 ? list : storage.getParties(type);
+      return await db.parties.toArray();
     },
-    initial,
+    [],
     [type]
   );
 }
 
-/**
- * مراقبة الصناديق والبنوك مباشرة من Dexie
- */
 export function useLiveCashBoxes(): CashBox[] {
-  const initial = storage.getCashBoxes();
-
-  return useLiveDexie(
-    async () => {
-      const list = await db.cashBoxes.toArray();
-      return list.length > 0 ? list : storage.getCashBoxes();
-    },
-    initial,
-    []
-  );
+  return useLiveDexie(async () => await db.cashBoxes.toArray(), [], []);
 }
 
-/**
- * مراقبة سندات القبض والصرف مباشرة من Dexie
- */
 export function useLiveVouchers(): PaymentVoucher[] {
-  const initial = storage.getVouchers();
-
   return useLiveDexie(
-    async () => {
-      const list = await db.vouchers.toCollection().reverse().sortBy('date');
-      return list.length > 0 ? list : storage.getVouchers();
-    },
-    initial,
+    async () => await db.vouchers.toCollection().reverse().sortBy('date'),
+    [],
     []
   );
 }
 
-/**
- * مراقبة سجلات الأمانات مباشرة من Dexie
- */
 export function useLiveAmanatRecords(): AmanatRecord[] {
-  const initial = storage.getAmanatRecords();
-
   return useLiveDexie(
-    async () => {
-      const list = await db.amanatRecords.toCollection().reverse().sortBy('receivedDate');
-      return list.length > 0 ? list : storage.getAmanatRecords();
-    },
-    initial,
+    async () => await db.amanatRecords.toCollection().reverse().sortBy('receivedDate'),
+    [],
     []
   );
 }
 
-/**
- * مراقبة المستخدمين والصلاحيات مباشرة من Dexie
- */
-export function useLiveUsers(): import('../types/erp').SystemUser[] {
-  const initial = storage.getUsers();
+export function useLiveUsers(): SystemUser[] {
+  return useLiveDexie(async () => await db.users.toArray(), [], []);
+}
 
+export function useLiveAuditLogs(currentUser?: SystemUser | null): SystemAuditLog[] {
   return useLiveDexie(
     async () => {
-      const list = await db.users.toArray();
-      return list.length > 0 ? list : storage.getUsers();
+      const allLogs = await db.auditLogs.toCollection().reverse().sortBy('timestamp');
+      return filterAuditLogsForUser(allLogs, currentUser);
     },
-    initial,
-    []
+    [],
+    [currentUser?.id, currentUser?.role]
   );
 }
 
-/**
- * مراقبة طابور الإرسال والمزامنة Outbox مباشرة من Dexie
- */
 export function useLiveOutbox(statusFilter?: OutboxQueueItem['status'] | 'all'): OutboxQueueItem[] {
   return useLiveDexie(
     async () => {
-      let items: OutboxQueueItem[];
       if (statusFilter && statusFilter !== 'all') {
-        items = await db.outbox.where('status').equals(statusFilter).reverse().sortBy('createdAt');
-      } else {
-        items = await db.outbox.toCollection().reverse().sortBy('createdAt');
+        return await db.outbox
+          .where('status')
+          .equals(statusFilter)
+          .reverse()
+          .sortBy('createdAt');
       }
-      return items;
+      return await db.outbox.toCollection().reverse().sortBy('createdAt');
     },
     [],
     [statusFilter]
   );
 }
 
-/**
- * مراقبة إحصائيات طابور الإرسال حياً من Dexie
- */
 export function useLiveOutboxStats(): {
   total: number;
   pending: number;
@@ -279,31 +229,14 @@ export function useLiveOutboxStats(): {
   );
 }
 
-/**
- * مراقبة سجل التعارضات المحاسبية والمخزنية حياً من Dexie
- */
 export function useLiveConflicts(): SyncConflict[] {
   return useLiveDexie(
-    async () => {
-      return await db.syncConflicts.toCollection().reverse().sortBy('detectedAt');
-    },
+    async () => await db.syncConflicts.toCollection().reverse().sortBy('detectedAt'),
     [],
     []
   );
 }
 
-/**
- * مراقبة الفروع المسجلة حياً من Dexie
- */
 export function useLiveBranches(): Branch[] {
-  const initial = storage.getBranches();
-  return useLiveDexie(
-    async () => {
-      const list = await db.branches.toArray();
-      return list.length > 0 ? list : storage.getBranches();
-    },
-    initial,
-    []
-  );
+  return useLiveDexie(async () => await db.branches.toArray(), [], []);
 }
-

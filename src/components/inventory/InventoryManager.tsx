@@ -22,9 +22,12 @@ import {
   Tag,
   DollarSign,
   Layers,
+  ArrowUpDown,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
+import { dexieDataService } from '../../services/dexieDataService';
+import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId } from '../../types/erp';
 
@@ -69,7 +72,19 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [formExpiryDate, setFormExpiryDate] = useState('');
   const [formInitialQty, setFormInitialQty] = useState<string>('0');
   const [formError, setFormError] = useState<string | null>(null);
+  const [tableError, setTableError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // نافذة تأكيد الحذف والتسوية الجردية (INV-07)
+  const [deleteConfirmProduct, setDeleteConfirmProduct] = useState<Product | null>(null);
+  const [adjustProduct, setAdjustProduct] = useState<Product | null>(null);
+  const [adjustDelta, setAdjustDelta] = useState<string>('');
+  const [adjustReason, setAdjustReason] = useState<string>('');
+  const [adjustBatch, setAdjustBatch] = useState<string>('');
+  const [adjustExpiry, setAdjustExpiry] = useState<string>('');
+  const [adjustError, setAdjustError] = useState<string | null>(null);
+
+  const currencySymbol = getActiveCurrencyConfig().symbol;
   const products = useLiveProducts(activeTab);
   const expiringAlerts = products.flatMap((p) =>
     (p.batches || [])
@@ -157,8 +172,9 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setIsAddModalOpen(true);
   };
 
-  const handleSaveProduct = (e: React.FormEvent) => {
+  const handleSaveProduct = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
     setFormError(null);
 
     if (!formNameAr.trim()) {
@@ -169,7 +185,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     const purchase = Number(formPurchasePrice) || 0;
     const sell = Number(formSellPrice) || 0;
     const minAlert = Number(formMinAlert) || 0;
-    const initialQty = Number(formInitialQty) || 0;
+    const initialQty = Math.max(0, Number(formInitialQty) || 0);
     const todayStr = new Date().toISOString().split('T')[0];
 
     // الفحص الصارم لبيانات تشغيلات وصلاحية الأدوية بالصيدلية
@@ -188,71 +204,128 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
       }
     }
 
-    if (editingProduct) {
-      // تعديل صنف موجود
-      const updated: Product = {
-        ...editingProduct,
-        nameAr: formNameAr,
-        barcode: formBarcode || undefined,
-        category: formCategory,
-        unit: formUnit,
-        purchasePrice: purchase,
-        sellPrice: sell,
-        minStockAlert: minAlert,
-        storageLocation: formLocation || undefined,
-        oemNumber: formOemNumber || undefined,
-        manufacturer: formManufacturer || undefined,
-        compatibleModels: formCompatibility || undefined,
-        equipmentType: formEquipmentType || undefined,
-        serialNumber: formSerialNumber || undefined,
-        scientificName: formScientificName || undefined,
-        trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
-      };
-      storage.updateProduct(updated);
-    } else {
-      // إضافة صنف جديد
-      const batches: ProductBatch[] = [];
-      if (formInitialBatch.trim() && formExpiryDate.trim()) {
-        batches.push({
-          id: storage.generateUUID(),
-          productId: '',
-          batchNumber: formInitialBatch.trim(),
-          expiryDate: formExpiryDate.trim(),
-          quantity: Math.max(0, initialQty),
-          costPrice: purchase,
-        });
+    setIsSubmitting(true);
+    try {
+      if (editingProduct) {
+        const updated: Product = {
+          ...editingProduct,
+          nameAr: formNameAr.trim(),
+          barcode: formBarcode.trim() || undefined,
+          category: formCategory.trim(),
+          unit: formUnit,
+          purchasePrice: purchase,
+          sellPrice: sell,
+          minStockAlert: minAlert,
+          storageLocation: formLocation.trim() || undefined,
+          oemNumber: formOemNumber.trim() || undefined,
+          manufacturer: formManufacturer.trim() || undefined,
+          compatibleModels: formCompatibility.trim() || undefined,
+          equipmentType: formEquipmentType.trim() || undefined,
+          serialNumber: formSerialNumber.trim() || undefined,
+          scientificName: formScientificName.trim() || undefined,
+          trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
+        };
+        await dexieDataService.saveProductAtomic(updated, true);
+      } else {
+        const newProductId = storage.generateUUID();
+        const batches: ProductBatch[] = [];
+        if (formInitialBatch.trim() && formExpiryDate.trim()) {
+          batches.push({
+            id: storage.generateUUID(),
+            productId: newProductId,
+            batchNumber: formInitialBatch.trim(),
+            expiryDate: formExpiryDate.trim(),
+            quantity: initialQty,
+            costPrice: purchase,
+          });
+        }
+
+        const totalStock =
+          batches.length > 0
+            ? batches.reduce((s, b) => s + b.quantity, 0)
+            : initialQty;
+
+        const newProduct: Product = {
+          id: newProductId,
+          code: inventory.generateProductCode(activeTab),
+          activityId: activeTab,
+          barcode: formBarcode.trim() || undefined,
+          nameAr: formNameAr.trim(),
+          category: formCategory.trim(),
+          unit: formUnit,
+          purchasePrice: purchase,
+          sellPrice: sell,
+          currentStock: totalStock,
+          minStockAlert: minAlert,
+          storageLocation: formLocation.trim() || undefined,
+          oemNumber: formOemNumber.trim() || undefined,
+          manufacturer: formManufacturer.trim() || undefined,
+          compatibleModels: formCompatibility.trim() || undefined,
+          equipmentType: formEquipmentType.trim() || undefined,
+          serialNumber: formSerialNumber.trim() || undefined,
+          scientificName: formScientificName.trim() || undefined,
+          trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
+          batches: batches.length > 0 ? batches : undefined,
+        };
+        await dexieDataService.saveProductAtomic(newProduct, false);
       }
 
-      inventory.createProduct({
-        activityId: activeTab,
-        barcode: formBarcode || undefined,
-        nameAr: formNameAr,
-        category: formCategory,
-        unit: formUnit,
-        purchasePrice: purchase,
-        sellPrice: sell,
-        minStockAlert: minAlert,
-        storageLocation: formLocation || undefined,
-        oemNumber: formOemNumber || undefined,
-        manufacturer: formManufacturer || undefined,
-        compatibleModels: formCompatibility || undefined,
-        equipmentType: formEquipmentType || undefined,
-        serialNumber: formSerialNumber || undefined,
-        scientificName: formScientificName || undefined,
-        trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
-        batches: batches.length > 0 ? batches : undefined,
-      });
+      setIsAddModalOpen(false);
+      resetForm();
+      onRefresh();
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'تعذر حفظ الصنف.');
+    } finally {
+      setIsSubmitting(false);
     }
-
-    setIsAddModalOpen(false);
-    resetForm();
-    onRefresh();
   };
 
-  const handleDeleteProduct = (productId: string) => {
-    if (confirm('هل أنت متأكد من حذف هذا الصنف من المستودع؟')) {
-      storage.deleteProduct(productId);
+  const confirmDeleteProduct = async () => {
+    if (!deleteConfirmProduct || isSubmitting) return;
+    setTableError(null);
+    setIsSubmitting(true);
+    try {
+      await dexieDataService.deleteProductAtomic(deleteConfirmProduct.id);
+      setDeleteConfirmProduct(null);
       onRefresh();
+    } catch (err: unknown) {
+      setTableError(err instanceof Error ? err.message : 'تعذر حذف الصنف.');
+      setDeleteConfirmProduct(null);
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleSaveAdjustment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!adjustProduct || isSubmitting) return;
+    setAdjustError(null);
+
+    const delta = Number(adjustDelta);
+    if (!Number.isFinite(delta) || delta === 0) {
+      setAdjustError('أدخل كمية تسوية صالحة (+ للزيادة أو - للنقصان).');
+      return;
+    }
+
+    setIsSubmitting(true);
+    try {
+      await dexieDataService.adjustProductStockAtomic({
+        productId: adjustProduct.id,
+        deltaQuantity: delta,
+        reason: adjustReason.trim(),
+        batchNumber: adjustBatch.trim() || undefined,
+        expiryDate: adjustExpiry.trim() || undefined,
+      });
+      setAdjustProduct(null);
+      setAdjustDelta('');
+      setAdjustReason('');
+      setAdjustBatch('');
+      setAdjustExpiry('');
+      onRefresh();
+    } catch (err: unknown) {
+      setAdjustError(err instanceof Error ? err.message : 'تعذر تنفيذ التسوية الجردية.');
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -349,6 +422,18 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
         </div>
       </div>
 
+      {tableError && (
+        <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-rose-800 text-xs flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+            <span>{tableError}</span>
+          </div>
+          <button onClick={() => setTableError(null)} className="text-rose-600 hover:text-rose-900">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       {/* Products Table */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
         <div className="overflow-x-auto">
@@ -400,17 +485,17 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                         </span>
                       </td>
                       <td className="py-3 px-4 text-center font-mono tabular-nums text-slate-700">
-                        {p.purchasePrice.toFixed(2)} ر.س
+                        {p.purchasePrice.toFixed(2)} {currencySymbol}
                       </td>
                       <td className="py-3 px-4 text-center font-mono tabular-nums font-bold text-emerald-700">
-                        {p.sellPrice.toFixed(2)} ر.س
+                        {p.sellPrice.toFixed(2)} {currencySymbol}
                       </td>
                       <td className="py-3 px-4 text-center">
                         {p.batches && p.batches.length > 0 ? (
                           <div className="text-[11px] text-slate-600">
                             {p.batches.map((b, i) => (
                               <div key={i} className="font-mono text-[10px]">
-                                {b.batchNumber} (انتهاء: {b.expiryDate})
+                                {b.batchNumber}: {b.quantity} (انتهاء: {b.expiryDate})
                               </div>
                             ))}
                           </div>
@@ -426,6 +511,20 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                       <td className="py-3 px-4 text-center">
                         <div className="flex items-center justify-center gap-1.5">
                           <button
+                            onClick={() => {
+                              setAdjustError(null);
+                              setAdjustDelta('');
+                              setAdjustReason('');
+                              setAdjustBatch(p.batches?.[0]?.batchNumber || '');
+                              setAdjustExpiry('');
+                              setAdjustProduct(p);
+                            }}
+                            className="p-1.5 text-slate-500 hover:text-blue-700 hover:bg-blue-50 rounded-md transition-colors"
+                            title="تسوية جردية"
+                          >
+                            <ArrowUpDown className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => openEditModal(p)}
                             className="p-1.5 text-slate-500 hover:text-emerald-700 hover:bg-slate-100 rounded-md transition-colors"
                             title="تعديل بيانات الصنف"
@@ -433,7 +532,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                             <Edit2 className="w-3.5 h-3.5" />
                           </button>
                           <button
-                            onClick={() => handleDeleteProduct(p.id)}
+                            onClick={() => setDeleteConfirmProduct(p)}
                             className="p-1.5 text-slate-500 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors"
                             title="حذف الصنف"
                           >
@@ -756,10 +855,135 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg transition-colors flex items-center gap-1.5"
+                  disabled={isSubmitting}
+                  className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold rounded-lg transition-colors flex items-center gap-1.5"
                 >
                   <Check className="w-4 h-4" />
-                  <span>حفظ الصنف</span>
+                  <span>{isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الصنف'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirmProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-5 space-y-4">
+            <div className="flex items-center gap-2 text-rose-700">
+              <AlertTriangle className="w-5 h-5 shrink-0" />
+              <h4 className="text-sm font-bold text-slate-900">تأكيد حذف الصنف</h4>
+            </div>
+            <p className="text-xs text-slate-600 leading-relaxed">
+              هل أنت متأكد من حذف الصنف{' '}
+              <strong className="text-slate-900">{deleteConfirmProduct.nameAr}</strong>{' '}
+              (<span className="font-mono">{deleteConfirmProduct.code}</span>)؟
+            </p>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmProduct(null)}
+                className="px-4 py-1.5 border border-slate-200 rounded-lg text-xs text-slate-600 hover:bg-slate-50"
+              >
+                إلغاء
+              </button>
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={confirmDeleteProduct}
+                className="px-4 py-1.5 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white rounded-lg text-xs font-bold"
+              >
+                {isSubmitting ? 'جارٍ الحذف...' : 'تأكيد الحذف'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Stock Count Adjustment Modal (INV-07) */}
+      {adjustProduct && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
+          <div className="bg-white rounded-xl shadow-2xl max-w-md w-full overflow-hidden border border-slate-200">
+            <div className="flex items-center justify-between px-5 py-3.5 bg-slate-900 text-white">
+              <h4 className="text-xs font-bold">تسوية جردية ذرية: {adjustProduct.nameAr}</h4>
+              <button onClick={() => setAdjustProduct(null)} className="text-slate-400 hover:text-white">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={handleSaveAdjustment} className="p-5 space-y-3 text-xs">
+              {adjustError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg flex items-center gap-2">
+                  <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{adjustError}</span>
+                </div>
+              )}
+              <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg flex justify-between">
+                <span className="text-slate-600">الرصيد الدفتري الحالي:</span>
+                <span className="font-mono font-bold text-slate-900">
+                  {adjustProduct.currentStock} {adjustProduct.unit}
+                </span>
+              </div>
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">كمية التسوية (+ زيادة / - خصم) *</label>
+                <input
+                  type="number"
+                  step="any"
+                  required
+                  value={adjustDelta}
+                  onChange={(e) => setAdjustDelta(e.target.value)}
+                  placeholder="مثال: -2 أو 5"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono"
+                />
+              </div>
+              {(adjustProduct.trackExpiry || (adjustProduct.batches && adjustProduct.batches.length > 0)) && (
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">رقم التشغيلة</label>
+                    <input
+                      type="text"
+                      value={adjustBatch}
+                      onChange={(e) => setAdjustBatch(e.target.value)}
+                      placeholder="BTH-01"
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">تاريخ الانتهاء (للزيادة)</label>
+                    <input
+                      type="date"
+                      value={adjustExpiry}
+                      onChange={(e) => setAdjustExpiry(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono"
+                    />
+                  </div>
+                </div>
+              )}
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">سبب التسوية الجردية *</label>
+                <input
+                  type="text"
+                  required
+                  value={adjustReason}
+                  onChange={(e) => setAdjustReason(e.target.value)}
+                  placeholder="مثال: جرد دوري / تالف / عجز مخزني"
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setAdjustProduct(null)}
+                  className="px-4 py-1.5 border border-slate-200 rounded-lg text-slate-600"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold rounded-lg"
+                >
+                  {isSubmitting ? 'جارٍ الاعتماد...' : 'اعتماد التسوية'}
                 </button>
               </div>
             </form>

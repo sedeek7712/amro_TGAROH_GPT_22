@@ -17,8 +17,11 @@ import {
   Check,
   Building,
   UserCheck,
+  AlertCircle,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
+import { dexieDataService } from '../../services/dexieDataService';
+import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveParties, useLiveInvoices, useLiveVouchers } from '../../hooks/useLiveDexie';
 import { Party, PartyType, Invoice, PaymentVoucher } from '../../types/erp';
 
@@ -38,10 +41,16 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
   const [formAddress, setFormAddress] = useState('');
   const [formTaxNumber, setFormTaxNumber] = useState('');
   const [formCreditLimit, setFormCreditLimit] = useState('');
+  const [formError, setFormError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const parties = useLiveParties(activeTab);
+  const allParties = useLiveParties();
+  const parties = allParties.filter((p) => p.type === activeTab);
+  const customersCount = allParties.filter((p) => p.type === 'CUSTOMER').length;
+  const suppliersCount = allParties.filter((p) => p.type === 'SUPPLIER').length;
   const allInvoices = useLiveInvoices();
   const allVouchers = useLiveVouchers();
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   const filteredParties = parties.filter((p) => {
     const q = searchQuery.toLowerCase();
@@ -53,9 +62,14 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
     );
   });
 
-  const handleSaveParty = (e: React.FormEvent) => {
+  const handleSaveParty = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formName.trim() || !formPhone.trim()) return;
+    if (isSubmitting) return;
+    setFormError(null);
+    if (!formName.trim() || !formPhone.trim()) {
+      setFormError('الاسم ورقم الهاتف مطلوبان.');
+      return;
+    }
 
     const newParty: Party = {
       id: storage.generateUUID(),
@@ -68,14 +82,22 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
       creditLimit: Number(formCreditLimit) || undefined,
     };
 
-    storage.addParty(newParty);
-    setIsAddModalOpen(false);
-    setFormName('');
-    setFormPhone('');
-    setFormAddress('');
-    setFormTaxNumber('');
-    setFormCreditLimit('');
-    onRefresh();
+    setIsSubmitting(true);
+    try {
+      await dexieDataService.savePartyAtomic(newParty, false);
+      setIsAddModalOpen(false);
+      setFormName('');
+      setFormPhone('');
+      setFormAddress('');
+      setFormTaxNumber('');
+      setFormCreditLimit('');
+      setFormError(null);
+      onRefresh();
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'تعذر حفظ البيانات.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   // استخراج حركات كشف الحساب للشخص المحدد
@@ -151,7 +173,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
-            العملاء والمدينون ({storage.getParties('CUSTOMER').length})
+            العملاء والمدينون ({customersCount})
           </button>
           <button
             onClick={() => setActiveTab('SUPPLIER')}
@@ -161,7 +183,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
                 : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
             }`}
           >
-            الموردون والدائنون ({storage.getParties('SUPPLIER').length})
+            الموردون والدائنون ({suppliersCount})
           </button>
         </div>
 
@@ -227,7 +249,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
                             : 'bg-slate-100 text-slate-700'
                         }`}
                       >
-                        {party.balance.toFixed(2)} ر.س
+                        {party.balance.toFixed(2)} {currencySymbol}
                       </span>
                     </td>
                     <td className="py-3 px-4 text-center">
@@ -258,6 +280,12 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
               </button>
             </div>
             <form onSubmit={handleSaveParty} className="p-5 space-y-3 text-xs">
+              {formError && (
+                <div className="p-2.5 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span>{formError}</span>
+                </div>
+              )}
               <div>
                 <label className="block font-semibold text-slate-700 mb-1">الاسم التجاري أو الشخصي *</label>
                 <input
@@ -326,9 +354,10 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg"
+                  disabled={isSubmitting}
+                  className="px-4 py-1.5 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold rounded-lg"
                 >
-                  حفظ وتسجيل
+                  {isSubmitting ? 'جارٍ الحفظ...' : 'حفظ وتسجيل'}
                 </button>
               </div>
             </form>
@@ -414,7 +443,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
               <div className="p-4 bg-slate-50 rounded-lg border border-slate-200 flex justify-between items-center text-sm font-bold">
                 <span>الرصيد الدفتري الختامي:</span>
                 <span className="font-mono tabular-nums text-base text-emerald-800">
-                  {selectedPartyForStatement.balance.toFixed(2)} ر.س
+                  {selectedPartyForStatement.balance.toFixed(2)} {currencySymbol}
                 </span>
               </div>
             </div>

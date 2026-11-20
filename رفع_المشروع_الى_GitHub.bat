@@ -1,33 +1,56 @@
 @echo off
-title Push to GitHub
+chcp 65001 >nul
+title Safe GitHub Sync (No Force Push)
 cd /d "%~dp0"
 
 echo ====================================================
-echo Cleaning Git Locks and Preparing Push...
+echo Checking Repository Status...
 echo ====================================================
 echo.
 
-:: حذف ملف القفل العالق إن وجد
-if exist ".git\index.lock" del /f /q ".git\index.lock"
+where git >nul 2>&1
+if %ERRORLEVEL% neq 0 (
+    echo [X] Git is not installed on this machine.
+    pause
+    exit /b 1
+)
 
-:: ضبط الفرع والرابط
-git remote remove origin >nul 2>&1
-git remote add origin https://github.com/sedeek7712/amro_TGAROH_GPT_22.git
+if exist ".git\index.lock" (
+    echo [!] Active Git lock detected (.git\index.lock).
+    echo     Close other Git processes before continuing. Aborting safely.
+    pause
+    exit /b 1
+)
 
-echo Adding files...
+git status -s
+echo.
+set /p COMMIT_MSG="Enter commit message (or press Enter for default): "
+if "%COMMIT_MSG%"=="" set COMMIT_MSG=Update ERP System
+
 git add .
+git commit -m "%COMMIT_MSG%"
+if %ERRORLEVEL% neq 0 (
+    echo [!] No new changes committed or commit aborted.
+)
 
-echo Committing files...
-git commit -m "Update ERP System"
+echo Rebasing with origin/main...
+git pull --rebase origin main
+if %ERRORLEVEL% neq 0 (
+    echo [X] Rebase conflict or remote error. Resolve conflicts manually before pushing.
+    pause
+    exit /b 1
+)
 
-echo Setting branch to main...
-git branch -M main
-
-echo Pushing to GitHub...
-git push -u origin main --force
+echo Pushing to origin/main...
+git push -u origin main
+if %ERRORLEVEL% neq 0 (
+    echo [X] Push failed. Please inspect Git error above.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ====================================================
-echo Process complete.
+echo Safe sync complete.
 echo ====================================================
 pause

@@ -23,8 +23,8 @@ import {
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
-import { accounting } from '../../services/accountingEngine';
 import { dexieDataService } from '../../services/dexieDataService';
+import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
@@ -71,13 +71,15 @@ export const PointOfSale: React.FC<POSProps> = ({
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [batchPickerProduct, setBatchPickerProduct] = useState<Product | null>(null);
   const [mobileTab, setMobileTab] = useState<'catalog' | 'cart'>('catalog');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [clientRequestId, setClientRequestId] = useState<string>(() => storage.generateUUID());
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const products = useLiveProducts(currentActivity);
   const customers = useLiveParties('CUSTOMER');
   const cashBoxes = useLiveCashBoxes();
-  const currentCashBox = cashBoxes.find((b) => b.id === selectedCashBoxId) || cashBoxes[0];
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   // تصفية المنتجات حسب البحث
   const filteredProducts = products.filter((p) => {
@@ -202,6 +204,7 @@ export const PointOfSale: React.FC<POSProps> = ({
 
   // إتمام البيع وإصدار الفاتورة والترحيل المحاسبي بالمعاملة الذرية
   const handleCheckout = async () => {
+    if (isSubmitting) return;
     if (cart.length === 0) {
       setErrorMessage('سلة البيع فارغة! يرجى اختيار صنف واحد على الأقل.');
       return;
@@ -213,6 +216,7 @@ export const PointOfSale: React.FC<POSProps> = ({
     }
 
     setErrorMessage(null);
+    setIsSubmitting(true);
 
     // 1. حساب تكلفة البضاعة المباعة التقديرية
     let totalCogs = 0;
@@ -228,16 +232,13 @@ export const PointOfSale: React.FC<POSProps> = ({
       }
     }
 
-    // 2. تجهيز كائن الفاتورة برقم تسلسلي مستقل لكل فرع ونقطة بيع لمنع التصادم
     const activeBranch = storage.getActiveBranch();
-    const invNumber = storage.generateBranchInvoiceNumber('INV', activeBranch.code, storage.getTerminalCode());
-
     const selectedCust = customers.find((c) => c.id === selectedCustomerId);
     const finalPartyName = selectedCust ? selectedCust.nameAr : customCustomerName;
 
     const newInvoice: Invoice = {
       id: storage.generateUUID(),
-      invoiceNumber: invNumber,
+      invoiceNumber: '',
       type: 'SALE',
       activityId: currentActivity,
       branchId: activeBranch.id,
@@ -256,8 +257,8 @@ export const PointOfSale: React.FC<POSProps> = ({
     };
 
     try {
-      // 3. التنفيذ الذري المركب في IndexedDB عبر DexieDataService
-      await dexieDataService.createSalesInvoiceAtomic({
+      // 3. التنفيذ الذري المركب في IndexedDB عبر DexieDataService مع ترقيم تسلسلي ومنع تكرار
+      const res = await dexieDataService.createSalesInvoiceAtomic({
         invoice: newInvoice,
         totalCogs: Number(totalCogs.toFixed(2)),
         stockDeductions: cart.map((item) => ({
@@ -265,18 +266,22 @@ export const PointOfSale: React.FC<POSProps> = ({
           quantity: item.quantity,
           batchNumber: item.batchNumber,
         })),
+        clientRequestId,
       });
 
-      // 4. فتح نافذة الإيصال وتصفير السلة
-      setCompletedInvoice(newInvoice);
+      // 4. فتح نافذة الإيصال وتصفير السلة وتدوير معرف الطلب
+      setCompletedInvoice(res.invoice);
       setCart([]);
       setDiscountAmount(0);
       setPaidAmountInput('');
       setInvoiceNotes('');
+      setClientRequestId(storage.generateUUID());
       onRefresh();
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'حدث خطأ أثناء إتمام عملية البيع.';
       setErrorMessage(msg);
+    } finally {
+      setIsSubmitting(false);
     }
   };
 
@@ -439,7 +444,7 @@ export const PointOfSale: React.FC<POSProps> = ({
 
                       <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between">
                         <span className="font-bold font-mono tabular-nums text-xs text-emerald-800">
-                          {p.sellPrice.toFixed(2)} ر.س
+                          {p.sellPrice.toFixed(2)} {currencySymbol}
                         </span>
                         <div className="w-6 h-6 rounded-md bg-slate-100 group-hover:bg-emerald-600 group-hover:text-white flex items-center justify-center text-slate-600 transition-colors">
                           <Plus className="w-3.5 h-3.5" />
@@ -484,7 +489,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                 <option value="">عميل نقدي عام (افتراضي)</option>
                 {customers.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.nameAr} - رصيد: {c.balance.toFixed(2)} ر.س
+                    {c.nameAr} - رصيد: {c.balance.toFixed(2)} {currencySymbol}
                   </option>
                 ))}
               </select>
@@ -500,7 +505,7 @@ export const PointOfSale: React.FC<POSProps> = ({
               >
                 {cashBoxes.map((b) => (
                   <option key={b.id} value={b.id}>
-                    إيداع في: {b.nameAr} ({b.balance.toFixed(2)} ر.س)
+                    إيداع في: {b.nameAr} ({b.balance.toFixed(2)} {currencySymbol})
                   </option>
                 ))}
               </select>
@@ -519,7 +524,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                   <div className="flex-1 min-w-0">
                     <div className="font-bold text-slate-900 truncate">{item.productName}</div>
                     <div className="text-[11px] text-slate-500 font-mono">
-                      {item.unitPrice.toFixed(2)} ر.س / {item.unit}
+                      {item.unitPrice.toFixed(2)} {currencySymbol} / {item.unit}
                       {item.batchNumber && (
                         <span className="text-emerald-700 mr-1.5 font-sans">
                           (تشغيلة: {item.batchNumber})
@@ -612,7 +617,7 @@ export const PointOfSale: React.FC<POSProps> = ({
             <div className="space-y-1 pt-1 border-t border-slate-200 text-slate-600">
               <div className="flex justify-between">
                 <span>المجموع:</span>
-                <span className="font-mono tabular-nums">{subtotal.toFixed(2)} ر.س</span>
+                <span className="font-mono tabular-nums">{subtotal.toFixed(2)} {currencySymbol}</span>
               </div>
               <div className="flex justify-between items-center">
                 <span>الخصم الممنوح:</span>
@@ -628,7 +633,7 @@ export const PointOfSale: React.FC<POSProps> = ({
               </div>
               <div className="flex justify-between text-sm font-extrabold text-slate-900 pt-1 border-t border-slate-200">
                 <span>الصافي المطلوب:</span>
-                <span className="font-mono tabular-nums text-emerald-800">{total.toFixed(2)} ر.س</span>
+                <span className="font-mono tabular-nums text-emerald-800">{total.toFixed(2)} {currencySymbol}</span>
               </div>
 
               {/* In Credit payment: Paid amount input */}
@@ -651,15 +656,17 @@ export const PointOfSale: React.FC<POSProps> = ({
             {/* Checkout Action Button */}
             <button
               onClick={handleCheckout}
-              disabled={cart.length === 0}
+              disabled={cart.length === 0 || isSubmitting}
               className={`w-full py-2.5 rounded-lg text-xs font-extrabold flex items-center justify-center gap-2 shadow-sm transition-all ${
-                cart.length === 0
+                cart.length === 0 || isSubmitting
                   ? 'bg-slate-300 text-slate-500 cursor-not-allowed'
                   : 'bg-emerald-600 hover:bg-emerald-700 text-white'
               }`}
             >
               <Check className="w-4 h-4" />
-              <span>إتمام البيع وحفظ الفاتورة ({total.toFixed(2)} ر.س)</span>
+              <span>
+                {isSubmitting ? 'جارٍ ترحيل الفاتورة...' : `إتمام البيع وحفظ الفاتورة (${total.toFixed(2)} ${currencySymbol})`}
+              </span>
             </button>
           </div>
         </div>
@@ -677,7 +684,7 @@ export const PointOfSale: React.FC<POSProps> = ({
               <span>عرض السلة ({cart.length} أصناف)</span>
             </div>
             <div className="font-mono tabular-nums text-sm bg-emerald-800/60 px-2.5 py-1 rounded-lg">
-              {total.toFixed(2)} ر.س
+              {total.toFixed(2)} {currencySymbol}
             </div>
           </button>
         </div>

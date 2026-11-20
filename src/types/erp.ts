@@ -76,6 +76,7 @@ export interface Product {
   compatibleModels?: string;   // الموديلات المتوافقة وسنوات الصنع
   equipmentType?: string;      // نوع المعدة
   serialNumber?: string;       // الرقم التسلسلي للقطعة الحساسة
+  updatedAt?: string;          // تاريخ آخر تحديث ISO
 }
 
 export type AmanatType = 'CASH' | 'ITEM';
@@ -239,6 +240,7 @@ export type UserRole = 'ADMIN' | 'ACCOUNTANT' | 'CASHIER' | 'INVENTORY_KEEPER';
 
 export interface SystemUser {
   id: string;
+  tenantId?: string;        // معرف المؤسسة التابع لها المستخدم
   username: string;
   fullName: string;
   role: UserRole;
@@ -246,11 +248,43 @@ export interface SystemUser {
   branchId?: string;        // الفرع الأساسي للمستخدم
   allowedBranches?: string[]; // الفروع المصرح للمستخدم بالوصول لها
   active: boolean;
-  password?: string;
+  passwordHash?: string;    // مشتق كلمة المرور الآمن (PBKDF2-SHA256) - لا تخزن كنص صريح
+  mustChangePassword?: boolean; // إلزام تغيير كلمة المرور الأولية عند أول دخول
+  failedLoginAttempts?: number;
+  lockedUntil?: string;     // توقيت انتهاء القفل المؤقت ISO
+  updatedAt?: string;
+}
+
+export interface AuthSession {
+  userId: string;
+  username: string;
+  role: UserRole;
+  tenantId: string;
+  branchId: string;
+  allowedBranches: string[];
+  issuedAt: string;
+  expiresAt: string;
+  signature: string;        // توقيع التحقق من سلامة الجلسة ومنع التلاعب في المتصفح
+}
+
+export interface CurrencyConfig {
+  code: string;             // رمز ISO 4217 مثل SAR أو YER
+  nameAr: string;
+  symbol: string;
+  decimalPlaces: number;
+  roundingMode: 'HALF_UP';
+}
+
+export interface DocumentSequence {
+  key: string;              // {tenantId}:{branchId}:{terminalCode}:{docType}:{year}
+  lastSeq: number;
+  updatedAt: string;
 }
 
 export interface SystemAuditLog {
   id: string;
+  tenantId?: string;
+  branchId?: string;
   timestamp: string;
   userId: string;
   userName: string;
@@ -276,6 +310,8 @@ export interface OutboxQueueItem {
   syncedAt?: string;
   lastAttemptAt?: string;
   nextRetryAt?: string;     // موعد إعادة المحاولة التالي وفق خوارزمية التراجع الأسي (Exponential Backoff)
+  leaseOwner?: string;      // معرّف العامل/النافذة الحاجزة للعنصر ذرياً
+  leaseExpiresAt?: string;  // وقت انتهاء الحجز الذري
 }
 
 export interface Tenant {
@@ -325,6 +361,7 @@ export interface SupabaseSyncConfig {
   autoSync: boolean;
   lastPullTimestamp: string | null;
   lastPushTimestamp: string | null;
+  tableCursors?: Record<string, string>;
   syncIntervalSeconds: number;
 }
 
@@ -336,4 +373,5 @@ export interface CloudSyncResult {
   durationMs: number;
   timestamp: string;
 }
+
 

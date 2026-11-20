@@ -5,6 +5,7 @@
  */
 
 import { storage } from './storageService';
+import { roundMoney } from '../config/currency';
 import {
   JournalEntry,
   JournalEntryLine,
@@ -30,8 +31,19 @@ class AccountingEngine {
       return { isValid: false, error: 'يجب أن يحتوي القيد على طرفين على الأقل (طرف مدين وطرف دائن).' };
     }
 
-    const totalDebit = lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0);
-    const totalCredit = lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0);
+    for (const line of lines) {
+      const debit = Number(line.debit) || 0;
+      const credit = Number(line.credit) || 0;
+      if (debit < 0 || credit < 0) {
+        return { isValid: false, error: 'لا يجوز أن تحتوي أسطر القيد على قيم سالبة.' };
+      }
+      if (debit > 0 && credit > 0) {
+        return { isValid: false, error: 'لا يجوز أن يحمل سطر واحد مديناً ودائناً في آن واحد.' };
+      }
+    }
+
+    const totalDebit = roundMoney(lines.reduce((sum, line) => sum + (Number(line.debit) || 0), 0));
+    const totalCredit = roundMoney(lines.reduce((sum, line) => sum + (Number(line.credit) || 0), 0));
 
     const diff = Math.abs(totalDebit - totalCredit);
     if (diff > 0.009) {

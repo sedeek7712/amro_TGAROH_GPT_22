@@ -6,10 +6,12 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { storage } from './services/storageService';
+import { authService } from './services/authService';
 import { dexieDataService } from './services/dexieDataService';
-import { useLiveCashBoxes } from './hooks/useLiveDexie';
+import { useDexieInitStatus, useLiveCashBoxes, useLiveUsers } from './hooks/useLiveDexie';
 import { ActivityId, SystemUser } from './types/erp';
-import { Sidebar, ActiveView } from './components/layout/Sidebar';
+import { ActiveView, canAccessView } from './config/rbac';
+import { Sidebar } from './components/layout/Sidebar';
 import { TopBar } from './components/layout/TopBar';
 import { LoginScreen } from './components/auth/LoginScreen';
 import { CompanySettings } from './components/settings/CompanySettings';
@@ -53,33 +55,91 @@ export default function App() {
     return true;
   });
 
-  const [currentUser, setCurrentUser] = useState<SystemUser>(() => storage.getCurrentUser());
+  const [currentUser, setCurrentUser] = useState<SystemUser>(() => authService.getCurrentActorSync() || storage.getCurrentUser());
   const cashBoxes = useLiveCashBoxes();
+  const liveUsers = useLiveUsers();
+  const initStatus = useDexieInitStatus();
 
-  // مصفوفة الصلاحيات لحماية مسارات الواجهة ومنع تجاوز الكاشير
-  const ROLE_ALLOWED_VIEWS: Record<string, ActiveView[]> = {
-    ADMIN: ['dashboard', 'pos', 'inventory', 'purchases', 'amanat', 'accounting', 'parties', 'cash', 'reports', 'users', 'sync', 'settings'],
-    ACCOUNTANT: ['dashboard', 'pos', 'inventory', 'purchases', 'amanat', 'accounting', 'parties', 'cash', 'reports', 'sync'],
-    INVENTORY_KEEPER: ['dashboard', 'inventory', 'purchases'],
-    CASHIER: ['dashboard', 'pos', 'inventory'],
-  };
-  const isViewAllowed = (ROLE_ALLOWED_VIEWS[currentUser?.role || 'CASHIER'] || ROLE_ALLOWED_VIEWS.CASHIER).includes(activeView);
+  const isViewAllowed = canAccessView(currentUser?.role, activeView);
 
   useEffect(() => {
     dexieDataService.initialize().catch((err) => {
-      console.warn('[App] Error initializing Dexie storage:', err);
+      console.error('[App] Error initializing Dexie storage:', err);
     });
   }, []);
 
+  // استعادة والتحقق من الجلسة الموقعة مقابل قاعدة البيانات ومنع العبث بين التبويبات
+  useEffect(() => {
+    if (initStatus.state !== 'READY' || liveUsers.length === 0) return;
+    let cancelled = false;
+    authService.validateSession(liveUsers).then((res) => {
+      if (cancelled) return;
+      if (res.valid && res.user) {
+        setCurrentUser(res.user);
+        setIsLoggedIn(true);
+      } else if (isLoggedIn && !authService.getCurrentActorSync()) {
+        setIsLoggedIn(false);
+        setActiveView('dashboard');
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [initStatus.state, liveUsers]);
+
+  useEffect(() => {
+    const onStorage = () => {
+      if (initStatus.state !== 'READY' || liveUsers.length === 0) return;
+      authService.validateSession(liveUsers).then((res) => {
+        if (!res.valid || !res.user) {
+          setIsLoggedIn(false);
+          setActiveView('dashboard');
+        } else {
+          setCurrentUser(res.user);
+        }
+      });
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [initStatus.state, liveUsers]);
+
   const handleRefresh = useCallback(() => {
     setRefreshKey((prev) => prev + 1);
-    setCurrentUser(storage.getCurrentUser());
+    const actor = authService.getCurrentActorSync();
+    if (actor) setCurrentUser(actor);
   }, []);
 
   const handleLogout = useCallback(() => {
+    authService.logout();
     setIsLoggedIn(false);
     setActiveView('dashboard');
   }, []);
+
+  // حظر التمهيد عند فشل قاعدة البيانات (DB-03)
+  if (initStatus.state === 'FAILED') {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center bg-slate-950 text-white p-6" dir="rtl">
+        <div className="max-w-md w-full bg-slate-900 border border-rose-500/40 rounded-2xl p-6 text-center space-y-4 shadow-2xl">
+          <div className="w-12 h-12 rounded-full bg-rose-500/20 text-rose-400 flex items-center justify-center mx-auto">
+            <ShieldAlert className="w-6 h-6" />
+          </div>
+          <h1 className="text-base font-bold text-white">تعذر تهيئة قاعدة البيانات المحلية</h1>
+          <p className="text-xs text-slate-300 leading-relaxed">
+            {initStatus.error || 'حدث خطأ أثناء فتح قاعدة البيانات المحاسبية. لحماية البيانات من الفقدان أو التضارب، تم إيقاف الكتابة لحين معالجة الخطأ.'}
+          </p>
+          <button
+            onClick={() => {
+              dexieDataService.resetForTests();
+              dexieDataService.initialize().catch(() => {});
+            }}
+            className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl transition-colors"
+          >
+            إعادة محاولة التهيئة
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   // إذا لم يكن مسجلاً دخوله اعرض شاشة الدخول
   if (!isLoggedIn) {
@@ -189,7 +249,6 @@ export default function App() {
 
           {activeView === 'pos' && (
             <PointOfSale
-              key={refreshKey}
               selectedActivity={selectedActivity}
               setSelectedActivity={setSelectedActivity}
               onRefresh={handleRefresh}
@@ -198,7 +257,6 @@ export default function App() {
 
           {activeView === 'inventory' && (
             <InventoryManager
-              key={refreshKey}
               selectedActivity={selectedActivity}
               setSelectedActivity={setSelectedActivity}
               onRefresh={handleRefresh}
@@ -206,32 +264,31 @@ export default function App() {
           )}
 
           {activeView === 'purchases' && (
-            <PurchasesManager key={refreshKey} onRefresh={handleRefresh} />
+            <PurchasesManager onRefresh={handleRefresh} />
           )}
 
           {activeView === 'amanat' && (
-            <AmanatManager key={refreshKey} onRefresh={handleRefresh} />
+            <AmanatManager onRefresh={handleRefresh} />
           )}
 
           {activeView === 'accounting' && (
-            <AccountingModule key={refreshKey} onRefresh={handleRefresh} />
+            <AccountingModule onRefresh={handleRefresh} />
           )}
 
           {activeView === 'parties' && (
-            <PartiesManager key={refreshKey} onRefresh={handleRefresh} />
+            <PartiesManager onRefresh={handleRefresh} />
           )}
 
           {activeView === 'cash' && (
-            <CashManager key={refreshKey} onRefresh={handleRefresh} />
+            <CashManager onRefresh={handleRefresh} />
           )}
 
           {activeView === 'reports' && (
-            <ReportsManager key={refreshKey} />
+            <ReportsManager />
           )}
 
           {activeView === 'users' && (
             <UserPermissionsManager
-              key={refreshKey}
               currentUser={currentUser}
               setCurrentUser={setCurrentUser}
               onRefresh={handleRefresh}
@@ -239,10 +296,10 @@ export default function App() {
           )}
 
           {activeView === 'sync' && (
-            <SyncBackupModal key={refreshKey} onRefresh={handleRefresh} />
+            <SyncBackupModal onRefresh={handleRefresh} />
           )}
           {activeView === 'settings' && (
-            <CompanySettings key={refreshKey} onRefresh={handleRefresh} />
+            <CompanySettings onRefresh={handleRefresh} />
           )}
             </>
           )}
@@ -260,35 +317,41 @@ export default function App() {
             <span>الرئيسية</span>
           </button>
 
-          <button
-            onClick={() => setActiveView('pos')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${
-              activeView === 'pos' ? 'text-emerald-400' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <ShoppingCart className="w-5 h-5" />
-            <span>نقطة بيع</span>
-          </button>
+          {canAccessView(currentUser.role, 'pos') && (
+            <button
+              onClick={() => setActiveView('pos')}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${
+                activeView === 'pos' ? 'text-emerald-400' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <ShoppingCart className="w-5 h-5" />
+              <span>نقطة بيع</span>
+            </button>
+          )}
 
-          <button
-            onClick={() => setActiveView('inventory')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${
-              activeView === 'inventory' ? 'text-emerald-400' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Package className="w-5 h-5" />
-            <span>المخزون</span>
-          </button>
+          {canAccessView(currentUser.role, 'inventory') && (
+            <button
+              onClick={() => setActiveView('inventory')}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${
+                activeView === 'inventory' ? 'text-emerald-400' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <Package className="w-5 h-5" />
+              <span>المخزون</span>
+            </button>
+          )}
 
-          <button
-            onClick={() => setActiveView('amanat')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${
-              activeView === 'amanat' ? 'text-purple-400' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <ShieldCheck className="w-5 h-5" />
-            <span>الأمانات</span>
-          </button>
+          {canAccessView(currentUser.role, 'amanat') && (
+            <button
+              onClick={() => setActiveView('amanat')}
+              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${
+                activeView === 'amanat' ? 'text-purple-400' : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <ShieldCheck className="w-5 h-5" />
+              <span>الأمانات</span>
+            </button>
+          )}
 
           <button
             onClick={() => setIsInstallModalOpen(true)}

@@ -1,41 +1,49 @@
 /**
  * نظام الإدارة التجارية والمحاسبية المتكامل
  * سكريبت البنية السحابية وسياسات أمان صفوف الجداول (PostgreSQL / Supabase RLS)
- * يفرض الحجب بالافتراض (Deny by Default)، والتحقق الصارم من الهوية، وعزل الفروع والمؤسسات
+ * مرتبط تطابقياً مع src/db/supabaseRlsPolicies.sql كمصدر وحيد للحقيقة (DB-04)
  */
 
+export const EXPECTED_SUPABASE_TABLES = [
+  'erp_tenants',
+  'erp_branches',
+  'erp_devices',
+  'erp_tenant_users',
+  'erp_accounts',
+  'erp_cash_boxes',
+  'erp_products',
+  'erp_parties',
+  'erp_invoices',
+  'erp_journal_entries',
+  'erp_payment_vouchers',
+  'erp_amanat_items',
+  'erp_outbox_sync_log',
+] as const;
+
 export const SUPABASE_RLS_SQL = `-- ==============================================================================
--- نظام الإدارة التجارية والمحاسبية المتكامل
--- Multi-Tenant & Multi-Branch PostgreSQL & Supabase Row-Level Security (RLS) Schema
--- ==============================================================================
--- 1. يضمن العزل التام للمؤسسات عبر tenant_id والفروع عبر branch_id.
--- 2. يفرض سياسة الحجب بالافتراض (Deny by Default) عند غياب الهوية أو فشل التوثيق.
--- 3. يمنع انتحال دور ADMIN؛ لا يمكن رفع الصلاحيات إلا عبر JWT موقع من الخادم حصراً.
--- 4. يدعم المزامنة ثنائية الاتجاه مع Dexie/IndexedDB لعدة أجهزة مع الحفاظ على UUIDs.
--- 5. يمنع تكرار القيود والخصم المالي والمخزني عبر جدول منع التكرار (Idempotency Key).
--- 6. يحجب القيود المحاسبية والتقارير المالية وإدارة المستخدمين عن الكاشير.
+-- نظام الإدارة التجارية والمحاسبية المتكامل (multi_activity_erp)
+-- المخطط السحابي الموحد وسياسات أمان صفوف الجداول (PostgreSQL / Supabase RLS)
+-- المرجع الوحيد للحقيقة (Single Source of Truth) - يعالج SEC-03, SEC-04, SEC-05, DB-04, CFG-01
 -- ==============================================================================
 
 CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
--- 1. جدول المؤسسات (Tenants)
+-- ==============================================================================
+-- 1. جداول المؤسسات والفروع والأجهزة والمستخدمين
+-- ==============================================================================
+
 CREATE TABLE IF NOT EXISTS erp_tenants (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     code TEXT NOT NULL UNIQUE,
-    currency TEXT DEFAULT 'YER',
+    currency TEXT NOT NULL DEFAULT 'SAR',
     tax_number TEXT,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
-INSERT INTO erp_tenants (id, name, code, currency)
-VALUES ('tenant_default', 'المؤسسة التجارية المركزية', 'MAIN-HQ', 'YER')
-ON CONFLICT (id) DO NOTHING;
-
--- 2. جدول الفروع (Branches)
 CREATE TABLE IF NOT EXISTS erp_branches (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
@@ -45,21 +53,18 @@ CREATE TABLE IF NOT EXISTS erp_branches (
     address TEXT,
     phone TEXT,
     is_active BOOLEAN DEFAULT TRUE,
+    is_deleted BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id),
     UNIQUE (tenant_id, code)
 );
 
-INSERT INTO erp_branches (id, tenant_id, code, name_ar, is_main, is_active)
-VALUES ('branch_main', 'tenant_default', 'BR01', 'الفرع الرئيسي', TRUE, TRUE)
-ON CONFLICT (tenant_id, id) DO NOTHING;
-
--- 3. جدول الأجهزة ونقاط البيع المسجلة للمزامنة (Devices Registration)
+-- SEC-05: ربط branch_id بمفتاح أجنبي مركب مع جدول الفروع داخل نفس المؤسسة (tenant_id, branch_id)
 CREATE TABLE IF NOT EXISTS erp_devices (
     device_id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
-    branch_id TEXT REFERENCES erp_tenants(id) ON DELETE SET NULL,
+    branch_id TEXT NOT NULL,
     device_name TEXT NOT NULL,
     device_type TEXT DEFAULT 'WEB',
     registered_at TIMESTAMPTZ DEFAULT NOW(),
@@ -67,23 +72,64 @@ CREATE TABLE IF NOT EXISTS erp_devices (
     last_push_at TIMESTAMPTZ,
     sequence_number BIGINT DEFAULT 0,
     is_active BOOLEAN DEFAULT TRUE,
-    PRIMARY KEY (tenant_id, device_id)
+    PRIMARY KEY (tenant_id, device_id),
+    CONSTRAINT fk_devices_tenant_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
 );
 
--- 4. جدول صلاحيات وأدوار مستخدمي المؤسسة
 CREATE TABLE IF NOT EXISTS erp_tenant_users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
-    branch_id TEXT,
+    branch_id TEXT NOT NULL,
     user_id UUID,
     username TEXT NOT NULL,
     role TEXT NOT NULL CHECK (role IN ('ADMIN', 'ACCOUNTANT', 'CASHIER', 'INVENTORY_KEEPER')),
+    allowed_branches JSONB NOT NULL DEFAULT '[]'::jsonb,
     is_active BOOLEAN DEFAULT TRUE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
-    UNIQUE (tenant_id, username)
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (tenant_id, username),
+    CONSTRAINT fk_tenant_users_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
 );
 
--- 5. جدول الأصناف والمخزون والتشغيلات
+-- ==============================================================================
+-- 2. جداول الحسابات والصناديق والأعمال والمخزون
+-- ==============================================================================
+
+CREATE TABLE IF NOT EXISTS erp_accounts (
+    code TEXT NOT NULL,
+    tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
+    name_ar TEXT NOT NULL,
+    type TEXT NOT NULL CHECK (type IN ('ASSET', 'LIABILITY', 'EQUITY', 'REVENUE', 'EXPENSE')),
+    parent_code TEXT,
+    level INT NOT NULL DEFAULT 1,
+    is_leaf BOOLEAN DEFAULT TRUE,
+    cost_center_id TEXT,
+    balance NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS erp_cash_boxes (
+    id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
+    branch_id TEXT NOT NULL,
+    code TEXT NOT NULL,
+    name_ar TEXT NOT NULL,
+    account_code TEXT NOT NULL,
+    balance NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (balance >= 0),
+    is_default BOOLEAN DEFAULT FALSE,
+    is_active BOOLEAN DEFAULT TRUE,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, code),
+    CONSTRAINT fk_cash_boxes_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
+);
+
 CREATE TABLE IF NOT EXISTS erp_products (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
@@ -92,9 +138,9 @@ CREATE TABLE IF NOT EXISTS erp_products (
     name_ar TEXT NOT NULL,
     category TEXT,
     unit TEXT DEFAULT 'حبه',
-    cost_price NUMERIC(15, 4) NOT NULL DEFAULT 0,
-    selling_price NUMERIC(15, 4) NOT NULL DEFAULT 0,
-    stock_quantity NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    cost_price NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (cost_price >= 0),
+    selling_price NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (selling_price >= 0),
+    stock_quantity NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (stock_quantity >= 0),
     min_limit NUMERIC(15, 4) DEFAULT 0,
     barcode TEXT,
     oem_number TEXT,
@@ -102,12 +148,13 @@ CREATE TABLE IF NOT EXISTS erp_products (
     expiry_date DATE,
     batches_data JSONB DEFAULT '[]'::jsonb,
     is_active BOOLEAN DEFAULT TRUE,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id)
 );
 
--- 6. جدول العملاء والموردين
 CREATE TABLE IF NOT EXISTS erp_parties (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
@@ -119,16 +166,17 @@ CREATE TABLE IF NOT EXISTS erp_parties (
     balance NUMERIC(15, 4) NOT NULL DEFAULT 0,
     credit_limit NUMERIC(15, 4) DEFAULT 0,
     notes TEXT,
+    is_deleted BOOLEAN DEFAULT FALSE,
+    version INT NOT NULL DEFAULT 1,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id)
 );
 
--- 7. جدول فواتير المبيعات والمشتريات
 CREATE TABLE IF NOT EXISTS erp_invoices (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
-    branch_id TEXT NOT NULL DEFAULT 'branch_main',
+    branch_id TEXT NOT NULL,
     terminal_id TEXT,
     invoice_number TEXT NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('SALE', 'PURCHASE', 'RETURN_SALE', 'RETURN_PURCHASE')),
@@ -137,27 +185,29 @@ CREATE TABLE IF NOT EXISTS erp_invoices (
     party_name TEXT NOT NULL,
     date TIMESTAMPTZ NOT NULL,
     items JSONB NOT NULL DEFAULT '[]'::jsonb,
-    subtotal NUMERIC(15, 4) NOT NULL DEFAULT 0,
-    discount NUMERIC(15, 4) NOT NULL DEFAULT 0,
-    tax NUMERIC(15, 4) NOT NULL DEFAULT 0,
-    total NUMERIC(15, 4) NOT NULL DEFAULT 0,
-    paid_amount NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    subtotal NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (subtotal >= 0),
+    discount NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (discount >= 0),
+    tax NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (tax >= 0),
+    total NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (total >= 0),
+    paid_amount NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (paid_amount >= 0),
     payment_method TEXT NOT NULL,
     cash_box_id TEXT,
     journal_entry_id TEXT,
     is_posted BOOLEAN DEFAULT TRUE,
+    is_deleted BOOLEAN DEFAULT FALSE,
     notes TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id),
-    UNIQUE (tenant_id, invoice_number)
+    UNIQUE (tenant_id, invoice_number),
+    CONSTRAINT fk_invoices_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
 );
 
--- 8. جدول قيود اليومية العامة
 CREATE TABLE IF NOT EXISTS erp_journal_entries (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
-    branch_id TEXT NOT NULL DEFAULT 'branch_main',
+    branch_id TEXT NOT NULL,
     entry_number TEXT NOT NULL,
     date TIMESTAMPTZ NOT NULL,
     description TEXT NOT NULL,
@@ -165,24 +215,29 @@ CREATE TABLE IF NOT EXISTS erp_journal_entries (
     cost_center_id TEXT,
     reference_type TEXT,
     reference_id TEXT,
+    reversed_entry_id TEXT,
+    reversal_reason TEXT,
     lines JSONB NOT NULL DEFAULT '[]'::jsonb,
     total_debit NUMERIC(15, 4) NOT NULL DEFAULT 0,
     total_credit NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    is_deleted BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id),
-    UNIQUE (tenant_id, entry_number)
+    UNIQUE (tenant_id, entry_number),
+    CONSTRAINT fk_journal_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT chk_journal_balanced CHECK (ABS(total_debit - total_credit) <= 0.01)
 );
 
--- 9. جدول سندات القبض والصرف
 CREATE TABLE IF NOT EXISTS erp_payment_vouchers (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
-    branch_id TEXT NOT NULL DEFAULT 'branch_main',
+    branch_id TEXT NOT NULL,
     voucher_number TEXT NOT NULL,
     type TEXT NOT NULL CHECK (type IN ('RECEIPT', 'PAYMENT')),
     date TIMESTAMPTZ NOT NULL,
-    amount NUMERIC(15, 4) NOT NULL,
+    amount NUMERIC(15, 4) NOT NULL CHECK (amount > 0),
     cash_box_id TEXT NOT NULL,
     party_id TEXT,
     party_name TEXT NOT NULL,
@@ -190,26 +245,29 @@ CREATE TABLE IF NOT EXISTS erp_payment_vouchers (
     description TEXT NOT NULL,
     cost_center_id TEXT NOT NULL,
     journal_entry_id TEXT,
+    is_deleted BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id),
-    UNIQUE (tenant_id, voucher_number)
+    UNIQUE (tenant_id, voucher_number),
+    CONSTRAINT fk_vouchers_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
 );
 
--- 10. جدول الأمانات
 CREATE TABLE IF NOT EXISTS erp_amanat_items (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
-    branch_id TEXT NOT NULL DEFAULT 'branch_main',
+    branch_id TEXT NOT NULL,
     record_number TEXT NOT NULL,
-    type TEXT NOT NULL CHECK (type IN ('CASH', 'IN_KIND')),
+    type TEXT NOT NULL CHECK (type IN ('CASH', 'ITEM', 'IN_KIND')),
     depositor_name TEXT NOT NULL,
     depositor_phone TEXT NOT NULL,
-    status TEXT NOT NULL CHECK (status IN ('ACTIVE', 'RETURNED', 'PARTIALLY_RETURNED')),
+    status TEXT NOT NULL CHECK (status IN ('HELD', 'ACTIVE', 'RETURNED', 'CANCELLED')),
     received_date TIMESTAMPTZ NOT NULL,
     expected_return_date TIMESTAMPTZ,
-    amount NUMERIC(15, 4) DEFAULT 0,
-    currency TEXT DEFAULT 'YER',
+    returned_date TIMESTAMPTZ,
+    amount NUMERIC(15, 4) DEFAULT 0 CHECK (amount >= 0),
+    currency TEXT NOT NULL DEFAULT 'SAR',
     cash_box_id TEXT,
     item_description TEXT,
     serial_number TEXT,
@@ -217,13 +275,19 @@ CREATE TABLE IF NOT EXISTS erp_amanat_items (
     recipient_signature_name TEXT,
     notes TEXT,
     journal_entry_id TEXT,
+    is_deleted BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id),
-    UNIQUE (tenant_id, record_number)
+    UNIQUE (tenant_id, record_number),
+    CONSTRAINT fk_amanat_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
 );
 
--- 11. جدول طابور المزامنة وضمان عدم التكرار (Idempotency Log)
+-- ==============================================================================
+-- 3. جدول طابور المزامنة وضمان عدم التكرار الذري (Idempotency Sync Log)
+-- ==============================================================================
+
 CREATE TABLE IF NOT EXISTS erp_outbox_sync_log (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
@@ -231,30 +295,38 @@ CREATE TABLE IF NOT EXISTS erp_outbox_sync_log (
     idempotency_key TEXT NOT NULL,
     entity_type TEXT NOT NULL,
     entity_id TEXT NOT NULL,
-    action TEXT NOT NULL,
+    action TEXT NOT NULL CHECK (action IN ('CREATE', 'UPDATE', 'DELETE')),
     status TEXT DEFAULT 'PROCESSED',
     processed_at TIMESTAMPTZ DEFAULT NOW(),
     CONSTRAINT uq_tenant_idempotency UNIQUE (tenant_id, idempotency_key)
 );
 
+CREATE INDEX IF NOT EXISTS idx_products_tenant_updated ON erp_products(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_parties_tenant_updated ON erp_parties(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_invoices_tenant_updated ON erp_invoices(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_journal_tenant_updated ON erp_journal_entries(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_vouchers_tenant_updated ON erp_payment_vouchers(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_amanat_tenant_updated ON erp_amanat_items(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_accounts_tenant_updated ON erp_accounts(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_cash_boxes_tenant_updated ON erp_cash_boxes(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_sync_log_tenant_key ON erp_outbox_sync_log(tenant_id, idempotency_key);
+
 -- ==============================================================================
--- دوال استخلاص هوية المؤسسة والأدوار مع سياسة الحجب الصارم (DENY BY DEFAULT)
+-- 4. دوال استخلاص الهوية الصارمة من JWT الموقع فقط (DENY BY DEFAULT - SEC-03 & SEC-04)
+--    يُحظر تماماً قراءة الترويسات غير الموقعة (request.headers) أو إرجاع قيم افتراضية مثل ADMIN/tenant_default
 -- ==============================================================================
 
 CREATE OR REPLACE FUNCTION current_app_tenant_id()
 RETURNS TEXT AS $$
 DECLARE
+    v_claims JSONB;
     v_tenant_id TEXT;
 BEGIN
-    -- 1. الأولوية المطلقة لـ JWT Claims الموقعة من خادم المصادقة
-    v_tenant_id := NULLIF((auth.jwt() ->> 'tenant_id'), '');
-    
-    -- 2. في حال غياب JWT، لا يُقبل أي معرف إلا إذا كان محقوناً في بيئة التطوير المحلية الآمنة
-    IF v_tenant_id IS NULL THEN
-        v_tenant_id := NULLIF(current_setting('request.headers', true)::json->>'x-tenant-id', '');
+    v_claims := auth.jwt();
+    IF v_claims IS NULL THEN
+        RETURN NULL;
     END IF;
-
-    -- الحجب بالافتراض: إذا لم تثبت الهوية يُعاد NULL لرفض الوصول كلياً
+    v_tenant_id := NULLIF(COALESCE(v_claims ->> 'tenant_id', v_claims -> 'app_metadata' ->> 'tenant_id'), '');
     RETURN v_tenant_id;
 EXCEPTION WHEN OTHERS THEN
     RETURN NULL;
@@ -264,25 +336,17 @@ $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 CREATE OR REPLACE FUNCTION current_app_user_role()
 RETURNS TEXT AS $$
 DECLARE
+    v_claims JSONB;
     v_role TEXT;
 BEGIN
-    -- 1. الأولوية المطلقة لـ JWT Claims الموقعة حصراً
-    v_role := NULLIF((auth.jwt() ->> 'role'), '');
-    
-    -- 2. في بيئة التطوير، تقرأ الترويسة بشرط عدم منح دور ADMIN عبر الترويسات المكشوفة
-    IF v_role IS NULL THEN
-        v_role := NULLIF(current_setting('request.headers', true)::json->>'x-user-role', '');
-        -- حماية أمنية: منع الترويسة من منح صلاحية مدير عام ADMIN دون توثيق JWT
-        IF v_role = 'ADMIN' AND auth.jwt() IS NULL THEN
-            v_role := 'CASHIER';
-        END IF;
+    v_claims := auth.jwt();
+    IF v_claims IS NULL THEN
+        RETURN 'DENIED';
     END IF;
-
-    -- الحجب بالافتراض: لا عودة كـ ADMIN أبداً عند الخطأ
+    v_role := NULLIF(COALESCE(v_claims ->> 'erp_role', v_claims -> 'app_metadata' ->> 'role', v_claims ->> 'role'), '');
     IF v_role NOT IN ('ADMIN', 'ACCOUNTANT', 'CASHIER', 'INVENTORY_KEEPER') THEN
         RETURN 'DENIED';
     END IF;
-
     RETURN v_role;
 EXCEPTION WHEN OTHERS THEN
     RETURN 'DENIED';
@@ -292,26 +356,51 @@ $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 CREATE OR REPLACE FUNCTION current_app_branch_id()
 RETURNS TEXT AS $$
 DECLARE
+    v_claims JSONB;
     v_branch_id TEXT;
 BEGIN
-    v_branch_id := NULLIF((auth.jwt() ->> 'branch_id'), '');
-    IF v_branch_id IS NULL THEN
-        v_branch_id := NULLIF(current_setting('request.headers', true)::json->>'x-branch-id', '');
+    v_claims := auth.jwt();
+    IF v_claims IS NULL THEN
+        RETURN NULL;
     END IF;
+    v_branch_id := NULLIF(COALESCE(v_claims ->> 'branch_id', v_claims -> 'app_metadata' ->> 'branch_id'), '');
     RETURN v_branch_id;
 EXCEPTION WHEN OTHERS THEN
     RETURN NULL;
 END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 
+-- التحقق من عضوية المستخدم الفعلي داخل المؤسسة والفرع
+CREATE OR REPLACE FUNCTION has_verified_tenant_branch_access(p_tenant_id TEXT, p_branch_id TEXT)
+RETURNS BOOLEAN AS $$
+BEGIN
+    IF current_app_tenant_id() IS NULL OR p_tenant_id IS DISTINCT FROM current_app_tenant_id() THEN
+        RETURN FALSE;
+    END IF;
+    IF current_app_user_role() = 'DENIED' THEN
+        RETURN FALSE;
+    END IF;
+    IF current_app_user_role() IN ('ADMIN', 'ACCOUNTANT') THEN
+        RETURN TRUE;
+    END IF;
+    -- الكاشير وأمين المستودع يجب أن يملكا معرف فرع صريح ومطابق
+    IF current_app_branch_id() IS NULL OR p_branch_id IS DISTINCT FROM current_app_branch_id() THEN
+        RETURN FALSE;
+    END IF;
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
+
 -- ==============================================================================
--- تفعيل Row-Level Security (RLS) وسياسات الحجب الصارم (DENY BY DEFAULT)
+-- 5. تفعيل Row-Level Security (RLS) على كافة الجداول الـ 13
 -- ==============================================================================
 
 ALTER TABLE erp_tenants ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_branches ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_devices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_tenant_users ENABLE ROW LEVEL SECURITY;
+ALTER TABLE erp_accounts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE erp_cash_boxes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_products ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_parties ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_invoices ENABLE ROW LEVEL SECURITY;
@@ -320,110 +409,162 @@ ALTER TABLE erp_payment_vouchers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_amanat_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_outbox_sync_log ENABLE ROW LEVEL SECURITY;
 
--- 1. سياسات المؤسسات: عزل تام، ولا وصول لمجهول
 CREATE POLICY tenant_isolation_tenants ON erp_tenants
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND id = current_app_tenant_id()
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND id = current_app_tenant_id() AND current_app_user_role() = 'ADMIN'
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND id = current_app_tenant_id() AND current_app_user_role() != 'DENIED')
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND id = current_app_tenant_id() AND current_app_user_role() = 'ADMIN');
 
--- 2. سياسات الفروع: عزل المؤسسة، والتعديل للمدير العام فقط
 CREATE POLICY tenant_isolation_branches ON erp_branches
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id()
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() = 'ADMIN'
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() != 'DENIED')
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() = 'ADMIN');
 
--- 3. سياسات الأجهزة:
 CREATE POLICY tenant_isolation_devices ON erp_devices
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id()
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id()
-);
+    FOR ALL USING (has_verified_tenant_branch_access(tenant_id, branch_id))
+    WITH CHECK (has_verified_tenant_branch_access(tenant_id, branch_id) AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER'));
 
--- 4. سياسات مستخدمي المنشأة: الإدارة حصرية لـ ADMIN فقط، ولا يراها الكاشير
 CREATE POLICY tenant_isolation_users ON erp_tenant_users
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() = 'ADMIN'
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() = 'ADMIN');
 
--- 5. سياسات الأصناف والمخزون: قراءة للجميع داخل المنشأة، والتعديل لأمين المخزن والمدير والمحاسب
+CREATE POLICY tenant_isolation_accounts ON erp_accounts
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
+
+CREATE POLICY tenant_isolation_cashboxes ON erp_cash_boxes
+    FOR SELECT USING (
+        current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND (
+            current_app_user_role() IN ('ADMIN', 'ACCOUNTANT') OR
+            (current_app_user_role() = 'CASHIER' AND current_app_branch_id() IS NOT NULL AND branch_id = current_app_branch_id())
+        )
+    );
+CREATE POLICY tenant_isolation_cashboxes_write ON erp_cash_boxes
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
+
 CREATE POLICY tenant_isolation_products ON erp_products
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() != 'DENIED'
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'INVENTORY_KEEPER')
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() != 'DENIED')
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'INVENTORY_KEEPER'));
 
--- 6. سياسات العملاء والموردين:
 CREATE POLICY tenant_isolation_parties ON erp_parties
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() != 'DENIED'
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER')
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER'))
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
 
--- 7. سياسات الفواتير: مقيدة بالفرع للكاشير، والمدير والمحاسب يريان كافة الفروع
+-- SEC-04: غياب current_app_branch_id() يرفض الوصول للكاشير تماماً بدلاً من فتح جميع الفروع
 CREATE POLICY tenant_isolation_invoices ON erp_invoices
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    (
-        current_app_user_role() IN ('ADMIN', 'ACCOUNTANT') OR
-        (current_app_user_role() = 'CASHIER' AND (current_app_branch_id() IS NULL OR branch_id = current_app_branch_id()))
+    FOR ALL USING (
+        current_app_tenant_id() IS NOT NULL
+        AND tenant_id = current_app_tenant_id()
+        AND (
+            current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
+            OR (current_app_user_role() = 'CASHIER' AND current_app_branch_id() IS NOT NULL AND branch_id = current_app_branch_id())
+        )
     )
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER')
-);
+    WITH CHECK (
+        current_app_tenant_id() IS NOT NULL
+        AND tenant_id = current_app_tenant_id()
+        AND (
+            current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
+            OR (current_app_user_role() = 'CASHIER' AND current_app_branch_id() IS NOT NULL AND branch_id = current_app_branch_id())
+        )
+    );
 
--- 8. سياسات القيود المحاسبية: محجوبة حظر تام ومطلق عن الكاشير وأمين المخزن!
 CREATE POLICY tenant_isolation_journal ON erp_journal_entries
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
 
--- 9. سياسات سندات القبض والصرف:
 CREATE POLICY tenant_isolation_vouchers ON erp_payment_vouchers
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
 
--- 10. سياسات الأمانات:
 CREATE POLICY tenant_isolation_amanat ON erp_amanat_items
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND 
-    tenant_id = current_app_tenant_id() AND 
-    current_app_user_role() IN ('ADMIN', 'ACCOUNTANT')
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
 
--- 11. سياسات طابور المزامنة وضمان عدم التكرار:
 CREATE POLICY tenant_isolation_outbox_log ON erp_outbox_sync_log
-FOR ALL USING (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id()
-) WITH CHECK (
-    current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id()
-);
+    FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() != 'DENIED')
+    WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() != 'DENIED');
+
+-- ==============================================================================
+-- 6. مشغلات تحديث updated_at تلقائياً ودالة المزامنة الذرية (Idempotent RPC)
+-- ==============================================================================
+
+CREATE OR REPLACE FUNCTION trigger_set_timestamp()
+RETURNS TRIGGER AS $$
+BEGIN
+  NEW.updated_at = NOW();
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE TRIGGER trg_branches_updated_at BEFORE UPDATE ON erp_branches FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_accounts_updated_at BEFORE UPDATE ON erp_accounts FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_cash_boxes_updated_at BEFORE UPDATE ON erp_cash_boxes FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_products_updated_at BEFORE UPDATE ON erp_products FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_parties_updated_at BEFORE UPDATE ON erp_parties FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_invoices_updated_at BEFORE UPDATE ON erp_invoices FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_journal_updated_at BEFORE UPDATE ON erp_journal_entries FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_vouchers_updated_at BEFORE UPDATE ON erp_payment_vouchers FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_amanat_updated_at BEFORE UPDATE ON erp_amanat_items FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+-- SYNC-01: تنفيذ الحركة المالية/المخزنية وتسجيل مفتاح عدم التكرار في معاملة واحدة لا تقبل التجزئة
+CREATE OR REPLACE FUNCTION apply_outbox_mutation(
+    p_tenant_id TEXT,
+    p_device_id TEXT,
+    p_idempotency_key TEXT,
+    p_entity_type TEXT,
+    p_entity_id TEXT,
+    p_action TEXT,
+    p_payload JSONB
+)
+RETURNS JSONB AS $$
+DECLARE
+    v_jwt_tenant TEXT;
+    v_role TEXT;
+    v_inserted UUID;
+BEGIN
+    v_jwt_tenant := current_app_tenant_id();
+    v_role := current_app_user_role();
+
+    IF v_jwt_tenant IS NULL OR v_jwt_tenant IS DISTINCT FROM p_tenant_id OR v_role = 'DENIED' THEN
+        RAISE EXCEPTION 'Unauthorized tenant or role context for outbox mutation' USING ERRCODE = '42501';
+    END IF;
+
+    INSERT INTO erp_outbox_sync_log (tenant_id, device_id, idempotency_key, entity_type, entity_id, action, status)
+    VALUES (p_tenant_id, p_device_id, p_idempotency_key, p_entity_type, p_entity_id, p_action, 'PROCESSED')
+    ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+    RETURNING id INTO v_inserted;
+
+    IF v_inserted IS NULL THEN
+        RETURN jsonb_build_object(
+            'accepted', TRUE,
+            'duplicate', TRUE,
+            'idempotency_key', p_idempotency_key,
+            'processed_at', NOW()
+        );
+    END IF;
+
+    IF p_action = 'DELETE' THEN
+        IF p_entity_type = 'PRODUCT' THEN
+            UPDATE erp_products SET is_deleted = TRUE, is_active = FALSE WHERE tenant_id = p_tenant_id AND id = p_entity_id;
+        ELSIF p_entity_type = 'PARTY' THEN
+            UPDATE erp_parties SET is_deleted = TRUE WHERE tenant_id = p_tenant_id AND id = p_entity_id;
+        ELSIF p_entity_type = 'BRANCH' THEN
+            UPDATE erp_branches SET is_deleted = TRUE, is_active = FALSE WHERE tenant_id = p_tenant_id AND id = p_entity_id;
+        ELSIF p_entity_type = 'CASHBOX' THEN
+            UPDATE erp_cash_boxes SET is_deleted = TRUE, is_active = FALSE WHERE tenant_id = p_tenant_id AND id = p_entity_id;
+        ELSIF p_entity_type = 'ACCOUNT' THEN
+            UPDATE erp_accounts SET is_deleted = TRUE WHERE tenant_id = p_tenant_id AND code = p_entity_id;
+        ELSE
+            RAISE EXCEPTION 'Hard/soft delete is prohibited for posted financial entity %', p_entity_type;
+        END IF;
+    END IF;
+
+    RETURN jsonb_build_object(
+        'accepted', TRUE,
+        'duplicate', FALSE,
+        'idempotency_key', p_idempotency_key,
+        'log_id', v_inserted,
+        'processed_at', NOW()
+    );
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 `;

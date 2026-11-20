@@ -5,6 +5,7 @@
  */
 
 import { storage } from './storageService';
+import { roundMoney } from '../config/currency';
 import { Product, ProductBatch, CommercialActivityId } from '../types/erp';
 
 class InventoryService {
@@ -29,7 +30,7 @@ class InventoryService {
 
     // حساب الرصيد الأولي من التشغيلات إن وجدت
     if (data.batches && data.batches.length > 0) {
-      totalStock = data.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0);
+      totalStock = roundMoney(data.batches.reduce((sum, b) => sum + (Number(b.quantity) || 0), 0), 4);
     }
 
     const newProduct: Product = {
@@ -57,6 +58,9 @@ class InventoryService {
     quantity: number,
     chosenBatchNumber?: string
   ): { success: boolean; totalCost: number; error?: string } {
+    if (!Number.isFinite(quantity) || quantity <= 0) {
+      return { success: false, totalCost: 0, error: 'كمية الخصم يجب أن تكون أكبر من الصفر.' };
+    }
     const products = storage.getProducts();
     const product = products.find((p) => p.id === productId);
 
@@ -75,10 +79,8 @@ class InventoryService {
     let remainingQtyToDeduct = quantity;
     let accumulatedCost = 0;
 
-    // معالجة تشغيلات الصيدلية والمواد الغذائية
     if (product.batches && product.batches.length > 0) {
       if (chosenBatchNumber) {
-        // الخصم من تشغيلة محددة اختارها الكاشير
         const batch = product.batches.find((b) => b.batchNumber === chosenBatchNumber);
         if (!batch) {
           return { success: false, totalCost: 0, error: `رقم التشغيلة ${chosenBatchNumber} غير متوفر.` };
@@ -97,11 +99,9 @@ class InventoryService {
             error: `الكمية المتاحة في التشغيلة (${chosenBatchNumber}) هي ${batch.quantity} فقط.`,
           };
         }
-        batch.quantity -= quantity;
+        batch.quantity = roundMoney(batch.quantity - quantity, 4);
         accumulatedCost = quantity * batch.costPrice;
       } else {
-        // تطبيق معيار FEFO الصارم: الصرف من التشغيلة السارية الأقرب للانتهاء
-        // فلترة التشغيلات غير المنتهية فقط
         const validBatches = product.batches
           .filter((b) => b.quantity > 0 && !this.isBatchExpired(b.expiryDate))
           .sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
@@ -118,21 +118,20 @@ class InventoryService {
         for (const batch of validBatches) {
           if (remainingQtyToDeduct <= 0) break;
           const deductFromThis = Math.min(batch.quantity, remainingQtyToDeduct);
-          batch.quantity -= deductFromThis;
-          remainingQtyToDeduct -= deductFromThis;
+          batch.quantity = roundMoney(batch.quantity - deductFromThis, 4);
+          remainingQtyToDeduct = roundMoney(remainingQtyToDeduct - deductFromThis, 4);
           accumulatedCost += deductFromThis * batch.costPrice;
         }
       }
 
-      product.currentStock = product.batches.reduce((sum, b) => sum + b.quantity, 0);
+      product.currentStock = roundMoney(product.batches.reduce((sum, b) => sum + b.quantity, 0), 4);
     } else {
-      // أصناف قطع الغيار والمعدات (بدون تشغيلات)
-      product.currentStock -= quantity;
+      product.currentStock = roundMoney(product.currentStock - quantity, 4);
       accumulatedCost = quantity * product.purchasePrice;
     }
 
     storage.updateProduct(product);
-    return { success: true, totalCost: Number(accumulatedCost.toFixed(2)) };
+    return { success: true, totalCost: roundMoney(accumulatedCost) };
   }
 
   // إضافة مخزون عند الشراء مع دعم التشغيلات وتواريخ الصلاحية

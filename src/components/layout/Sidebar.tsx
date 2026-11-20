@@ -29,20 +29,9 @@ import {
   LogOut,
 } from 'lucide-react';
 import { ActivityId, SystemUser } from '../../types/erp';
+import { ActiveView, ROLE_ALLOWED_VIEWS } from '../../config/rbac';
 
-export type ActiveView =
-  | 'dashboard'
-  | 'pos'
-  | 'inventory'
-  | 'purchases'
-  | 'amanat'
-  | 'accounting'
-  | 'parties'
-  | 'cash'
-  | 'reports'
-  | 'users'
-  | 'settings'
-  | 'sync';
+export type { ActiveView };
 
 interface SidebarProps {
   activeView: ActiveView;
@@ -82,15 +71,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     { id: 'sync' as ActiveView, label: 'المزامنة والنسخ الاحتياطي', icon: RefreshCw },
   ];
 
-  // مصفوفة الصلاحيات الصارمة (RBAC Matrix) لحماية الواجهة
-  const roleAllowedViews: Record<string, ActiveView[]> = {
-    ADMIN: ['dashboard', 'pos', 'inventory', 'purchases', 'amanat', 'accounting', 'parties', 'cash', 'reports', 'users', 'settings', 'sync'],
-    ACCOUNTANT: ['dashboard', 'pos', 'inventory', 'purchases', 'amanat', 'accounting', 'parties', 'cash', 'reports', 'sync'],
-    INVENTORY_KEEPER: ['dashboard', 'inventory', 'purchases'],
-    CASHIER: ['dashboard', 'pos', 'inventory'],
-  };
-
-  const allowedViews = roleAllowedViews[currentUser?.role || 'CASHIER'] || roleAllowedViews.CASHIER;
+  const allowedViews = ROLE_ALLOWED_VIEWS[currentUser?.role || 'CASHIER'] || ROLE_ALLOWED_VIEWS.CASHIER;
   const navItems = allNavItems.filter((item) => allowedViews.includes(item.id));
 
   const activities = [

@@ -7,6 +7,7 @@ import React, { useState } from 'react';
 import { AmanatRecord } from '../../types/erp';
 import { Printer, X, ShieldCheck, MessageSquare } from 'lucide-react';
 import { CustomerNotificationModal } from './CustomerNotificationModal';
+import { getActiveCurrencyConfig } from '../../config/currency';
 
 interface AmanatReceiptModalProps {
   record: AmanatRecord | null;
@@ -16,6 +17,7 @@ interface AmanatReceiptModalProps {
 export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({ record, onClose }) => {
   const [isNotificationOpen, setIsNotificationOpen] = useState(false);
   if (!record) return null;
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   return (
     <>
@@ -112,7 +114,7 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({ record, 
             {record.type === 'CASH' ? (
               <div className="flex justify-between items-center py-2 bg-purple-50 px-3 rounded text-purple-950 font-bold">
                 <span>المبلغ المودع بأمانة:</span>
-                <span className="text-base font-mono tabular-nums">{record.amount.toFixed(2)} ر.س</span>
+                <span className="text-base font-mono tabular-nums">{record.amount.toFixed(2)} {currencySymbol}</span>
               </div>
             ) : (
               <div>

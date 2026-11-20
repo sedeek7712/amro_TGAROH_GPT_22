@@ -16,6 +16,7 @@ let shuttingDown = false;
 // and remains stable even if the application display name changes.
 const stableUserDataPath = path.join(app.getPath('appData'), STABLE_DATA_FOLDER);
 app.setName(STABLE_DATA_FOLDER);
+app.setAppUserModelId('com.amroalnmary.erp');
 app.setPath('userData', stableUserDataPath);
 
 const hasSingleInstance = app.requestSingleInstanceLock();

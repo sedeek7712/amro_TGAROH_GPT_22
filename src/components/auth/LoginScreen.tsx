@@ -22,7 +22,6 @@ import {
 import { db } from '../../db/erpDatabase';
 import {
   authService,
-  hashPassword,
   needsInitialAdminSetup,
   validatePasswordStrength,
 } from '../../services/authService';
@@ -74,24 +73,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
 
     setLoading(true);
     try {
-      const passwordHash = await hashPassword(newPassword);
-      const updatedAdmin: SystemUser = {
-        ...adminUser,
-        passwordHash,
-        mustChangePassword: false,
-        failedLoginAttempts: 0,
-        lockedUntil: undefined,
-        tenantId: adminUser.tenantId || 'tenant_main',
-        branchId: adminUser.branchId || 'branch_main',
-        allowedBranches:
-          adminUser.allowedBranches && adminUser.allowedBranches.length > 0
-            ? adminUser.allowedBranches
-            : [adminUser.branchId || 'branch_main'],
-        updatedAt: new Date().toISOString(),
-      };
-
-      await db.users.put(updatedAdmin);
-      await authService.createSession(updatedAdmin, updatedAdmin.tenantId);
+      const { user: updatedAdmin } = await authService.completeInitialAdminSetup({
+        users: liveUsers,
+        newPassword,
+        onSaveAdmin: async (updated) => {
+          await db.users.put(updated);
+        },
+      });
       await storage.setCurrentUser(updatedAdmin);
       await dexieDataService.logAction(
         'تهيئة أمنية أولى',
@@ -123,18 +111,13 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
 
     setLoading(true);
     try {
-      const passwordHash = await hashPassword(newPassword);
-      const updatedUser: SystemUser = {
-        ...pendingPasswordChangeUser,
-        passwordHash,
-        mustChangePassword: false,
-        failedLoginAttempts: 0,
-        lockedUntil: undefined,
-        updatedAt: new Date().toISOString(),
-      };
-
-      await db.users.put(updatedUser);
-      await authService.createSession(updatedUser, updatedUser.tenantId);
+      const { user: updatedUser } = await authService.completeMandatoryPasswordChange({
+        user: pendingPasswordChangeUser,
+        newPassword,
+        onSaveUser: async (updated) => {
+          await db.users.put(updated);
+        },
+      });
       await storage.setCurrentUser(updatedUser);
       await dexieDataService.logAction(
         'تغيير كلمة مرور إلزامي',

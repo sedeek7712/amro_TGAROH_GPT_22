@@ -19,7 +19,7 @@ import {
   Building2,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveInvoices, useLiveParties, useLiveCashBoxes, useLiveProducts } from '../../hooks/useLiveDexie';
 import { Invoice, InvoiceItem, ActivityId, PaymentMethod } from '../../types/erp';
@@ -206,7 +206,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
     setIsSubmitting(true);
     try {
       // 3. التنفيذ الذري المركب عبر DexieDataService (تحديث المخزون والتشغيلات والقيد المزدوج ومنع التكرار)
-      await dexieDataService.createPurchaseInvoiceAtomic({
+      await dataService.createPurchaseInvoiceAtomic({
         invoice: newInvoice,
         itemsWithBatches: items.map((item) => ({
           productId: item.productId,

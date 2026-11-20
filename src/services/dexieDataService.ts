@@ -37,6 +37,7 @@ import {
   assertBranchAccess,
   assertPermission,
   filterAuditLogsForUser,
+  filterRecordsByBranchScope,
 } from '../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../config/currency';
 import {
@@ -415,13 +416,23 @@ export class DexieDataService implements IDataService {
   ): { actor: SystemUser; tenantId: string; branchId: string } {
     const actor = authService.getCurrentActorSync();
     assertPermission(actor, permission);
-    assertBranchAccess(actor, targetBranchId);
 
-    const tenantId = actor!.tenantId?.trim() || authService.getActiveTenantIdSync() || 'tenant_main';
-    const branchId =
-      targetBranchId?.trim() || actor!.branchId?.trim() || storage.getActiveBranchId() || 'branch_main';
+    const session = authService.getCurrentSessionSync();
+    if (!actor || !session || session.userId !== actor.id || session.role !== actor.role) {
+      throw new Error('حظر أمني: لا توجد جلسة موثّقة وصالحة لتنفيذ العملية.');
+    }
 
-    return { actor: actor!, tenantId, branchId };
+    const tenantId = actor.tenantId?.trim();
+    if (!tenantId || session.tenantId !== tenantId) {
+      throw new Error('حظر أمني: معرّف المؤسسة مفقود أو لا يطابق الجلسة.');
+    }
+
+    const branchId = targetBranchId?.trim() || storage.getActiveBranchId()?.trim() || actor.branchId?.trim() || '';
+    if (!branchId) {
+      throw new Error('حظر أمني: لا يوجد فرع محدد للعملية.');
+    }
+    assertBranchAccess(actor, branchId);
+    return { actor, tenantId, branchId };
   }
 
   private async getValidAccountCodesSet(): Promise<Set<string>> {
@@ -983,10 +994,11 @@ export class DexieDataService implements IDataService {
   // --- الفواتير ---
   public async getInvoices(activityId?: CommercialActivityId): Promise<Invoice[]> {
     await this.ensureReady();
-    if (activityId) {
-      return await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date');
-    }
-    return await db.invoices.toCollection().reverse().sortBy('date');
+    const { actor } = this.requireAuthorizedActor('invoices:view');
+    const rows = activityId
+      ? await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date')
+      : await db.invoices.toCollection().reverse().sortBy('date');
+    return filterRecordsByBranchScope(rows, actor);
   }
 
   public async getInvoiceById(id: string): Promise<Invoice | undefined> {
@@ -1026,10 +1038,11 @@ export class DexieDataService implements IDataService {
   // --- القيود المحاسبية ---
   public async getJournalEntries(costCenterId?: CostCenterId): Promise<JournalEntry[]> {
     await this.ensureReady();
-    if (costCenterId) {
-      return await db.journalEntries.where('costCenterId').equals(costCenterId).reverse().sortBy('date');
-    }
-    return await db.journalEntries.toCollection().reverse().sortBy('date');
+    const { actor } = this.requireAuthorizedActor('view:accounting');
+    const rows = costCenterId
+      ? await db.journalEntries.where('costCenterId').equals(costCenterId).reverse().sortBy('date')
+      : await db.journalEntries.toCollection().reverse().sortBy('date');
+    return filterRecordsByBranchScope(rows, actor);
   }
 
   public async getJournalEntryById(id: string): Promise<JournalEntry | undefined> {
@@ -1048,7 +1061,8 @@ export class DexieDataService implements IDataService {
   // --- الصناديق والبنوك ---
   public async getCashBoxes(): Promise<CashBox[]> {
     await this.ensureReady();
-    return await db.cashBoxes.toArray();
+    const { actor } = this.requireAuthorizedActor('cashbox:view');
+    return filterRecordsByBranchScope(await db.cashBoxes.toArray(), actor);
   }
 
   public async createCashBoxAtomic(box: CashBox): Promise<CashBox> {
@@ -1111,7 +1125,8 @@ export class DexieDataService implements IDataService {
   // --- السندات الذرية (FIN-02) ---
   public async getVouchers(): Promise<PaymentVoucher[]> {
     await this.ensureReady();
-    return await db.vouchers.toCollection().reverse().sortBy('date');
+    const { actor } = this.requireAuthorizedActor('vouchers:view');
+    return filterRecordsByBranchScope(await db.vouchers.toCollection().reverse().sortBy('date'), actor);
   }
 
   public async createCashVoucherAtomic(params: {
@@ -1327,7 +1342,8 @@ export class DexieDataService implements IDataService {
   // --- وحدة الأمانات المستقلة الذرية (FIN-02) ---
   public async getAmanatRecords(): Promise<AmanatRecord[]> {
     await this.ensureReady();
-    return await db.amanatRecords.toCollection().reverse().sortBy('receivedDate');
+    const { actor } = this.requireAuthorizedActor('amanat:view');
+    return filterRecordsByBranchScope(await db.amanatRecords.toCollection().reverse().sortBy('receivedDate'), actor);
   }
 
   public async getAmanatById(id: string): Promise<AmanatRecord | undefined> {
@@ -1676,7 +1692,9 @@ export class DexieDataService implements IDataService {
   // --- المستخدمون والصلاحيات وسجل التدقيق ---
   public async getUsers(): Promise<SystemUser[]> {
     await this.ensureReady();
-    return await db.users.toArray();
+    const { actor, tenantId } = this.requireAuthorizedActor('users:read');
+    const users = await db.users.where('tenantId').equals(tenantId).toArray();
+    return filterRecordsByBranchScope(users, actor);
   }
 
   public async saveUserAtomic(user: SystemUser): Promise<SystemUser> {
@@ -1782,15 +1800,17 @@ export class DexieDataService implements IDataService {
   }
 
   public async setCurrentUser(user: SystemUser): Promise<void> {
-    await authService.setAuthenticatedUserForSession(user);
+    const refreshed = await authService.refreshSelfProfile(user);
+    if (!refreshed) {
+      throw new Error('حظر أمني: لا يمكن تعيين مستخدم جديد دون تسجيل دخوله والتحقق منه.');
+    }
     await storage.setCurrentUser(user);
   }
 
   public async getAuditLogs(): Promise<SystemAuditLog[]> {
     await this.ensureReady();
-    const actor = authService.getCurrentActorSync();
+    const { actor } = this.requireAuthorizedActor('view:audit_logs');
     const allLogs = await db.auditLogs.toCollection().reverse().sortBy('timestamp');
-    if (!actor) return [];
     return filterAuditLogsForUser(allLogs, actor);
   }
 
@@ -1812,7 +1832,9 @@ export class DexieDataService implements IDataService {
   // --- طابور الإرسال Outbox ---
   public async getOutboxQueue(): Promise<OutboxQueueItem[]> {
     await this.ensureReady();
-    return await db.outbox.orderBy('createdAt').toArray();
+    const { actor, tenantId } = this.requireAuthorizedActor('sync:manage');
+    const rows = await db.outbox.where('tenantId').equals(tenantId).sortBy('createdAt');
+    return filterRecordsByBranchScope(rows, actor);
   }
 
   public async queueOutboxItem(
@@ -1833,10 +1855,7 @@ export class DexieDataService implements IDataService {
   // --- النسخ الاحتياطي والاستعادة الذرية (DB-04) ---
   public async exportBackupJSON(): Promise<string> {
     await this.ensureReady();
-    const actor = authService.getCurrentActorSync();
-    if (actor) {
-      assertPermission(actor, 'backup:manage');
-    }
+    this.requireAuthorizedActor('backup:manage');
 
     const payload = {
       branches: await db.branches.toArray(),
@@ -1876,10 +1895,7 @@ export class DexieDataService implements IDataService {
 
   public async importBackupJSON(jsonContent: string): Promise<{ success: boolean; error?: string }> {
     await this.ensureReady();
-    const actor = authService.getCurrentActorSync();
-    if (actor) {
-      assertPermission(actor, 'backup:manage');
-    }
+    this.requireAuthorizedActor('backup:manage');
 
     try {
       const parsed = JSON.parse(jsonContent);
@@ -2836,6 +2852,12 @@ export class DexieDataService implements IDataService {
         }
         if (original.status === 'REVERSED') {
           throw new FinancialValidationError('تم عكس هذا القيد مسبقاً.');
+        }
+        assertBranchAccess(actor, original.branchId || '', { requireTarget: true });
+        if (original.isAutoGenerated || (original.referenceType && original.referenceType !== 'MANUAL')) {
+          throw new FinancialValidationError(
+            'لا يمكن عكس قيد ناتج عن فاتورة أو سند أو أمانة من شاشة القيود؛ اعكس المستند الأصلي من وحدته حتى تُعكس آثاره على المخزون والصندوق والأرصدة معاً.'
+          );
         }
 
         const reversalNumber = await this.allocateSequenceNumberAtomic(

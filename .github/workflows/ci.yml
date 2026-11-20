@@ -30,8 +30,11 @@ jobs:
       - name: Verify SQLite application runtime, migrations and restart persistence
         run: node scripts/verify_sqlite_runtime.mjs
 
+      - name: Verify desktop authentication and lockout
+        run: node scripts/verify_sqlite_auth.mjs
+
       - name: Check Electron main and preload syntax
-        run: node --check electron/main.mjs && node --check electron/preload.cjs
+        run: node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/security/authentication.mjs
 
       - name: Install dependencies
         run: npm ci

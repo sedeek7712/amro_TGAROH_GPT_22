@@ -28,18 +28,16 @@ export type QueueSubscriber = (stats: QueueStats) => void;
 class SyncQueueService {
   private subscribers: Set<QueueSubscriber> = new Set();
   private maxRetries = 5;
-  private defaultTenantId = 'tenant_main';
-
   /**
    * الحصول على معرّف المؤسسة الحالي من الجلسة الموثقة
    */
-  public getCurrentTenantId(requireAuth = false): string {
-    const authTenant = authService.getActiveTenantIdSync();
+  public getCurrentTenantId(requireAuth = true): string {
+    const authTenant = authService.getActiveTenantIdSync()?.trim();
     if (authTenant) return authTenant;
     if (requireAuth) {
       throw new PermissionError('حظر أمني: لا يمكن تنفيذ المزامنة دون جلسة مستخدم مصادق عليها ومرتبطة بمؤسسة.', 'sync:manage');
     }
-    return this.defaultTenantId;
+    throw new PermissionError('حظر أمني: لا توجد مؤسسة افتراضية مسموح باستخدامها للمزامنة.', 'sync:manage');
   }
 
   /**
@@ -80,7 +78,20 @@ class SyncQueueService {
     branchId?: string;
     dependsOn?: string[];
   }): Promise<OutboxQueueItem> {
-    const tenantId = params.tenantId?.trim() || this.getCurrentTenantId();
+    const authenticatedTenantId = this.getCurrentTenantId(true);
+    const requestedTenantId = params.tenantId?.trim();
+    if (requestedTenantId && requestedTenantId !== authenticatedTenantId) {
+      throw new PermissionError('حظر عزل المؤسسات: لا يمكن إنشاء عنصر مزامنة لمؤسسة أخرى.', 'tenant:access');
+    }
+    const session = authService.getCurrentSessionSync();
+    const branchId = params.branchId?.trim() || session?.branchId?.trim() || '';
+    if (!session || !branchId) {
+      throw new PermissionError('حظر عزل الفروع: عنصر المزامنة يجب أن يحمل فرعاً موثقاً.', 'branch:required');
+    }
+    if (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(branchId)) {
+      throw new PermissionError('حظر عزل الفروع: لا يمكن إنشاء عنصر لفرع غير مصرح به.', 'branch:access');
+    }
+    const tenantId = authenticatedTenantId;
 
     // مفتاح حتمي ثابت ومستقر: يعتمد على المؤسسة، نوع الكيان، معرّفه الثابت والإجراء
     const idempotencyKey =
@@ -112,7 +123,7 @@ class SyncQueueService {
       const item: OutboxQueueItem = {
         id,
         tenantId,
-        branchId: params.branchId,
+        branchId,
         entityType: params.entityType,
         entityId: params.entityId,
         action: params.action,
@@ -416,7 +427,10 @@ class SyncQueueService {
     remotePayload: Record<string, unknown>;
     notes?: string;
   }): Promise<SyncConflict> {
-    const tenantId = params.tenantId || this.getCurrentTenantId();
+    const tenantId = this.getCurrentTenantId(true);
+    if (params.tenantId && params.tenantId !== tenantId) {
+      throw new PermissionError('حظر عزل المؤسسات: لا يمكن تسجيل تعارض لمؤسسة أخرى.', 'tenant:access');
+    }
     const conflict: SyncConflict = {
       id: storage.generateUUID(),
       tenantId,

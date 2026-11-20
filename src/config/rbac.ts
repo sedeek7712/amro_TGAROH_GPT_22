@@ -1,7 +1,10 @@
 /**
  * نظام الإدارة التجارية والمحاسبية المتكامل
  * المصدر الموحد لمصفوفة الصلاحيات والتحقق الأمني (RBAC Matrix & Server/Service Guard)
- * يعالج SEC-02 و QA-02 و RBAC-08 عبر توحيد تعريف الشاشات والأذونات الدقيقة لكل دور
+ * يعالج SEC-02, SEC-03, SEC-04, BR-01, BR-03, BR-04, RBAC-08:
+ * - صلاحيات دقيقة منفصلة للقراءة والتشغيل والإدارة والنسخ الاحتياطي.
+ * - تصنيف صريح للكيانات المشتركة على مستوى المؤسسة مقابل الكيانات المعزولة حسب الفرع.
+ * - فرض عزل الفروع بصرامة دون تجاوز أو قبول فروع/مؤسسات فارغة.
  */
 
 import { SystemAuditLog, SystemUser, UserRole } from '../types/erp';
@@ -27,6 +30,7 @@ export type Permission =
   | 'view:accounting'
   | 'view:audit_logs'
   | 'pos:sale'
+  | 'invoices:view'
   | 'purchase:create'
   | 'inventory:view'
   | 'inventory:write'
@@ -34,19 +38,44 @@ export type Permission =
   | 'inventory:delete'
   | 'party:view'
   | 'party:write'
+  | 'vouchers:view'
   | 'voucher:receipt'
   | 'voucher:payment'
   | 'cashbox:view'
   | 'cashbox:create'
+  | 'cashbox:central_access'
+  | 'amanat:view'
   | 'amanat:manage'
   | 'journal:post'
   | 'journal:reverse'
+  | 'accounting:adjust'
   | 'account:create'
+  | 'users:read'
   | 'users:manage'
+  | 'branches:view'
   | 'branches:manage'
   | 'settings:manage'
   | 'sync:manage'
+  | 'backup:export'
+  | 'backup:restore'
   | 'backup:manage';
+
+export type EntityScopeClassification = 'TENANT_SHARED' | 'BRANCH_SCOPED';
+
+export const ENTITY_SCOPE_POLICY = {
+  TENANT_SHARED: ['Account', 'Product', 'Party', 'CommercialActivity', 'Branch'],
+  BRANCH_SCOPED: [
+    'CashBox',
+    'Invoice',
+    'JournalEntry',
+    'PaymentVoucher',
+    'AmanatRecord',
+    'SystemAuditLog',
+    'OutboxQueueItem',
+    'SyncConflict',
+    'SystemUser',
+  ],
+} as const;
 
 export const ROLE_ALLOWED_VIEWS: Record<UserRole, readonly ActiveView[]> = {
   ADMIN: [
@@ -86,6 +115,7 @@ const ALL_PERMISSIONS: Permission[] = [
   'view:accounting',
   'view:audit_logs',
   'pos:sale',
+  'invoices:view',
   'purchase:create',
   'inventory:view',
   'inventory:write',
@@ -93,18 +123,26 @@ const ALL_PERMISSIONS: Permission[] = [
   'inventory:delete',
   'party:view',
   'party:write',
+  'vouchers:view',
   'voucher:receipt',
   'voucher:payment',
   'cashbox:view',
   'cashbox:create',
+  'cashbox:central_access',
+  'amanat:view',
   'amanat:manage',
   'journal:post',
   'journal:reverse',
+  'accounting:adjust',
   'account:create',
+  'users:read',
   'users:manage',
+  'branches:view',
   'branches:manage',
   'settings:manage',
   'sync:manage',
+  'backup:export',
+  'backup:restore',
   'backup:manage',
 ];
 
@@ -117,20 +155,25 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'view:accounting',
     'view:audit_logs',
     'pos:sale',
+    'invoices:view',
     'purchase:create',
     'inventory:view',
     'inventory:write',
     'inventory:adjust',
     'party:view',
     'party:write',
+    'vouchers:view',
     'voucher:receipt',
     'voucher:payment',
     'cashbox:view',
     'cashbox:create',
+    'amanat:view',
     'amanat:manage',
     'journal:post',
     'journal:reverse',
+    'accounting:adjust',
     'account:create',
+    'branches:view',
     'sync:manage',
   ]),
   INVENTORY_KEEPER: new Set<Permission>([
@@ -139,13 +182,19 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'inventory:write',
     'inventory:adjust',
     'purchase:create',
+    'invoices:view',
+    'party:view',
+    'cashbox:view',
+    'branches:view',
   ]),
   CASHIER: new Set<Permission>([
     'view:dashboard',
     'pos:sale',
+    'invoices:view',
     'inventory:view',
     'party:view',
     'cashbox:view',
+    'branches:view',
   ]),
 };
 
@@ -161,11 +210,14 @@ export class PermissionError extends Error {
 }
 
 export function canAccessView(role: UserRole | undefined, view: ActiveView): boolean {
-  const effectiveRole: UserRole = role && role in ROLE_ALLOWED_VIEWS ? role : 'CASHIER';
-  return ROLE_ALLOWED_VIEWS[effectiveRole].includes(view);
+  if (!role || !(role in ROLE_ALLOWED_VIEWS)) return false;
+  return ROLE_ALLOWED_VIEWS[role].includes(view);
 }
 
-export function hasPermission(user: Pick<SystemUser, 'role' | 'active'> | null | undefined, permission: Permission): boolean {
+export function hasPermission(
+  user: Pick<SystemUser, 'role' | 'active'> | null | undefined,
+  permission: Permission
+): boolean {
   if (!user || !user.active) return false;
   const allowed = ROLE_PERMISSIONS[user.role];
   return allowed ? allowed.has(permission) : false;
@@ -187,36 +239,90 @@ export function assertPermission(
   }
 }
 
+export function getAuthorizedBranchIds(
+  user: Pick<SystemUser, 'role' | 'branchId' | 'allowedBranches' | 'active'> | null | undefined
+): Set<string> {
+  if (!user || !user.active) return new Set();
+  const ids = [
+    ...(user.allowedBranches || []).map((b) => b.trim()).filter(Boolean),
+    ...(user.branchId?.trim() ? [user.branchId.trim()] : []),
+  ];
+  return new Set(ids);
+}
+
 export function assertBranchAccess(
-  user: Pick<SystemUser, 'role' | 'branchId' | 'allowedBranches' | 'active'> | null | undefined,
-  targetBranchId?: string
+  user: Pick<SystemUser, 'role' | 'branchId' | 'allowedBranches' | 'active' | 'tenantId'> | null | undefined,
+  targetBranchId?: string,
+  options?: { requireTarget?: boolean }
 ): void {
   if (!user || !user.active) {
     throw new PermissionError('حظر أمني: الجلسة غير صالحة.', 'branch:access');
   }
-  if (!targetBranchId) return;
-  if (user.role === 'ADMIN') return;
+  if (!user.tenantId || !user.tenantId.trim()) {
+    throw new PermissionError('حظر أمني: المستخدم لا ينتمي إلى مؤسسة (tenantId) صالحة.', 'tenant:access');
+  }
 
-  const allowed = new Set<string>([
-    ...(user.allowedBranches || []),
-    ...(user.branchId ? [user.branchId] : []),
-  ]);
+  const normalizedTarget = targetBranchId?.trim();
+  if (options?.requireTarget && !normalizedTarget) {
+    throw new PermissionError('حظر عزل الفروع: يجب تحديد معرف فرع صالح لتنفيذ العملية.', 'branch:required');
+  }
 
-  if (allowed.size > 0 && !allowed.has(targetBranchId)) {
+  if (user.role === 'ADMIN') {
+    return;
+  }
+
+  const allowed = getAuthorizedBranchIds(user);
+  if (allowed.size === 0) {
     throw new PermissionError(
-      `حظر عزل الفروع: المستخدم غير مصرح له بالعمل على الفرع (${targetBranchId}).`,
-      `branch:${targetBranchId}`
+      'حظر عزل الفروع: المستخدم غير مرتبط بأي فرع مصرح به.',
+      'branch:unassigned'
+    );
+  }
+
+  if (!normalizedTarget) {
+    return;
+  }
+
+  if (!allowed.has(normalizedTarget)) {
+    throw new PermissionError(
+      `حظر عزل الفروع: المستخدم غير مصرح له بالعمل على الفرع (${normalizedTarget}).`,
+      `branch:${normalizedTarget}`
     );
   }
 }
 
+export function filterRecordsByBranchScope<T extends { branchId?: string }>(
+  records: T[],
+  user: Pick<SystemUser, 'role' | 'branchId' | 'allowedBranches' | 'active'> | null | undefined
+): T[] {
+  if (!user || !user.active) return [];
+  if (user.role === 'ADMIN') return records;
+  const allowed = getAuthorizedBranchIds(user);
+  if (allowed.size === 0) return [];
+  return records.filter((rec) => Boolean(rec.branchId && allowed.has(rec.branchId)));
+}
+
 export function filterAuditLogsForUser(
   logs: SystemAuditLog[],
-  user: Pick<SystemUser, 'id' | 'role' | 'branchId' | 'allowedBranches'> | null | undefined
+  user: Pick<SystemUser, 'id' | 'role' | 'branchId' | 'allowedBranches' | 'active' | 'tenantId'> | null | undefined
 ): SystemAuditLog[] {
-  if (!user) return [];
-  if (user.role === 'ADMIN' || user.role === 'ACCOUNTANT') {
-    return logs;
+  if (!user || !user.active) return [];
+  if (!user.tenantId?.trim()) return [];
+  if (user.role === 'ADMIN') {
+    return logs.filter((log) => !log.tenantId || log.tenantId === user.tenantId);
   }
-  return logs.filter((log) => log.userId === user.id);
+  const allowed = getAuthorizedBranchIds(user);
+  if (allowed.size === 0) return [];
+  if (user.role === 'ACCOUNTANT') {
+    return logs.filter(
+      (log) =>
+        (!log.tenantId || log.tenantId === user.tenantId) &&
+        Boolean(log.branchId && allowed.has(log.branchId))
+    );
+  }
+  return logs.filter(
+    (log) =>
+      log.userId === user.id &&
+      (!log.branchId || allowed.has(log.branchId))
+  );
 }

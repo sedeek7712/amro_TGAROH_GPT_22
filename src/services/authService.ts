@@ -1,17 +1,22 @@
 /**
  * نظام الإدارة التجارية والمحاسبية المتكامل
  * خدمة المصادقة الآمنة وتجزئة كلمات المرور وإدارة الجلسات الموقعة (Auth Service)
- * تعالج SEC-01 و SEC-02 و SYNC-05:
- * - إزالة كلمة المرور الافتراضية '1234' بالكامل.
+ * تعالج SEC-01, SEC-05, SEC-07:
+ * - عدم تخزين أي سر أو مفتاح HMAC خام في localStorage (استخدام CryptoKey غير قابل للاستخراج مخزن في IndexedDB).
+ * - منع إنشاء جلسة مصادق عليها بدون التحقق من بيانات الاعتماد أو تدفق الإعداد الأولي/تغيير كلمة المرور الإلزامي.
  * - اشتقاق وتخزين كلمات المرور عبر PBKDF2-SHA256 (100,000 تكرار + Salt عشوائي).
  * - قفل مؤقت للحساب بعد 5 محاولات فاشلة.
- * - جلسة موقعة بـ HMAC-SHA256 وتحقّق متقاطع ضد سجل المستخدم المعتمد في Dexie.
+ * - توقيع والتحقق من سلامة النسخ الاحتياطية عبر HMAC-SHA256.
  */
 
 import { AuthSession, SystemUser } from '../types/erp';
 
 const AUTH_SESSION_KEY = 'multi_activity_erp_auth_session';
-const SESSION_HMAC_KEY_STORAGE = 'multi_activity_erp_session_hmac_secret';
+const KEYSTORE_DB_NAME = 'multi_activity_erp_keystore';
+const KEYSTORE_STORE_NAME = 'keys';
+const SESSION_KEY_ID = 'session_hmac_key';
+const BACKUP_KEY_ID = 'backup_hmac_key';
+
 const DEFAULT_SESSION_TTL_MS = 12 * 60 * 60 * 1000; // 12 ساعة
 const MAX_FAILED_ATTEMPTS = 5;
 const LOCKOUT_DURATION_MS = 5 * 60 * 1000; // 5 دقائق
@@ -34,7 +39,7 @@ const WEAK_PASSWORDS = new Set([
 
 let inMemorySession: AuthSession | null = null;
 let inMemoryUser: SystemUser | null = null;
-let inMemorySecret: string | null = null;
+const inMemoryCryptoKeys = new Map<string, CryptoKey>();
 
 function getSubtleCrypto(): SubtleCrypto {
   if (typeof globalThis.crypto !== 'undefined' && globalThis.crypto.subtle) {
@@ -51,6 +56,9 @@ function bytesToHex(bytes: Uint8Array): string {
 
 function hexToBytes(hex: string): Uint8Array {
   const clean = hex.trim();
+  if (!clean || clean.length % 2 !== 0 || !/^[0-9a-fA-F]+$/.test(clean)) {
+    return new Uint8Array(0);
+  }
   const out = new Uint8Array(clean.length / 2);
   for (let i = 0; i < out.length; i++) {
     out[i] = parseInt(clean.substring(i * 2, i * 2 + 2), 16);
@@ -67,40 +75,117 @@ function constantTimeEqual(a: string, b: string): boolean {
   return diff === 0;
 }
 
-function getOrCreateHmacSecret(): string {
-  if (inMemorySecret) return inMemorySecret;
+function openKeystoreDb(): Promise<IDBDatabase | null> {
+  if (typeof indexedDB === 'undefined') {
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    try {
+      const req = indexedDB.open(KEYSTORE_DB_NAME, 1);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(KEYSTORE_STORE_NAME)) {
+          db.createObjectStore(KEYSTORE_STORE_NAME);
+        }
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
 
-  if (typeof localStorage !== 'undefined') {
-    const existing = localStorage.getItem(SESSION_HMAC_KEY_STORAGE);
-    if (existing && existing.length >= 32) {
-      inMemorySecret = existing;
-      return existing;
+function readKeyFromIdb(db: IDBDatabase, keyId: string): Promise<CryptoKey | null> {
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(KEYSTORE_STORE_NAME, 'readonly');
+      const store = tx.objectStore(KEYSTORE_STORE_NAME);
+      const req = store.get(keyId);
+      req.onsuccess = () => {
+        const val = req.result;
+        if (val && typeof val === 'object' && 'algorithm' in val && 'type' in val) {
+          resolve(val as CryptoKey);
+        } else {
+          resolve(null);
+        }
+      };
+      req.onerror = () => resolve(null);
+    } catch {
+      resolve(null);
+    }
+  });
+}
+
+function writeKeyToIdb(db: IDBDatabase, keyId: string, key: CryptoKey): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      const tx = db.transaction(KEYSTORE_STORE_NAME, 'readwrite');
+      const store = tx.objectStore(KEYSTORE_STORE_NAME);
+      const req = store.put(key, keyId);
+      req.onsuccess = () => resolve(true);
+      req.onerror = () => resolve(false);
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+/**
+ * الحصول على أو توليد مفتاح HMAC غير قابل للاستخراج (extractable: false) وحفظه في IndexedDB
+ * بدون لمس localStorage أو كشف بايتات المفتاح الخام لسكربتات الواجهة.
+ */
+async function getOrCreateNonExtractableHmacKey(keyId: string): Promise<CryptoKey> {
+  const cached = inMemoryCryptoKeys.get(keyId);
+  if (cached) return cached;
+
+  const subtle = getSubtleCrypto();
+  const idb = await openKeystoreDb();
+
+  if (idb) {
+    try {
+      const stored = await readKeyFromIdb(idb, keyId);
+      if (stored) {
+        inMemoryCryptoKeys.set(keyId, stored);
+        idb.close();
+        return stored;
+      }
+    } catch {
+      // متابعة التوليد
     }
   }
 
-  const randomBytes = new Uint8Array(32);
-  globalThis.crypto.getRandomValues(randomBytes);
-  const generated = bytesToHex(randomBytes);
-  inMemorySecret = generated;
+  const generated = (await subtle.generateKey(
+    { name: 'HMAC', hash: 'SHA-256' },
+    false, // غير قابل للاستخراج (SEC-01)
+    ['sign', 'verify']
+  )) as CryptoKey;
 
-  if (typeof localStorage !== 'undefined') {
-    localStorage.setItem(SESSION_HMAC_KEY_STORAGE, generated);
+  inMemoryCryptoKeys.set(keyId, generated);
+
+  if (idb) {
+    await writeKeyToIdb(idb, keyId, generated);
+    idb.close();
   }
+
   return generated;
 }
 
-async function signPayload(payload: string): Promise<string> {
+async function signWithKey(keyId: string, payload: string): Promise<string> {
   const subtle = getSubtleCrypto();
+  const key = await getOrCreateNonExtractableHmacKey(keyId);
   const enc = new TextEncoder();
-  const key = await subtle.importKey(
-    'raw',
-    enc.encode(getOrCreateHmacSecret()),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign']
-  );
   const sig = await subtle.sign('HMAC', key, enc.encode(payload));
   return bytesToHex(new Uint8Array(sig));
+}
+
+async function verifyWithKey(keyId: string, payload: string, signatureHex: string): Promise<boolean> {
+  const sigBytes = hexToBytes(signatureHex);
+  if (sigBytes.length === 0) return false;
+  const subtle = getSubtleCrypto();
+  const key = await getOrCreateNonExtractableHmacKey(keyId);
+  const enc = new TextEncoder();
+  return await subtle.verify('HMAC', key, sigBytes as BufferSource, enc.encode(payload));
 }
 
 function canonicalSessionPayload(session: Omit<AuthSession, 'signature'>): string {
@@ -191,6 +276,9 @@ export async function verifyPassword(password: string, storedHash?: string): Pro
     return false;
   }
 
+  const saltBytes = hexToBytes(saltHex);
+  if (saltBytes.length === 0) return false;
+
   const subtle = getSubtleCrypto();
   const enc = new TextEncoder();
   const keyMaterial = await subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, [
@@ -199,7 +287,7 @@ export async function verifyPassword(password: string, storedHash?: string): Pro
   const derivedBits = await subtle.deriveBits(
     {
       name: 'PBKDF2',
-      salt: hexToBytes(saltHex) as BufferSource,
+      salt: saltBytes as BufferSource,
       iterations,
       hash: 'SHA-256',
     },
@@ -227,19 +315,30 @@ export function resolveUserTenantId(user?: SystemUser | null): string | null {
 
 class AuthService {
   /**
-   * إنشاء جلسة مصادق عليها وتوقيعها بـ HMAC-SHA256
+   * إصدار جلسة موقعة داخلياً فقط بعد تحقق كامل من بيانات الاعتماد أو الإعداد الأولي (SEC-05)
    */
-  public async createSession(
+  private async issueSignedSession(
     user: SystemUser,
     tenantId?: string,
     ttlMs: number = DEFAULT_SESSION_TTL_MS
   ): Promise<AuthSession> {
-    const resolvedTenantId = tenantId?.trim() || user.tenantId?.trim() || 'tenant_main';
-    const resolvedBranchId = user.branchId?.trim() || user.allowedBranches?.[0] || 'branch_main';
-    const allowedBranches =
-      user.allowedBranches && user.allowedBranches.length > 0
-        ? user.allowedBranches
-        : [resolvedBranchId];
+    if (!user.active) {
+      throw new Error('حظر أمني: لا يمكن إنشاء جلسة لحساب موقوف.');
+    }
+
+    const resolvedTenantId = tenantId?.trim() || user.tenantId?.trim() || '';
+    if (!resolvedTenantId) {
+      throw new Error('حظر أمني: يجب ارتباط المستخدم بمؤسسة (tenantId) صالحة لإنشاء الجلسة.');
+    }
+
+    const explicitBranch = user.branchId?.trim() || '';
+    const allowedList = (user.allowedBranches || []).map((b) => b.trim()).filter(Boolean);
+    const resolvedBranchId = explicitBranch || allowedList[0] || '';
+    if (!resolvedBranchId) {
+      throw new Error('حظر أمني: يجب ارتباط المستخدم بفرع (branchId) صالح لإنشاء الجلسة.');
+    }
+
+    const normalizedAllowed = Array.from(new Set([...allowedList, resolvedBranchId]));
 
     const now = Date.now();
     const baseSession: Omit<AuthSession, 'signature'> = {
@@ -248,12 +347,12 @@ class AuthService {
       role: user.role,
       tenantId: resolvedTenantId,
       branchId: resolvedBranchId,
-      allowedBranches,
+      allowedBranches: normalizedAllowed,
       issuedAt: new Date(now).toISOString(),
       expiresAt: new Date(now + ttlMs).toISOString(),
     };
 
-    const signature = await signPayload(canonicalSessionPayload(baseSession));
+    const signature = await signWithKey(SESSION_KEY_ID, canonicalSessionPayload(baseSession));
     const fullSession: AuthSession = { ...baseSession, signature };
 
     inMemorySession = fullSession;
@@ -261,7 +360,7 @@ class AuthService {
       ...user,
       tenantId: resolvedTenantId,
       branchId: resolvedBranchId,
-      allowedBranches,
+      allowedBranches: normalizedAllowed,
     };
 
     if (typeof localStorage !== 'undefined') {
@@ -269,6 +368,153 @@ class AuthService {
     }
 
     return fullSession;
+  }
+
+  /**
+   * إكمال الإعداد الأمني الأولي للمدير العام فقط عندما لا توجد كلمة مرور لأي مدير
+   */
+  public async completeInitialAdminSetup(params: {
+    users: SystemUser[];
+    newPassword: string;
+    onSaveAdmin: (updatedAdmin: SystemUser) => Promise<void> | void;
+  }): Promise<{ user: SystemUser; session: AuthSession }> {
+    const { users, newPassword, onSaveAdmin } = params;
+    if (!needsInitialAdminSetup(users)) {
+      throw new Error('حظر أمني: الإعداد الأولي للنظام مكتمل مسبقاً. يرجى تسجيل الدخول بكلمة المرور.');
+    }
+
+    const adminUser = users.find((u) => u.role === 'ADMIN' && u.active);
+    if (!adminUser) {
+      throw new Error('لا يوجد حساب مدير عام نشط في قاعدة البيانات.');
+    }
+
+    const strength = validatePasswordStrength(newPassword, adminUser.username);
+    if (!strength.valid) {
+      throw new Error(strength.error || 'كلمة المرور لا تستوفي متطلبات الأمان.');
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+    const tenantId = adminUser.tenantId?.trim() || 'tenant_main';
+    const branchId = adminUser.branchId?.trim() || adminUser.allowedBranches?.[0]?.trim() || 'branch_main';
+    const allowedBranches =
+      adminUser.allowedBranches && adminUser.allowedBranches.length > 0
+        ? adminUser.allowedBranches
+        : [branchId];
+
+    const updatedAdmin: SystemUser = {
+      ...adminUser,
+      passwordHash,
+      mustChangePassword: false,
+      failedLoginAttempts: 0,
+      lockedUntil: undefined,
+      tenantId,
+      branchId,
+      allowedBranches,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await onSaveAdmin(updatedAdmin);
+    const session = await this.issueSignedSession(updatedAdmin, tenantId);
+    return { user: updatedAdmin, session };
+  }
+
+  /**
+   * إكمال تغيير كلمة المرور الإلزامي لمستخدم تم التحقق من هويته حديثاً (mustChangePassword)
+   */
+  public async completeMandatoryPasswordChange(params: {
+    user: SystemUser;
+    currentPasswordVerified?: boolean;
+    newPassword: string;
+    onSaveUser: (updatedUser: SystemUser) => Promise<void> | void;
+  }): Promise<{ user: SystemUser; session: AuthSession }> {
+    const { user, newPassword, onSaveUser } = params;
+    if (!user.mustChangePassword) {
+      throw new Error('حظر أمني: الحساب ليس في وضع تغيير كلمة المرور الإلزامي.');
+    }
+    const actor = this.getCurrentActorSync();
+    const isPendingSelfSession = actor?.id === user.id || params.currentPasswordVerified === true;
+    if (!isPendingSelfSession) {
+      throw new Error('حظر أمني: يجب التحقق من كلمة المرور الحالية أولاً قبل إتمام التغيير الإلزامي.');
+    }
+
+    const strength = validatePasswordStrength(newPassword, user.username);
+    if (!strength.valid) {
+      throw new Error(strength.error || 'كلمة المرور لا تستوفي متطلبات الأمان.');
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+    const updatedUser: SystemUser = {
+      ...user,
+      passwordHash,
+      mustChangePassword: false,
+      failedLoginAttempts: 0,
+      lockedUntil: undefined,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await onSaveUser(updatedUser);
+    const session = await this.issueSignedSession(updatedUser, updatedUser.tenantId);
+    return { user: updatedUser, session };
+  }
+
+  /**
+   * تبديل الجلسة من مدير عام مصادق عليه فقط وبعد التحقق الفعلي من كلمة مرور المدير (SEC-05)
+   */
+  public async switchUserWithAdminPassword(params: {
+    adminPassword: string;
+    targetUser: SystemUser;
+    authoritativeUsers: SystemUser[];
+  }): Promise<{ user: SystemUser; session: AuthSession }> {
+    const currentActor = this.getCurrentActorSync();
+    const currentSession = this.getCurrentSessionSync();
+    if (!currentActor || !currentSession || currentActor.role !== 'ADMIN' || !currentActor.active) {
+      throw new Error('حظر أمني: تبديل الجلسة متاح للمدير العام النشط المصادق عليه فقط.');
+    }
+
+    const freshAdmin = authoritativeUsers.find((u) => u.id === currentActor.id);
+    if (!freshAdmin || freshAdmin.role !== 'ADMIN' || !freshAdmin.active) {
+      throw new Error('حظر أمني: حساب المدير العام غير نشط أو تم سحب صلاحيته.');
+    }
+
+    const isValid = await verifyPassword(params.adminPassword, freshAdmin.passwordHash);
+    if (!isValid) {
+      throw new Error('كلمة مرور المدير العام غير صحيحة. تم حظر تبديل الجلسة.');
+    }
+
+    const freshTarget = authoritativeUsers.find((u) => u.id === params.targetUser.id);
+    if (!freshTarget || !freshTarget.active) {
+      throw new Error('لا يمكن التبديل إلى حساب غير موجود أو موقوف.');
+    }
+
+    if (
+      (freshTarget.tenantId?.trim() || 'tenant_main') !==
+      (freshAdmin.tenantId?.trim() || 'tenant_main')
+    ) {
+      throw new Error('حظر عزل المؤسسات: لا يمكن التبديل إلى مستخدم في مؤسسة أخرى.');
+    }
+
+    const session = await this.issueSignedSession(freshTarget, freshTarget.tenantId);
+    return { user: freshTarget, session };
+  }
+
+  /**
+   * تحديث بيانات جلسة المستخدم الحالي ذاتياً دون رفع الصلاحية أو تغيير الدور/المؤسسة
+   */
+  public async refreshSelfProfile(updatedUser: SystemUser): Promise<AuthSession | null> {
+    if (!inMemoryUser || inMemoryUser.id !== updatedUser.id) {
+      return null;
+    }
+    if (
+      inMemoryUser.role !== updatedUser.role ||
+      (inMemoryUser.tenantId || '') !== (updatedUser.tenantId || '')
+    ) {
+      throw new Error('حظر أمني: لا يمكن تغيير الدور أو المؤسسة عبر تحديث الجلسة الذاتي.');
+    }
+    if (!updatedUser.active) {
+      this.logout();
+      return null;
+    }
+    return await this.issueSignedSession(updatedUser, updatedUser.tenantId);
   }
 
   /**
@@ -310,8 +556,12 @@ class AuthService {
       return { valid: false, reason: 'الجلسة غير موقعة.' };
     }
 
-    const expectedSig = await signPayload(canonicalSessionPayload(rest));
-    if (!constantTimeEqual(signature, expectedSig)) {
+    const isSigValid = await verifyWithKey(
+      SESSION_KEY_ID,
+      canonicalSessionPayload(rest),
+      signature
+    );
+    if (!isSigValid) {
       this.logout();
       return { valid: false, reason: 'تم اكتشاف تعديل غير مصرح به في بيانات الجلسة.' };
     }
@@ -323,8 +573,9 @@ class AuthService {
       return { valid: false, reason: 'الحساب غير موجود أو تم إيقافه.' };
     }
 
-    const dbTenant = authoritativeUser.tenantId?.trim() || 'tenant_main';
+    const dbTenant = authoritativeUser.tenantId?.trim() || '';
     if (
+      !dbTenant ||
       authoritativeUser.role !== rawSession.role ||
       authoritativeUser.username !== rawSession.username ||
       dbTenant !== rawSession.tenantId
@@ -333,12 +584,21 @@ class AuthService {
       return { valid: false, reason: 'بيانات الصلاحية في الجلسة لا تطابق السجل المعتمد.' };
     }
 
+    const resolvedBranch =
+      authoritativeUser.branchId?.trim() ||
+      authoritativeUser.allowedBranches?.[0]?.trim() ||
+      rawSession.branchId;
+    const resolvedAllowedBranches =
+      authoritativeUser.allowedBranches && authoritativeUser.allowedBranches.length > 0
+        ? authoritativeUser.allowedBranches
+        : [resolvedBranch];
+
     inMemorySession = rawSession;
     inMemoryUser = {
       ...authoritativeUser,
       tenantId: dbTenant,
-      branchId: authoritativeUser.branchId || rawSession.branchId,
-      allowedBranches: authoritativeUser.allowedBranches || rawSession.allowedBranches,
+      branchId: resolvedBranch,
+      allowedBranches: resolvedAllowedBranches,
     };
 
     return { valid: true, user: inMemoryUser, session: rawSession };
@@ -425,17 +685,52 @@ class AuthService {
       };
     }
 
+    const resolvedTenant = user.tenantId?.trim() || '';
+    const resolvedBranch = user.branchId?.trim() || user.allowedBranches?.[0]?.trim() || '';
+    if (!resolvedTenant || !resolvedBranch) {
+      return {
+        success: false,
+        error: 'حظر أمني: حساب المستخدم يفتقر إلى ربط المؤسسة أو الفرع.',
+      };
+    }
+
     const cleanUser: SystemUser = {
       ...user,
       failedLoginAttempts: 0,
       lockedUntil: undefined,
-      tenantId: user.tenantId || 'tenant_main',
+      tenantId: resolvedTenant,
+      branchId: resolvedBranch,
+      allowedBranches:
+        user.allowedBranches && user.allowedBranches.length > 0
+          ? user.allowedBranches
+          : [resolvedBranch],
       updatedAt: new Date(nowMs).toISOString(),
     };
     await onUserUpdated(cleanUser);
 
-    const session = await this.createSession(cleanUser, cleanUser.tenantId);
+    if (cleanUser.mustChangePassword) {
+      // في وضع التغيير الإلزامي، نحفظ هوية المستخدم فقط لتسجيل التغيير ولا نمنح جلسة كاملة قبل التحديث
+      inMemoryUser = cleanUser;
+      return { success: true, user: cleanUser };
+    }
+
+    const session = await this.issueSignedSession(cleanUser, cleanUser.tenantId);
     return { success: true, user: cleanUser, session };
+  }
+
+  /**
+   * توقيع ملف النسخة الاحتياطية بـ HMAC-SHA256 (SEC-07)
+   */
+  public async signBackupPayload(canonicalJson: string): Promise<string> {
+    return await signWithKey(BACKUP_KEY_ID, canonicalJson);
+  }
+
+  /**
+   * التحقق الصارم من توقيع النسخة الاحتياطية بـ HMAC-SHA256 (SEC-07)
+   */
+  public async verifyBackupPayload(canonicalJson: string, hmacHex: string): Promise<boolean> {
+    if (!hmacHex || typeof hmacHex !== 'string') return false;
+    return await verifyWithKey(BACKUP_KEY_ID, canonicalJson, hmacHex);
   }
 
   public getCurrentSessionSync(): AuthSession | null {
@@ -444,6 +739,7 @@ class AuthService {
       if (Number.isFinite(exp) && Date.now() < exp) {
         return inMemorySession;
       }
+      inMemorySession = null;
     }
     if (typeof localStorage !== 'undefined') {
       const raw = localStorage.getItem(AUTH_SESSION_KEY);
@@ -467,25 +763,11 @@ class AuthService {
     return inMemoryUser;
   }
 
-  public setCurrentActorSync(user: SystemUser | null): void {
-    inMemoryUser = user;
-  }
-
   public getActiveTenantIdSync(): string | null {
     const sess = this.getCurrentSessionSync();
-    if (sess?.tenantId) return sess.tenantId;
-    if (inMemoryUser?.tenantId) return inMemoryUser.tenantId;
+    if (sess?.tenantId?.trim()) return sess.tenantId.trim();
+    if (inMemoryUser?.tenantId?.trim()) return inMemoryUser.tenantId.trim();
     return null;
-  }
-
-  /**
-   * حقن جلسة مصادق عليها برمجياً لبيئات الاختبار والتشغيل المصرح
-   */
-  public async setAuthenticatedUserForSession(
-    user: SystemUser,
-    tenantId?: string
-  ): Promise<AuthSession> {
-    return await this.createSession(user, tenantId || user.tenantId || 'tenant_main');
   }
 
   public logout(): void {

@@ -136,6 +136,14 @@ export interface InvoiceItem {
   total: number;
 }
 
+export interface StockDeductionRecorded {
+  productId: string;
+  batchNumber?: string;
+  expiryDate?: string;
+  quantity: number;
+  unitCost: number;
+}
+
 export interface Invoice {
   id: string;               // UUID v4
   invoiceNumber: string;
@@ -149,6 +157,7 @@ export interface Invoice {
   subtotal: number;
   discount: number;
   tax: number;
+  shippingCost?: number;    // مصاريف شحن/توصيل إضافية للمشتريات
   total: number;
   paidAmount: number;
   paymentMethod: PaymentMethod;
@@ -156,6 +165,11 @@ export interface Invoice {
   notes?: string;
   journalEntryId?: string;
   isPosted?: boolean;
+  status?: 'POSTED' | 'REVERSED';
+  reversedByJournalId?: string;
+  reversalReason?: string;
+  totalCogs?: number;
+  stockDeductionsRecorded?: StockDeductionRecorded[];
 }
 
 export type JournalEntryStatus = 'DRAFT' | 'POSTED' | 'REVERSED';
@@ -216,6 +230,7 @@ export interface CashBox {
   balance: number;
   isDefault: boolean;
   branchId?: string;        // ربط الصندوق بالفرع
+  isCentral?: boolean;      // صندوق مركزي خاضع لصلاحية خاصة
 }
 
 export type VoucherType = 'RECEIPT' | 'PAYMENT';
@@ -234,6 +249,8 @@ export interface PaymentVoucher {
   description: string;
   costCenterId: CostCenterId;
   journalEntryId?: string;
+  status?: 'POSTED' | 'REVERSED';
+  reversedByJournalId?: string;
 }
 
 export type UserRole = 'ADMIN' | 'ACCOUNTANT' | 'CASHIER' | 'INVENTORY_KEEPER';

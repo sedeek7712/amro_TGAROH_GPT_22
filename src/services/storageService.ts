@@ -81,6 +81,7 @@ export const INITIAL_CHART_OF_ACCOUNTS: Account[] = [
   { code: '11042', nameAr: 'مخزون المواد الغذائية والبقالة', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'grocery' },
   { code: '11043', nameAr: 'مخزون قطع غيار الدراجات النارية', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
   { code: '11044', nameAr: 'مخزون قطع غيار المعدات', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
+  { code: '1106', nameAr: 'ضريبة القيمة المضافة - مدخلات', type: 'ASSET', parentCode: '11', isLeaf: true, balance: 0 },
 
   // 2. الخصوم (Liabilities)
   { code: '2', nameAr: 'الخصوم', type: 'LIABILITY', parentCode: null, isLeaf: false, balance: 0 },

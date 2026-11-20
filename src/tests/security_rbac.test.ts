@@ -261,7 +261,10 @@ describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-
 
     // Unauthenticated actor gets empty logs and PermissionError on write
     authService.logout();
-    assert.deepEqual(await dexieDataService.getAuditLogs(), []);
+    await assert.rejects(
+      () => dexieDataService.getAuditLogs(),
+      (err: unknown) => err instanceof PermissionError
+    );
     assert.throws(() => assertPermission(null, 'pos:sale'), (err: unknown) => err instanceof PermissionError);
   });
 

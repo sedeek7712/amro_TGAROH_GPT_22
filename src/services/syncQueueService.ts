@@ -185,7 +185,7 @@ class SyncQueueService {
   public async claimReadyToSyncItems(
     workerId: string,
     limit = 25,
-    leaseMs = 60_000
+    leaseMs = 180_000
   ): Promise<OutboxQueueItem[]> {
     const owner = workerId.trim() || 'worker_default';
     const claimed = await db.transaction('rw', db.outbox, async () => {
@@ -235,7 +235,7 @@ class SyncQueueService {
   /**
    * تعليم مجموعة عناصر بأنها قيد المزامنة حالياً لمنع التكرار
    */
-  public async markSyncing(ids: string[], workerId = 'worker_default', leaseMs = 60_000): Promise<void> {
+  public async markSyncing(ids: string[], workerId = 'worker_default', leaseMs = 180_000): Promise<void> {
     const nowMs = Date.now();
     const now = new Date(nowMs).toISOString();
     const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();

@@ -15,7 +15,7 @@ import {
   Power,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { hashPassword, validatePasswordStrength, verifyPassword } from '../../services/authService';
 import { useLiveBranches, useLiveUsers } from '../../hooks/useLiveDexie';
 import { SystemUser, UserRole, ActivityId } from '../../types/erp';
@@ -81,9 +81,9 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
 
     const updatedUser: SystemUser = { ...target, allowedActivities: newActivities };
     try {
-      const saved = await dexieDataService.saveUserAtomic(updatedUser);
+      const saved = await dataService.saveUserAtomic(updatedUser);
       if (currentUser.id === userId) {
-        await dexieDataService.setCurrentUser(saved);
+        await dataService.setCurrentUser(saved);
         setCurrentUser(saved);
       }
       setStatusMessage({ type: 'success', text: `تم تحديث الأنشطة المصرحة للحساب (@${saved.username}).` });
@@ -121,9 +121,9 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
     };
 
     try {
-      const saved = await dexieDataService.saveUserAtomic(updatedUser);
+      const saved = await dataService.saveUserAtomic(updatedUser);
       if (currentUser.id === userId) {
-        await dexieDataService.setCurrentUser(saved);
+        await dataService.setCurrentUser(saved);
         setCurrentUser(saved);
       }
       setStatusMessage({ type: 'success', text: `تم تحديث الفروع المصرحة للحساب (@${saved.username}).` });
@@ -143,7 +143,7 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
       return;
     }
     try {
-      await dexieDataService.saveUserAtomic({ ...user, active: !user.active });
+      await dataService.saveUserAtomic({ ...user, active: !user.active });
       setStatusMessage({
         type: 'success',
         text: user.active ? `تم إيقاف الحساب (@${user.username}).` : `تم تفعيل الحساب (@${user.username}).`,
@@ -162,7 +162,7 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
     setStatusMessage(null);
 
     try {
-      const created = await dexieDataService.createUserAtomic({
+      const created = await dataService.createUserAtomic({
         username: newUsername,
         fullName: newFullName,
         role: newRole,
@@ -222,8 +222,8 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
     }
 
     try {
-      await dexieDataService.setCurrentUser(switchTargetUser);
-      await dexieDataService.logAction(
+      await dataService.setCurrentUser(switchTargetUser);
+      await dataService.logAction(
         'تبديل جلسة إداري',
         `قام المدير (${currentUser.username}) بتبديل الجلسة إلى (${switchTargetUser.username})`
       );
@@ -257,7 +257,7 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
 
     try {
       const passwordHash = await hashPassword(resetPasswordValue);
-      const updated = await dexieDataService.saveUserAtomic({
+      const updated = await dataService.saveUserAtomic({
         ...passwordTargetUser,
         passwordHash,
         mustChangePassword: false,
@@ -265,7 +265,7 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
         lockedUntil: undefined,
       });
       if (currentUser.id === updated.id) {
-        await dexieDataService.setCurrentUser(updated);
+        await dataService.setCurrentUser(updated);
         setCurrentUser(updated);
       }
       setPasswordTargetUser(null);

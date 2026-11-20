@@ -160,6 +160,16 @@ class DjangoSyncService {
     return map[entityType] || '/sync/';
   }
 
+  private resolveEffectiveBranch(config: DjangoSyncConfig): string {
+    const session = authService.getCurrentSessionSync();
+    const branchId = config.branchId?.trim() || session?.branchId?.trim() || '';
+    if (!session || !branchId) throw new Error('حظر أمني: لا يوجد فرع موثّق للمزامنة.');
+    if (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(branchId)) {
+      throw new Error('حظر عزل الفروع: فرع المزامنة غير مصرح به للمستخدم الحالي.');
+    }
+    return branchId;
+  }
+
   private resolveEffectiveTenant(config: DjangoSyncConfig): string {
     const authenticatedTenant = authService.getActiveTenantIdSync()?.trim();
     const configuredTenant = config.tenantId?.trim();
@@ -279,6 +289,8 @@ class DjangoSyncService {
     this.isProcessing = true;
     const config = this.getConfig();
     const effectiveTenantId = this.resolveEffectiveTenant(config);
+    const effectiveBranchId = this.resolveEffectiveBranch(config);
+    const session = authService.getCurrentSessionSync();
     const errors: string[] = [];
     let succeeded = 0;
     let failed = 0;
@@ -299,8 +311,22 @@ class DjangoSyncService {
             ? `${cleanBaseUrl}${endpoint}`
             : `${cleanBaseUrl}${endpoint}${encodeURIComponent(item.entityId)}/`;
 
-        const itemTenant =
-          item.tenantId && item.tenantId !== 'tenant_default' ? item.tenantId : effectiveTenantId;
+        const itemTenant = item.tenantId?.trim() || '';
+        const itemBranchId = item.branchId?.trim() || effectiveBranchId;
+        if (itemTenant !== effectiveTenantId) {
+          const message = 'تم حجب عنصر مزامنة لا يطابق مؤسسة الجلسة الحالية.';
+          await syncQueueService.markFailed(item.id, message, true);
+          errors.push(`حظر عنصر ${item.entityType} (${item.entityId}): ${message}`);
+          failed++;
+          continue;
+        }
+        if (!session || (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(itemBranchId))) {
+          const message = 'تم حجب عنصر مزامنة تابع لفرع غير مصرح به.';
+          await syncQueueService.markFailed(item.id, message, true);
+          errors.push(`حظر عنصر ${item.entityType} (${item.entityId}): ${message}`);
+          failed++;
+          continue;
+        }
 
         try {
           const controller = new AbortController();
@@ -310,7 +336,7 @@ class DjangoSyncService {
             'Content-Type': 'application/json',
             'X-Idempotency-Key': item.idempotencyKey,
             'X-Tenant-ID': itemTenant,
-            'X-Branch-ID': item.branchId || config.branchId,
+            'X-Branch-ID': itemBranchId,
           };
 
           if (config.apiToken) {
@@ -331,7 +357,7 @@ class DjangoSyncService {
                       local_outbox_id: item.id,
                       tenant_id: itemTenant,
                       entity_id: item.entityId,
-                      branch_id: item.branchId || config.branchId,
+                      branch_id: itemBranchId,
                       client_created_at: item.createdAt,
                       idempotency_key: item.idempotencyKey,
                     },
@@ -375,7 +401,7 @@ class DjangoSyncService {
               'تعارض في الحركة المالية؛ الخادم يمنع الاستبدال التلقائي للقيود والفواتير المرحّلة';
             await syncQueueService.recordConflict({
               tenantId: itemTenant,
-              branchId: item.branchId || config.branchId,
+              branchId: itemBranchId,
               entityType: item.entityType,
               entityId: item.entityId,
               localPayload: item.payload,
@@ -429,6 +455,7 @@ class DjangoSyncService {
 
     const config = this.getConfig();
     const effectiveTenantId = this.resolveEffectiveTenant(config);
+    const effectiveBranchId = this.resolveEffectiveBranch(config);
     const cleanBaseUrl = config.serverUrl.replace(/\/+$/, '');
     let pulledCount = 0;
     let conflictsCount = 0;
@@ -443,7 +470,7 @@ class DjangoSyncService {
 
     const headers: Record<string, string> = {
       Accept: 'application/json',
-      'X-Branch-ID': config.branchId,
+      'X-Branch-ID': effectiveBranchId,
       'X-Tenant-ID': effectiveTenantId,
     };
     if (config.apiToken) {
@@ -469,7 +496,7 @@ class DjangoSyncService {
       let maxServerTimestamp: string | null = entitySince || null;
       const queryParams = new URLSearchParams();
       if (entitySince) queryParams.set('since', entitySince);
-      queryParams.set('branch_id', config.branchId);
+      queryParams.set('branch_id', effectiveBranchId);
       queryParams.set('page_size', '100');
 
       let nextUrl: string | null = `${cleanBaseUrl}${ent.endpoint}?${queryParams.toString()}`;
@@ -517,7 +544,7 @@ class DjangoSyncService {
               const note = `تعارض سحابي مع Django: تعديل محلي معلق في طابور Outbox للكيان (${entityId}). تم منع الاستبدال التلقائي.`;
               await syncQueueService.recordConflict({
                 tenantId: effectiveTenantId,
-                branchId: config.branchId,
+                branchId: effectiveBranchId,
                 entityType: ent.type,
                 entityId,
                 localPayload: pending.payload,
@@ -743,6 +770,7 @@ class DjangoSyncService {
           receivedDate: String(row.received_date || row.receivedDate || ''),
           amount: Number(row.amount || 0),
           receivedBy: String(row.received_by || row.receivedBy || 'المسؤول'),
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
         };
         await db.amanatRecords.put(a);
         break;

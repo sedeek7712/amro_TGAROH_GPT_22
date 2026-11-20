@@ -609,7 +609,7 @@ export class DexieDataService implements IDataService {
     terminalCode?: string
   ): Promise<string> {
     await this.ensureReady();
-    const tenantId = syncQueueService.getCurrentTenantId(false);
+    const tenantId = syncQueueService.getCurrentTenantId(true);
     const activeBranch = await this.getActiveBranch();
     const bCode = branchCode || activeBranch.code || 'BR01';
     const tCode = terminalCode || storage.getTerminalCode();
@@ -625,7 +625,7 @@ export class DexieDataService implements IDataService {
     terminalCode?: string
   ): Promise<string> {
     await this.ensureReady();
-    const tenantId = syncQueueService.getCurrentTenantId(false);
+    const tenantId = syncQueueService.getCurrentTenantId(true);
     const activeBranch = await this.getActiveBranch();
     const bCode = branchCode || activeBranch.code || 'BR01';
     const tCode = terminalCode || storage.getTerminalCode();

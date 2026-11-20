@@ -26,6 +26,7 @@ import {
   validatePasswordStrength,
 } from '../../services/authService';
 import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { storage } from '../../services/storageService';
 import { useDexieInitStatus, useLiveUsers } from '../../hooks/useLiveDexie';
 import { SystemUser } from '../../types/erp';
@@ -81,7 +82,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
         },
       });
       await storage.setCurrentUser(updatedAdmin);
-      await dexieDataService.logAction(
+      await dataService.logAction(
         'تهيئة أمنية أولى',
         `تم تعيين كلمة مرور المدير العام (${updatedAdmin.username}) لأول مرة.`
       );
@@ -119,7 +120,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
         },
       });
       await storage.setCurrentUser(updatedUser);
-      await dexieDataService.logAction(
+      await dataService.logAction(
         'تغيير كلمة مرور إلزامي',
         `تم تحديث كلمة المرور للمستخدم (${updatedUser.username}).`
       );
@@ -162,7 +163,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLogin }) => {
       }
 
       await storage.setCurrentUser(result.user);
-      await dexieDataService.logAction(
+      await dataService.logAction(
         'تسجيل دخول',
         `دخول المستخدم ${result.user.fullName} (${result.user.role})`
       );

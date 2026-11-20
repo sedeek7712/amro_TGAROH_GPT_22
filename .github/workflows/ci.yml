@@ -33,6 +33,9 @@ jobs:
       - name: Verify desktop authentication and lockout
         run: node scripts/verify_sqlite_auth.mjs
 
+      - name: Verify legacy backup import and financial parity
+        run: node scripts/verify_sqlite_import.mjs
+
       - name: Check Electron main and preload syntax
         run: node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/security/authentication.mjs
 
@@ -75,6 +78,9 @@ jobs:
 
       - name: Verify main-process authentication on Node 24
         run: node scripts/verify_sqlite_auth.mjs
+
+      - name: Verify legacy backup import on Node 24
+        run: node scripts/verify_sqlite_import.mjs
 
       - name: Check Electron main, preload and security modules
         run: node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/security/authentication.mjs

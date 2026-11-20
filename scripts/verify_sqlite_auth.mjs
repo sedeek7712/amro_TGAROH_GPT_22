@@ -15,8 +15,19 @@ let now = Date.parse('2026-11-20T00:00:00.000Z');
 try {
   const runtime = await openErpDatabase({ userDataPath });
   const auth = new DesktopAuthenticationService(runtime.database, { now: () => now });
-  assert.equal(auth.getSetupStatus().setupRequired, true);
 
+  // Existing Dexie first-run state: the default admin row exists without a password.
+  runtime.database.prepare(
+    'INSERT INTO users (tenant_id,id,branch_id,username,role,active,password_hash,data_json) VALUES (?,?,?,?,?,?,?,?)'
+  ).run('tenant_main','user-admin','branch_main','admin','ADMIN',1,null,
+        JSON.stringify({
+          id:'user-admin',tenantId:'tenant_main',username:'admin',
+          fullName:'المدير الأول',role:'ADMIN',branchId:'branch_main',
+          allowedBranches:['branch_main'],allowedActivities:['pharmacy'],
+          active:true,mustChangePassword:true
+        }));
+
+  assert.equal(auth.getSetupStatus().setupRequired, true);
   assert.throws(
     () => auth.createInitialAdmin({username:'admin',fullName:'مدير النظام',password:'admin123'}),
     /ضعيفة/
@@ -27,6 +38,7 @@ try {
     password: 'SecurePass#2026',
   });
   assert.equal(setup.success, true);
+  assert.equal(setup.user.id, 'user-admin');
   assert.equal(setup.user.role, 'ADMIN');
   assert.equal(Object.hasOwn(setup.user, 'passwordHash'), false);
   assert.equal(auth.getSetupStatus().setupRequired, false);
@@ -51,6 +63,29 @@ try {
   assert.equal(actor.tenantId, 'tenant_main');
   assert.equal(Object.hasOwn(actor, 'passwordHash'), false);
 
+  // Forced password change receives a limited token, never a business actor.
+  const cashier = {
+    id:'user-cashier',tenantId:'tenant_main',username:'cashier',
+    fullName:'أمين نقطة البيع',role:'CASHIER',branchId:'branch_main',
+    allowedBranches:['branch_main'],allowedActivities:['pharmacy'],
+    active:true,mustChangePassword:true,failedLoginAttempts:0
+  };
+  runtime.database.prepare(
+    'INSERT INTO users (tenant_id,id,branch_id,username,role,active,password_hash,data_json) VALUES (?,?,?,?,?,?,?,?)'
+  ).run('tenant_main',cashier.id,cashier.branchId,cashier.username,cashier.role,1,
+        hashPasswordForDesktop('TempPass#2026'),JSON.stringify(cashier));
+  const forced = auth.authenticate({username:'cashier',password:'TempPass#2026'});
+  assert.equal(forced.success, true);
+  assert.equal(forced.mustChangePassword, true);
+  assert.equal(auth.getActor(forced.token), null);
+  const completed = auth.completeMandatoryPasswordChange({
+    token:forced.token,newPassword:'NewPass#2026'
+  });
+  assert.equal(completed.success, true);
+  const cashierActor = auth.getActor(completed.token);
+  assert.equal(cashierActor.username, 'cashier');
+  assert.equal(cashierActor.mustChangePassword, false);
+
   auth.logout(login.token);
   assert.equal(auth.getActor(login.token), null);
 
@@ -73,7 +108,7 @@ try {
   assert.equal(auth.getActor(unlocked.token), null);
   runtime.close();
 
-  console.log('PASS: desktop PBKDF2 compatibility, setup, login, lockout, token and revocation');
+  console.log('PASS: PBKDF2 compatibility, legacy admin setup, limited password-change token, lockout and revocation');
 } finally {
   rmSync(userDataPath, { recursive: true, force: true });
 }

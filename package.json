@@ -12,7 +12,7 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/tests/*.test.ts",
     "test:legacy": "tsx src/tests/phase5_remediation_test.ts && tsx src/tests/phase6_e2e_workflow_test.ts",
-    "verify:architecture": "node scripts/verify_data_service_boundary.mjs",
+    "verify:architecture": "node scripts/verify_data_service_boundary.mjs && node scripts/verify_desktop_auth_boundary.mjs",
     "verify": "npm run lint && npm run verify:architecture && npm test && npm run test:legacy && npm run build",
     "build:windows:preview": "npm run build && npx --yes electron-builder@26.18.1 --win nsis --x64 --publish never"
   },

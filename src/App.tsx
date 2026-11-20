@@ -7,6 +7,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import { storage } from './services/storageService';
 import { authService } from './services/authService';
+import { desktopAuthAdapter } from './services/desktopAuthAdapter';
 import { dexieDataService } from './services/dexieDataService';
 import { useDexieInitStatus, useLiveCashBoxes, useLiveUsers } from './hooks/useLiveDexie';
 import { ActivityId, SystemUser } from './types/erp';
@@ -45,6 +46,8 @@ export default function App() {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
+  const [desktopToken, setDesktopToken] = useState<string | null>(null);
+  const isDesktopRuntime = desktopAuthAdapter.isAvailable();
   const [showMobileBanner, setShowMobileBanner] = useState(() => {
     if (typeof window !== 'undefined') {
       const isStandalone =
@@ -63,14 +66,15 @@ export default function App() {
   const isViewAllowed = canAccessView(currentUser?.role, activeView);
 
   useEffect(() => {
+    if (isDesktopRuntime) return;
     dexieDataService.initialize().catch((err) => {
       console.error('[App] Error initializing Dexie storage:', err);
     });
-  }, []);
+  }, [isDesktopRuntime]);
 
-  // استعادة والتحقق من الجلسة الموقعة مقابل قاعدة البيانات ومنع العبث بين التبويبات
+  // استعادة جلسات الويب فقط؛ جلسة Windows تعيش داخل Electron main والذاكرة فقط
   useEffect(() => {
-    if (initStatus.state !== 'READY' || liveUsers.length === 0) return;
+    if (isDesktopRuntime || initStatus.state !== 'READY' || liveUsers.length === 0) return;
     let cancelled = false;
     authService.validateSession(liveUsers).then((res) => {
       if (cancelled) return;
@@ -85,9 +89,10 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [initStatus.state, liveUsers]);
+  }, [isDesktopRuntime, initStatus.state, liveUsers]);
 
   useEffect(() => {
+    if (isDesktopRuntime) return;
     const onStorage = () => {
       if (initStatus.state !== 'READY' || liveUsers.length === 0) return;
       authService.validateSession(liveUsers).then((res) => {
@@ -101,7 +106,7 @@ export default function App() {
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  }, [initStatus.state, liveUsers]);
+  }, [isDesktopRuntime, initStatus.state, liveUsers]);
 
   const handleRefresh = useCallback(() => {
     setRefreshKey((prev) => prev + 1);
@@ -110,10 +115,17 @@ export default function App() {
   }, []);
 
   const handleLogout = useCallback(() => {
-    authService.logout();
+    if (isDesktopRuntime && desktopToken) {
+      desktopAuthAdapter.logout(desktopToken).catch((error) => {
+        console.error('[App] Desktop logout failed:', error);
+      });
+    } else if (!isDesktopRuntime) {
+      authService.logout();
+    }
+    setDesktopToken(null);
     setIsLoggedIn(false);
     setActiveView('dashboard');
-  }, []);
+  }, [desktopToken, isDesktopRuntime]);
 
   // حظر التمهيد عند فشل قاعدة البيانات (DB-03)
   if (initStatus.state === 'FAILED') {
@@ -145,11 +157,31 @@ export default function App() {
   if (!isLoggedIn) {
     return (
       <LoginScreen
-        onLogin={(user) => {
+        onLogin={(user, token) => {
           setCurrentUser(user);
+          if (isDesktopRuntime && token) setDesktopToken(token);
           setIsLoggedIn(true);
         }}
       />
+    );
+  }
+
+  if (isDesktopRuntime) {
+    return (
+      <div dir="rtl" className="min-h-screen flex items-center justify-center bg-slate-950 p-5 text-white">
+        <section className="w-full max-w-xl rounded-2xl border border-amber-500/30 bg-slate-900 p-6 text-center shadow-2xl">
+          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-amber-300">
+            <ShieldAlert className="h-7 w-7" />
+          </div>
+          <h1 className="text-lg font-bold">تم التحقق من تسجيل الدخول المكتبي</h1>
+          <p className="mt-2 text-sm text-slate-300">مرحباً {currentUser.fullName}.</p>
+          <div className="mt-5 rounded-xl border border-amber-400/20 bg-amber-500/10 p-4 text-right text-sm leading-7 text-amber-100">
+            واجهة البيع والمخزون والمحاسبة لم تُربط بعد بخدمات SQLite. أوقفنا فتح العمليات المالية في نسخة Windows حتى لا تعمل على قاعدة Dexie منفصلة أو تعرض أرصدة غير صحيحة.
+          </div>
+          <p className="mt-3 text-xs text-slate-400">بيانات الدخول والجلسة محفوظة في SQLite وذاكرة العملية الرئيسية. لا يتم تخزين رمز الجلسة في المتصفح.</p>
+          <button onClick={handleLogout} className="mt-6 rounded-xl bg-slate-700 px-6 py-3 text-sm font-bold hover:bg-slate-600">تسجيل الخروج</button>
+        </section>
+      </div>
     );
   }
 

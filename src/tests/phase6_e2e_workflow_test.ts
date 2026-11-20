@@ -25,7 +25,7 @@ import { storage } from '../services/storageService';
 import { dexieDataService } from '../services/dexieDataService';
 import { authService, hashPassword } from '../services/authService';
 import { ROLE_ALLOWED_VIEWS } from '../config/rbac';
-import { Product, Invoice, AmanatRecord, Party, JournalEntryLine } from '../types/erp';
+import { Product, Invoice, AmanatRecord, Party, JournalEntry, JournalEntryLine } from '../types/erp';
 
 interface TestResult {
   stepNumber: number;

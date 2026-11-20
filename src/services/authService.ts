@@ -423,7 +423,6 @@ class AuthService {
    */
   public async completeMandatoryPasswordChange(params: {
     user: SystemUser;
-    currentPasswordVerified?: boolean;
     newPassword: string;
     onSaveUser: (updatedUser: SystemUser) => Promise<void> | void;
   }): Promise<{ user: SystemUser; session: AuthSession }> {
@@ -432,8 +431,7 @@ class AuthService {
       throw new Error('حظر أمني: الحساب ليس في وضع تغيير كلمة المرور الإلزامي.');
     }
     const actor = this.getCurrentActorSync();
-    const isPendingSelfSession = actor?.id === user.id || params.currentPasswordVerified === true;
-    if (!isPendingSelfSession) {
+    if (!actor || actor.id !== user.id) {
       throw new Error('حظر أمني: يجب التحقق من كلمة المرور الحالية أولاً قبل إتمام التغيير الإلزامي.');
     }
 
@@ -486,11 +484,10 @@ class AuthService {
       throw new Error('لا يمكن التبديل إلى حساب غير موجود أو موقوف.');
     }
 
-    if (
-      (freshTarget.tenantId?.trim() || 'tenant_main') !==
-      (freshAdmin.tenantId?.trim() || 'tenant_main')
-    ) {
-      throw new Error('حظر عزل المؤسسات: لا يمكن التبديل إلى مستخدم في مؤسسة أخرى.');
+    const adminTenantId = freshAdmin.tenantId?.trim();
+    const targetTenantId = freshTarget.tenantId?.trim();
+    if (!adminTenantId || !targetTenantId || targetTenantId !== adminTenantId) {
+      throw new Error('حظر عزل المؤسسات: يجب أن يكون للمستخدمين معرّف مؤسسة صريح ومتطابق.');
     }
 
     const session = await this.issueSignedSession(freshTarget, freshTarget.tenantId);

@@ -9,7 +9,6 @@ on:
 jobs:
   verify:
     runs-on: ubuntu-latest
-
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -19,6 +18,14 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      - name: Setup Python for SQLite schema verification
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify SQLite schema, transactions, persistence and backup
+        run: python scripts/verify_sqlite_schema.py
 
       - name: Install dependencies
         run: npm ci

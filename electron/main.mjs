@@ -2,12 +2,14 @@ import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { openErpDatabase } from './sqlite/database.mjs';
+import { DesktopAuthenticationService } from './security/authentication.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STABLE_DATA_FOLDER = 'AmroAlnmaryERP';
 
 let mainWindow = null;
 let databaseRuntime = null;
+let authenticationService = null;
 let shuttingDown = false;
 
 // The data directory is intentionally independent from the EXE installation directory
@@ -54,6 +56,36 @@ if (!hasSingleInstance) {
       };
     });
 
+    ipcMain.handle('erp:auth:setup-status', (event) => {
+      assertTrustedMainFrame(event);
+      return authenticationService.getSetupStatus();
+    });
+
+    ipcMain.handle('erp:auth:create-initial-admin', (event, input) => {
+      assertTrustedMainFrame(event);
+      return authenticationService.createInitialAdmin(input);
+    });
+
+    ipcMain.handle('erp:auth:login', (event, input) => {
+      assertTrustedMainFrame(event);
+      return authenticationService.authenticate(input);
+    });
+
+    ipcMain.handle('erp:auth:me', (event, input) => {
+      assertTrustedMainFrame(event);
+      return authenticationService.getActor(input?.token, input?.branchId);
+    });
+
+    ipcMain.handle('erp:auth:logout', (event, token) => {
+      assertTrustedMainFrame(event);
+      return authenticationService.logout(token);
+    });
+
+    ipcMain.handle('erp:auth:complete-password-change', (event, input) => {
+      assertTrustedMainFrame(event);
+      return authenticationService.completeMandatoryPasswordChange(input);
+    });
+
 
   }
 
@@ -98,6 +130,7 @@ if (!hasSingleInstance) {
   app.whenReady().then(async () => {
     try {
       databaseRuntime = await openErpDatabase({ userDataPath: app.getPath('userData') });
+      authenticationService = new DesktopAuthenticationService(databaseRuntime.database);
       registerSafeIpcHandlers();
       await createMainWindow();
     } catch (error) {

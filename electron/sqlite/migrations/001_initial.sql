@@ -193,7 +193,7 @@ CREATE INDEX IF NOT EXISTS idx_journal_entries_reference ON journal_entries(tena
 CREATE INDEX IF NOT EXISTS idx_cash_boxes_branch ON cash_boxes(tenant_id,branch_id);
 CREATE INDEX IF NOT EXISTS idx_vouchers_date ON vouchers(tenant_id,voucher_date DESC);
 CREATE INDEX IF NOT EXISTS idx_amanat_status_date ON amanat_records(tenant_id,status,received_date DESC);
-CREATE INDEX IF NOT EXISTS idx_users_username ON users(tenant_id,username);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_username_normalized ON users(tenant_id,lower(username));
 CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(tenant_id,timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_outbox_status_retry ON outbox_queue(tenant_id,status,next_retry_at,priority);
 CREATE INDEX IF NOT EXISTS idx_conflicts_status ON sync_conflicts(tenant_id,status,detected_at DESC);

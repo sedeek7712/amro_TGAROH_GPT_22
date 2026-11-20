@@ -523,11 +523,16 @@ export class DexieDataService implements IDataService {
   // --- الفروع ونقاط البيع (Multi-Branch System) ---
   public async getBranches(): Promise<Branch[]> {
     await this.ensureReady();
-    return await db.branches.toArray();
+    const { actor } = this.requireAuthorizedActor('branches:view');
+    const rows = await db.branches.toArray();
+    if (actor.role === 'ADMIN') return rows;
+    const allowed = new Set(actor.allowedBranches || []);
+    return rows.filter((branch) => allowed.has(branch.id));
   }
 
   public async getBranch(id: string): Promise<Branch | undefined> {
     await this.ensureReady();
+    this.requireAuthorizedActor('branches:view', id);
     return await db.branches.get(id);
   }
 
@@ -541,10 +546,7 @@ export class DexieDataService implements IDataService {
   }
 
   public async setActiveBranchId(branchId: string): Promise<void> {
-    const actor = authService.getCurrentActorSync();
-    if (actor) {
-      assertBranchAccess(actor, branchId);
-    }
+    this.requireAuthorizedActor('branches:view', branchId);
     storage.setActiveBranchId(branchId);
   }
 
@@ -609,9 +611,14 @@ export class DexieDataService implements IDataService {
     terminalCode?: string
   ): Promise<string> {
     await this.ensureReady();
-    const tenantId = syncQueueService.getCurrentTenantId(true);
-    const activeBranch = await this.getActiveBranch();
-    const bCode = branchCode || activeBranch.code || 'BR01';
+    const permission = type === 'INV' ? 'pos:sale' : 'purchase:create';
+    const { tenantId, branchId } = this.requireAuthorizedActor(permission);
+    const activeBranch = await db.branches.get(branchId);
+    if (!activeBranch) throw new FinancialValidationError('الفرع المحدد غير موجود.');
+    if (branchCode && branchCode !== activeBranch.code) {
+      throw new FinancialValidationError('رمز الفرع المطلوب لا يطابق الفرع المصرح به في الجلسة.');
+    }
+    const bCode = activeBranch.code || 'BR01';
     const tCode = terminalCode || storage.getTerminalCode();
 
     return await db.transaction('rw', [db.sequences, db.invoices], async () => {
@@ -625,9 +632,14 @@ export class DexieDataService implements IDataService {
     terminalCode?: string
   ): Promise<string> {
     await this.ensureReady();
-    const tenantId = syncQueueService.getCurrentTenantId(true);
-    const activeBranch = await this.getActiveBranch();
-    const bCode = branchCode || activeBranch.code || 'BR01';
+    const permission = type === 'RCT' ? 'voucher:receipt' : 'voucher:payment';
+    const { tenantId, branchId } = this.requireAuthorizedActor(permission);
+    const activeBranch = await db.branches.get(branchId);
+    if (!activeBranch) throw new FinancialValidationError('الفرع المحدد غير موجود.');
+    if (branchCode && branchCode !== activeBranch.code) {
+      throw new FinancialValidationError('رمز الفرع المطلوب لا يطابق الفرع المصرح به في الجلسة.');
+    }
+    const bCode = activeBranch.code || 'BR01';
     const tCode = terminalCode || storage.getTerminalCode();
 
     return await db.transaction('rw', [db.sequences, db.vouchers], async () => {
@@ -645,6 +657,7 @@ export class DexieDataService implements IDataService {
   // --- الدليل المحاسبي ---
   public async getAccounts(): Promise<Account[]> {
     await this.ensureReady();
+    this.requireAuthorizedActor('view:accounting');
     return await db.accounts.toArray();
   }
 
@@ -720,6 +733,7 @@ export class DexieDataService implements IDataService {
   // --- المخزون والأصناف ---
   public async getProducts(activityId?: CommercialActivityId): Promise<Product[]> {
     await this.ensureReady();
+    this.requireAuthorizedActor('inventory:view');
     if (activityId) {
       return await db.products.where('activityId').equals(activityId).toArray();
     }

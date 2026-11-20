@@ -431,10 +431,16 @@ class SyncQueueService {
     if (params.tenantId && params.tenantId !== tenantId) {
       throw new PermissionError('حظر عزل المؤسسات: لا يمكن تسجيل تعارض لمؤسسة أخرى.', 'tenant:access');
     }
+    const session = authService.getCurrentSessionSync();
+    const branchId = params.branchId?.trim() || session?.branchId?.trim() || '';
+    if (!session || !branchId) throw new PermissionError('حظر عزل الفروع: يجب تحديد فرع للتعارض.', 'branch:required');
+    if (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(branchId)) {
+      throw new PermissionError('حظر عزل الفروع: التعارض تابع لفرع غير مصرح به.', 'branch:access');
+    }
     const conflict: SyncConflict = {
       id: storage.generateUUID(),
       tenantId,
-      branchId: params.branchId,
+      branchId,
       entityType: params.entityType,
       entityId: params.entityId,
       localPayload: params.localPayload,
@@ -453,7 +459,13 @@ class SyncQueueService {
    * استرجاع كافة التعارضات المسجلة
    */
   public async getConflicts(): Promise<SyncConflict[]> {
-    return await db.syncConflicts.toCollection().reverse().sortBy('detectedAt');
+    const tenantId = this.getCurrentTenantId(true);
+    const session = authService.getCurrentSessionSync();
+    if (!session) throw new PermissionError('حظر أمني: يلزم تسجيل الدخول لعرض التعارضات.', 'sync:manage');
+    const rows = await db.syncConflicts.where('tenantId').equals(tenantId).reverse().sortBy('detectedAt');
+    return session.role === 'ADMIN'
+      ? rows
+      : rows.filter((item) => Boolean(item.branchId && session.allowedBranches.includes(item.branchId)));
   }
 
   /**
@@ -464,8 +476,14 @@ class SyncQueueService {
     status: SyncConflict['status'],
     notes?: string
   ): Promise<void> {
+    const tenantId = this.getCurrentTenantId(true);
+    const session = authService.getCurrentSessionSync();
+    if (!session) throw new PermissionError('حظر أمني: يلزم تسجيل الدخول لتسوية التعارض.', 'sync:manage');
     const conflict = await db.syncConflicts.get(conflictId);
-    if (conflict) {
+    if (conflict && conflict.tenantId === tenantId) {
+      if (!conflict.branchId || (session.role !== 'ADMIN' && !session.allowedBranches.includes(conflict.branchId))) {
+        throw new PermissionError('حظر عزل الفروع: لا يمكن تسوية تعارض فرع غير مصرح به.', 'branch:access');
+      }
       conflict.status = status;
       conflict.resolvedAt = new Date().toISOString();
       if (notes) conflict.notes = (conflict.notes ? conflict.notes + ' | ' : '') + notes;

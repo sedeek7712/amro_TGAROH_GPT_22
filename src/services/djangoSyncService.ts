@@ -161,7 +161,15 @@ class DjangoSyncService {
   }
 
   private resolveEffectiveTenant(config: DjangoSyncConfig): string {
-    return authService.getActiveTenantIdSync() || config.tenantId?.trim() || 'tenant_main';
+    const authenticatedTenant = authService.getActiveTenantIdSync()?.trim();
+    const configuredTenant = config.tenantId?.trim();
+    if (!authenticatedTenant) {
+      throw new Error('حظر أمني: يجب تسجيل الدخول قبل تشغيل المزامنة؛ لا يُسمح باستخدام مؤسسة افتراضية.');
+    }
+    if (configuredTenant && configuredTenant !== authenticatedTenant) {
+      throw new Error('حظر عزل المؤسسات: إعداد المزامنة لا يطابق المؤسسة المسجلة في الجلسة.');
+    }
+    return authenticatedTenant;
   }
 
   /**
@@ -457,7 +465,8 @@ class DjangoSyncService {
     const nextCursors: Record<string, string> = { ...(config.tableCursors || {}) };
 
     for (const ent of entitiesToPull) {
-      const entitySince = cursor || nextCursors[ent.type] || config.syncCursor || config.lastSyncedAt || '';
+      const entitySince = cursor || nextCursors[ent.type] || '';
+      let maxServerTimestamp: string | null = entitySince || null;
       const queryParams = new URLSearchParams();
       if (entitySince) queryParams.set('since', entitySince);
       queryParams.set('branch_id', config.branchId);
@@ -484,8 +493,20 @@ class DjangoSyncService {
           const dataObj = !Array.isArray(data) && data && typeof data === 'object' ? (data as Record<string, unknown>) : null;
           const rows: unknown[] = Array.isArray(data) ? data : (Array.isArray(dataObj?.results) ? dataObj.results : []);
 
+          const responseServerTimestamp =
+            typeof dataObj?.server_timestamp === 'string' ? dataObj.server_timestamp :
+            typeof dataObj?.next_cursor === 'string' ? dataObj.next_cursor : null;
+          if (responseServerTimestamp && (!maxServerTimestamp || responseServerTimestamp > maxServerTimestamp)) {
+            maxServerTimestamp = responseServerTimestamp;
+          }
+
           for (const item of rows) {
             const row = item as Record<string, unknown>;
+            const rowTimestamp = typeof row.updated_at === 'string' ? row.updated_at :
+              typeof row.updatedAt === 'string' ? row.updatedAt : null;
+            if (rowTimestamp && (!maxServerTimestamp || rowTimestamp > maxServerTimestamp)) {
+              maxServerTimestamp = rowTimestamp;
+            }
             const entityId = String(ent.type === 'ACCOUNT' ? row.code || row.id || '' : row.id || '');
             if (!entityId) continue;
 
@@ -518,16 +539,17 @@ class DjangoSyncService {
         entitySucceeded = false;
       }
 
-      if (entitySucceeded) {
-        nextCursors[ent.type] = new Date().toISOString();
+      if (entitySucceeded && maxServerTimestamp) {
+        nextCursors[ent.type] = maxServerTimestamp;
       }
     }
 
-    const newTimestamp = new Date().toISOString();
     config.tableCursors = nextCursors;
-    if (errors.length === 0) {
-      config.syncCursor = newTimestamp;
-      config.lastSyncedAt = newTimestamp;
+    const serverCursors = Object.values(nextCursors).filter((value) => Boolean(value)).sort();
+    const latestServerCursor = serverCursors.length > 0 ? serverCursors[serverCursors.length - 1] : undefined;
+    if (errors.length === 0 && latestServerCursor) {
+      config.syncCursor = latestServerCursor;
+      config.lastSyncedAt = latestServerCursor;
     }
     this.saveConfig(config);
 
@@ -535,7 +557,7 @@ class DjangoSyncService {
       pulled: pulledCount,
       conflicts: conflictsCount,
       errors,
-      newCursor: errors.length === 0 ? newTimestamp : undefined,
+      newCursor: errors.length === 0 ? latestServerCursor : undefined,
     };
   }
 

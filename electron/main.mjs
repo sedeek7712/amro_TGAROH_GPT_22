@@ -1,7 +1,7 @@
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain } from 'electron';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createSqliteBackup, openErpDatabase } from './sqlite/database.mjs';
+import { openErpDatabase } from './sqlite/database.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STABLE_DATA_FOLDER = 'AmroAlnmaryERP';
@@ -54,21 +54,7 @@ if (!hasSingleInstance) {
       };
     });
 
-    ipcMain.handle('erp:backup:create', async (event) => {
-      assertTrustedMainFrame(event);
-      const backupPath = await createSqliteBackup(
-        databaseRuntime.database,
-        databaseRuntime.backupDirectory,
-        { prefix: 'manual-backup' }
-      );
-      return { success: true, filename: path.basename(backupPath) };
-    });
 
-    ipcMain.handle('erp:backup:open-folder', async (event) => {
-      assertTrustedMainFrame(event);
-      const errorMessage = await shell.openPath(databaseRuntime.backupDirectory);
-      return { success: errorMessage.length === 0, error: errorMessage || undefined };
-    });
   }
 
   async function createMainWindow() {

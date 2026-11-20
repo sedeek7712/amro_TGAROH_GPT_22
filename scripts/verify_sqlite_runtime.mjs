@@ -10,7 +10,8 @@ const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'erp-sqlite-runtime-'));
 try {
   const firstOpen = await openErpDatabase({ userDataPath });
   assert.deepEqual(firstOpen.appliedMigrations, [1]);
-  assert.match(firstOpen.databasePath, /Database[\\/]erp\\.sqlite$/);
+  assert.equal(path.basename(firstOpen.databasePath), 'erp.sqlite');
+  assert.equal(path.basename(path.dirname(firstOpen.databasePath)), 'Database');
 
   const db = firstOpen.database;
   db.prepare('INSERT INTO activities (tenant_id,id,code,data_json) VALUES (?,?,?,?)')

@@ -287,15 +287,18 @@ class DjangoSyncService {
     }
 
     this.isProcessing = true;
-    const config = this.getConfig();
-    const effectiveTenantId = this.resolveEffectiveTenant(config);
-    const effectiveBranchId = this.resolveEffectiveBranch(config);
-    const session = authService.getCurrentSessionSync();
     const errors: string[] = [];
     let succeeded = 0;
     let failed = 0;
 
     try {
+      const config = this.getConfig();
+      const effectiveTenantId = this.resolveEffectiveTenant(config);
+      const effectiveBranchId = this.resolveEffectiveBranch(config);
+      const session = authService.getCurrentSessionSync();
+      if (!config.apiToken?.trim()) {
+        throw new Error('المزامنة متوقفة بأمان: لم يتم إعداد رمز مصادقة الخادم.');
+      }
       const queue = await syncQueueService.claimReadyToSyncItems(this.workerId, 25);
 
       if (queue.length === 0) {
@@ -456,6 +459,9 @@ class DjangoSyncService {
     const config = this.getConfig();
     const effectiveTenantId = this.resolveEffectiveTenant(config);
     const effectiveBranchId = this.resolveEffectiveBranch(config);
+    if (!config.apiToken?.trim()) {
+      throw new Error('المزامنة متوقفة بأمان: لم يتم إعداد رمز مصادقة الخادم.');
+    }
     const cleanBaseUrl = config.serverUrl.replace(/\/+$/, '');
     let pulledCount = 0;
     let conflictsCount = 0;

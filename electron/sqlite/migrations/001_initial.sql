@@ -174,6 +174,18 @@ CREATE TABLE IF NOT EXISTS device_registrations (
   PRIMARY KEY (tenant_id,device_id),
   FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE RESTRICT
 );
+CREATE TABLE IF NOT EXISTS legacy_imports (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  source_system TEXT NOT NULL,
+  source_version TEXT NOT NULL,
+  source_checksum TEXT NOT NULL,
+  imported_at TEXT NOT NULL,
+  row_counts_json TEXT NOT NULL CHECK (json_valid(row_counts_json)),
+  financial_totals_json TEXT NOT NULL CHECK (json_valid(financial_totals_json)),
+  backup_filename TEXT NOT NULL,
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id) ON UPDATE CASCADE ON DELETE RESTRICT
+);
 CREATE TABLE IF NOT EXISTS app_settings (
   tenant_id TEXT NOT NULL, setting_key TEXT NOT NULL,
   value_json TEXT NOT NULL CHECK (json_valid(value_json)), updated_at TEXT NOT NULL,

@@ -170,23 +170,38 @@ function countRows(database, table, tenantId) {
 }
 
 function assertEmptyDestination(database, tenantIds) {
-  const tenantId = tenantIds[0] || DEFAULT_TENANT_ID;
   const protectedTables = [
     'accounts', 'activities', 'products', 'product_batches', 'parties',
-    'invoices', 'journal_entries', 'cash_boxes', 'vouchers', 'amanat_records',
-    'users', 'audit_logs', 'outbox_queue', 'sync_conflicts', 'document_sequences',
+    'invoices', 'invoice_items', 'invoice_stock_deductions',
+    'journal_entries', 'journal_entry_lines', 'cash_boxes', 'vouchers',
+    'amanat_records', 'users', 'audit_logs', 'outbox_queue', 'sync_conflicts',
+    'document_sequences',
   ];
   for (const table of protectedTables) {
-    const count = database.prepare('SELECT COUNT(*) AS count FROM ' + table + ' WHERE tenant_id=?')
-      .get(tenantId).count;
+    const count = database.prepare('SELECT COUNT(*) AS count FROM ' + table).get().count;
     if (count > 0) {
       throw new Error('قاعدة SQLite تحتوي بيانات فعلية بالفعل (' + table + '). لن نستبدلها أو ندمجها تلقائياً.');
     }
   }
+
+  // A fresh app database contains exactly the built-in main tenant and branch.
+  const tenants = database.prepare('SELECT id FROM tenants ORDER BY id').all();
+  if (tenants.length !== 1 || tenants[0].id !== DEFAULT_TENANT_ID) {
+    throw new Error('قاعدة SQLite تحتوي منشآت قائمة؛ لن نستورد فوقها تلقائياً.');
+  }
+  const branches = database.prepare(
+    'SELECT id FROM branches WHERE tenant_id=? ORDER BY id'
+  ).all(DEFAULT_TENANT_ID);
+  if (branches.length !== 1 || branches[0].id !== 'branch_main') {
+    throw new Error('قاعدة SQLite تحتوي فروعاً قائمة؛ لن نستورد فوقها تلقائياً.');
+  }
+
   const imports = database.prepare('SELECT COUNT(*) AS count FROM legacy_imports').get().count;
   if (imports > 0) throw new Error('سبق استيراد نسخة احتياطية إلى قاعدة البيانات هذه.');
+  if (!Array.isArray(tenantIds) || !tenantIds.includes(DEFAULT_TENANT_ID)) {
+    throw new Error('النسخة الاحتياطية لا تحتوي منشأة رئيسية معتمدة.');
+  }
 }
-
 function sourceCounts(data) {
   return {
     branches: data.branches.length,

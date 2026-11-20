@@ -12,7 +12,8 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test src/tests/*.test.ts",
     "test:legacy": "tsx src/tests/phase5_remediation_test.ts && tsx src/tests/phase6_e2e_workflow_test.ts",
-    "verify": "npm run lint && npm test && npm run test:legacy && npm run build"
+    "verify": "npm run lint && npm test && npm run test:legacy && npm run build",
+    "build:windows:preview": "npm run build && npx --yes electron-builder@26.18.1 --win nsis --x64 --publish never"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
@@ -41,5 +42,39 @@
     "vite-plugin-pwa": "^2.0.0"
   },
   "productName": "نظام عمرو النماري للإدارة التجارية",
-  "main": "electron/main.mjs"
+  "main": "electron/main.mjs",
+  "build": {
+    "appId": "com.amroalnmary.erp",
+    "productName": "نظام عمرو النماري",
+    "electronVersion": "45.4.1",
+    "directories": {
+      "output": "release/windows-preview"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "amro-erp-shell-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "deleteAppDataOnUninstall": false,
+      "runAfterFinish": false
+    }
+  }
 }

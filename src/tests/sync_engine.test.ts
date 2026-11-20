@@ -63,7 +63,13 @@ describe('Sync Engine Regression Tests (SYN-03, SYNC-01..06)', () => {
       passwordHash: await hashPassword('Admin#Sync2026'),
     };
     await db.users.put(admin);
-    await authService.setAuthenticatedUserForSession(admin);
+    const login = await authService.authenticate({
+      username: admin.username,
+      password: 'Admin#Sync2026',
+      users: [admin],
+      onUserUpdated: async (updated) => { await db.users.put(updated); },
+    });
+    assert.equal(login.success, true);
 
     Object.defineProperty(networkMonitor, 'isOnline', {
       value: () => true,

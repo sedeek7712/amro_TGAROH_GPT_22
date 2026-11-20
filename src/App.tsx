@@ -58,7 +58,9 @@ export default function App() {
     return true;
   });
 
-  const [currentUser, setCurrentUser] = useState<SystemUser>(() => authService.getCurrentActorSync() || storage.getCurrentUser());
+  const [currentUser, setCurrentUser] = useState<SystemUser>(() => desktopAuthAdapter.isAvailable()
+    ? { id: '', username: '', fullName: '', role: 'CASHIER', allowedActivities: [], active: false }
+    : authService.getCurrentActorSync() || storage.getCurrentUser());
   const cashBoxes = useLiveCashBoxes();
   const liveUsers = useLiveUsers();
   const initStatus = useDexieInitStatus();

@@ -23,7 +23,7 @@ import {
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
@@ -258,7 +258,7 @@ export const PointOfSale: React.FC<POSProps> = ({
 
     try {
       // 3. التنفيذ الذري المركب في IndexedDB عبر DexieDataService مع ترقيم تسلسلي ومنع تكرار
-      const res = await dexieDataService.createSalesInvoiceAtomic({
+      const res = await dataService.createSalesInvoiceAtomic({
         invoice: newInvoice,
         totalCogs: Number(totalCogs.toFixed(2)),
         stockDeductions: cart.map((item) => ({

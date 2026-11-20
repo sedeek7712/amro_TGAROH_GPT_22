@@ -21,7 +21,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import {
   useLiveCashBoxes,
@@ -148,7 +148,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
       return;
     }
 
-    const activeBranch = await dexieDataService.getActiveBranch();
+    const activeBranch = await dataService.getActiveBranch();
     const newVoucher: PaymentVoucher = {
       id: storage.generateUUID(),
       voucherNumber: '',
@@ -166,7 +166,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
 
     setIsSubmitting(true);
     try {
-      const result = await dexieDataService.createCashVoucherAtomic({ voucher: newVoucher });
+      const result = await dataService.createCashVoucherAtomic({ voucher: newVoucher });
       setIsVoucherModalOpen(false);
       onRefresh();
       handleNotifyVoucher(result.voucher);
@@ -187,7 +187,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
       return;
     }
 
-    const activeBranch = await dexieDataService.getActiveBranch();
+    const activeBranch = await dataService.getActiveBranch();
     const newBox: CashBox = {
       id: storage.generateUUID(),
       code: boxCode.trim(),
@@ -200,7 +200,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
 
     setIsSubmitting(true);
     try {
-      await dexieDataService.createCashBoxAtomic(newBox);
+      await dataService.createCashBoxAtomic(newBox);
       setIsAddBoxModalOpen(false);
       setBoxCode('');
       setBoxName('');

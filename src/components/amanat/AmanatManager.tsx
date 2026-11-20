@@ -21,7 +21,7 @@ import {
   Check,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { authService } from '../../services/authService';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveAmanatRecords, useLiveCashBoxes } from '../../hooks/useLiveDexie';
@@ -120,7 +120,7 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
 
     setIsSubmitting(true);
     try {
-      const res = await dexieDataService.createAmanatDepositAtomic({
+      const res = await dataService.createAmanatDepositAtomic({
         record: newRecord,
         cashBoxId: targetBox,
       });
@@ -160,7 +160,7 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
     try {
       const targetBox =
         record.type === 'CASH' ? record.cashBoxId || cashBoxes[0]?.id || 'cb-1' : undefined;
-      const res = await dexieDataService.returnAmanatAtomic({
+      const res = await dataService.returnAmanatAtomic({
         recordId: record.id,
         cashBoxId: targetBox,
         recipientSignatureName: record.depositorName,

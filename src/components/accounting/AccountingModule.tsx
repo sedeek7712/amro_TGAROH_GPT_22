@@ -24,7 +24,7 @@ import {
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { accounting } from '../../services/accountingEngine';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { authService } from '../../services/authService';
 import { hasPermission } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
@@ -135,7 +135,7 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
     setIsSubmitting(true);
     try {
       const activeBranchId = storage.getActiveBranchId();
-      const persisted = await dexieDataService.createJournalEntryAtomic({
+      const persisted = await dataService.createJournalEntryAtomic({
         id: storage.generateUUID(),
         entryNumber: '',
         date: entryDate,
@@ -187,7 +187,7 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
 
     setIsSubmitting(true);
     try {
-      await dexieDataService.createAccountAtomic(newAccount);
+      await dataService.createAccountAtomic(newAccount);
       setIsAddAccountModalOpen(false);
       setNewAccCode('');
       setNewAccName('');
@@ -987,7 +987,7 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
                 setReversalError(null);
                 setIsSubmitting(true);
                 try {
-                  await dexieDataService.reverseJournalEntryAtomic(
+                  await dataService.reverseJournalEntryAtomic(
                     reversalModalEntry.id,
                     reversalReason.trim()
                   );

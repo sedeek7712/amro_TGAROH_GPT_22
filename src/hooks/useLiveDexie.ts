@@ -55,6 +55,8 @@ export function useLiveDexie<T>(
   const [data, setData] = useState<T>(initialValue);
 
   useEffect(() => {
+    // Electron uses SQLite only. Do not even open IndexedDB via liveQuery in Windows.
+    if (typeof window !== 'undefined' && window.amroDesktop) return;
     let isMounted = true;
     Promise.resolve(querier())
       .then((res) => {
@@ -93,6 +95,8 @@ export function useDexieInitStatus(): { state: InitState; error: string | null }
   });
 
   useEffect(() => {
+    // Dexie initialization status is not part of the Electron runtime.
+    if (typeof window !== 'undefined' && window.amroDesktop) return;
     const timer = setInterval(() => {
       const nextState = dexieDataService.getInitState();
       const nextError = dexieDataService.getInitError();

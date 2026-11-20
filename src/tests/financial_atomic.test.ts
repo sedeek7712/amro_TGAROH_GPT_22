@@ -64,7 +64,13 @@ describe('Financial Atomicity, Cash Vouchers + JVs, Stock Batch Integrity & Idem
       passwordHash: await hashPassword('Admin#Fin2026!'),
     };
     await db.users.put(admin);
-    await authService.setAuthenticatedUserForSession(admin);
+    const login = await authService.authenticate({
+      username: admin.username,
+      password: 'Admin#Fin2026!',
+      users: [admin],
+      onUserUpdated: async (updated) => { await db.users.put(updated); },
+    });
+    assert.equal(login.success, true);
 
     // تمويل الصندوق cb-1 برصيد افتتاحي معلوم للاختبارات المالية
     await db.cashBoxes.update('cb-1', { balance: 10000 });
@@ -170,7 +176,7 @@ describe('Financial Atomicity, Cash Vouchers + JVs, Stock Batch Integrity & Idem
         cashBoxId: 'cb-1',
         isPosted: true,
       },
-      totalCogs: 40,
+      totalCogs: 999,
       stockDeductions: [{ productId: prod.id, quantity: 2 }],
     });
 
@@ -198,8 +204,29 @@ describe('Financial Atomicity, Cash Vouchers + JVs, Stock Batch Integrity & Idem
     });
 
     assert.equal(duplicate.invoice.id, first.invoice.id, 'Duplicate clientRequestId must return original invoice');
+    assert.equal(first.invoice.totalCogs, 40, 'COGS must be recalculated from product purchase cost, not trusted from the UI');
+    assert.equal(first.invoice.stockDeductionsRecorded?.[0]?.unitCost, 20, 'The actual unit cost must be persisted with the invoice');
     assert.equal((await db.products.get(prod.id))?.currentStock, 8, 'Stock must only be deducted once');
     assert.equal((await db.cashBoxes.get('cb-1'))?.balance, 10060, 'Cash box must only be credited once');
+
+    await assert.rejects(
+      () => dexieDataService.createSalesInvoiceAtomic({
+        invoice: {
+          ...first.invoice,
+          id: 'inv-mismatched-deduction',
+          invoiceNumber: '',
+          items: [{ ...first.invoice.items[0], id: 'line-mismatch', quantity: 1, total: 30 }],
+          subtotal: 30,
+          total: 30,
+          paidAmount: 0,
+          cashBoxId: '',
+        },
+        totalCogs: 0,
+        stockDeductions: [{ productId: prod.id, quantity: 2 }],
+      }),
+      (err: unknown) => err instanceof FinancialValidationError
+    );
+    assert.equal((await db.products.get(prod.id))?.currentStock, 8, 'A mismatched deduction must roll back without changing stock');
 
     // 2. Insufficient cash box funds for purchase must throw & leave stock untouched
     await assert.rejects(

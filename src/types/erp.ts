@@ -84,6 +84,7 @@ export type AmanatStatus = 'HELD' | 'RETURNED' | 'CANCELLED';
 
 export interface AmanatRecord {
   id: string;                   // UUID v4
+  branchId?: string;            // الفرع المالك لسجل الأمانة
   recordNumber: string;         // رقم سند الأمانة (AMN-YYYY-XXXXX)
   depositorName: string;        // اسم المودع
   depositorPhone: string;       // رقم الهاتف

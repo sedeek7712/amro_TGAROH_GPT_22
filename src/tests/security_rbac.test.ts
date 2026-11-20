@@ -93,7 +93,7 @@ describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-
     assert.equal(await verifyPassword('1234', undefined), false);
 
     // Default initial admin requires first-run password setup (no default password hash)
-    const users = await dexieDataService.getUsers();
+    const users = await db.users.toArray();
     assert.equal(needsInitialAdminSetup(users), true);
   });
 
@@ -150,7 +150,13 @@ describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-
     // Tampered session is rejected by validateSession
     const cleanAdmin = makeUser({ id: 'usr-admin-2', username: 'admin2', role: 'ADMIN', passwordHash: adminHash });
     await db.users.put(cleanAdmin);
-    await authService.createSession(cleanAdmin);
+    const cleanLogin = await authService.authenticate({
+      username: cleanAdmin.username,
+      password: 'Admin#Secure2026',
+      users: [cleanAdmin],
+      onUserUpdated: async (updated) => { await db.users.put(updated); },
+    });
+    assert.equal(cleanLogin.success, true);
 
     const rawSession = JSON.parse(localStorage.getItem('multi_activity_erp_auth_session')!);
     rawSession.role = 'ADMIN';
@@ -168,9 +174,16 @@ describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-
       role: 'CASHIER',
       branchId: 'branch_main',
       allowedBranches: ['branch_main'],
+      passwordHash: await hashPassword('Cashier#Secure2026'),
     });
     await db.users.put(cashier);
-    await authService.setAuthenticatedUserForSession(cashier);
+    const cashierLogin = await authService.authenticate({
+      username: cashier.username,
+      password: 'Cashier#Secure2026',
+      users: [cashier],
+      onUserUpdated: async (updated) => { await db.users.put(updated); },
+    });
+    assert.equal(cashierLogin.success, true);
 
     // Cashier allowed views & permissions
     assert.equal(canAccessView('CASHIER', 'pos'), true);
@@ -227,7 +240,11 @@ describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-
       (err: unknown) => err instanceof PermissionError
     );
 
-    // Cross-branch isolation check
+    // Missing target branch and cross-branch access must both be rejected.
+    assert.throws(
+      () => assertBranchAccess(cashier),
+      (err: unknown) => err instanceof PermissionError
+    );
     assert.throws(
       () => assertBranchAccess(cashier, 'branch_south'),
       (err: unknown) => err instanceof PermissionError
@@ -244,7 +261,10 @@ describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-
 
     // Unauthenticated actor gets empty logs and PermissionError on write
     authService.logout();
-    assert.deepEqual(await dexieDataService.getAuditLogs(), []);
+    await assert.rejects(
+      () => dexieDataService.getAuditLogs(),
+      (err: unknown) => err instanceof PermissionError
+    );
     assert.throws(() => assertPermission(null, 'pos:sale'), (err: unknown) => err instanceof PermissionError);
   });
 

@@ -8,7 +8,8 @@ import { useState, useEffect } from 'react';
 import { liveQuery } from 'dexie';
 import { db } from '../db/erpDatabase';
 import { dexieDataService, InitState } from '../services/dexieDataService';
-import { filterAuditLogsForUser } from '../config/rbac';
+import { authService } from '../services/authService';
+import { filterAuditLogsForUser, filterRecordsByBranchScope, getAuthorizedBranchIds } from '../config/rbac';
 import {
   Product,
   CommercialActivityId,
@@ -27,6 +28,24 @@ import {
   SystemUser,
   SystemAuditLog,
 } from '../types/erp';
+
+function currentActorKey(actor: SystemUser | null): string {
+  return actor
+    ? [actor.id, actor.tenantId || '', actor.role, actor.branchId || '', ...(actor.allowedBranches || [])].join('|')
+    : 'anonymous';
+}
+
+function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
+  records: T[],
+  actor: SystemUser | null,
+  allowUnauthenticated = false
+): T[] {
+  if (!actor) return allowUnauthenticated ? records : [];
+  const tenantId = actor.tenantId?.trim();
+  if (!tenantId) return [];
+  const tenantRows = records.filter((row) => !row.tenantId || row.tenantId === tenantId);
+  return filterRecordsByBranchScope(tenantRows, actor);
+}
 
 export function useLiveDexie<T>(
   querier: () => Promise<T> | T,
@@ -107,15 +126,16 @@ export function useLiveProducts(activityId?: CommercialActivityId | 'all'): Prod
 }
 
 export function useLiveInvoices(activityId?: CommercialActivityId | 'all'): Invoice[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (activityId && activityId !== 'all') {
-        return await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date');
-      }
-      return await db.invoices.toCollection().reverse().sortBy('date');
+      const rows = activityId && activityId !== 'all'
+        ? await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date')
+        : await db.invoices.toCollection().reverse().sortBy('date');
+      return scopeBranchRows(rows, actor);
     },
     [],
-    [activityId]
+    [activityId, currentActorKey(actor)]
   );
 }
 
@@ -124,19 +144,16 @@ export function useLiveAccounts(): Account[] {
 }
 
 export function useLiveJournalEntries(costCenterId?: CostCenterId | 'all'): JournalEntry[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (costCenterId && costCenterId !== 'all') {
-        return await db.journalEntries
-          .where('costCenterId')
-          .equals(costCenterId)
-          .reverse()
-          .sortBy('date');
-      }
-      return await db.journalEntries.toCollection().reverse().sortBy('date');
+      const rows = costCenterId && costCenterId !== 'all'
+        ? await db.journalEntries.where('costCenterId').equals(costCenterId).reverse().sortBy('date')
+        : await db.journalEntries.toCollection().reverse().sortBy('date');
+      return scopeBranchRows(rows, actor);
     },
     [],
-    [costCenterId]
+    [costCenterId, currentActorKey(actor)]
   );
 }
 
@@ -154,27 +171,35 @@ export function useLiveParties(type?: PartyType): Party[] {
 }
 
 export function useLiveCashBoxes(): CashBox[] {
-  return useLiveDexie(async () => await db.cashBoxes.toArray(), [], []);
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(async () => scopeBranchRows(await db.cashBoxes.toArray(), actor), [], [currentActorKey(actor)]);
 }
 
 export function useLiveVouchers(): PaymentVoucher[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
-    async () => await db.vouchers.toCollection().reverse().sortBy('date'),
+    async () => scopeBranchRows(await db.vouchers.toCollection().reverse().sortBy('date'), actor),
     [],
-    []
+    [currentActorKey(actor)]
   );
 }
 
 export function useLiveAmanatRecords(): AmanatRecord[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
-    async () => await db.amanatRecords.toCollection().reverse().sortBy('receivedDate'),
+    async () => scopeBranchRows(await db.amanatRecords.toCollection().reverse().sortBy('receivedDate'), actor),
     [],
-    []
+    [currentActorKey(actor)]
   );
 }
 
 export function useLiveUsers(): SystemUser[] {
-  return useLiveDexie(async () => await db.users.toArray(), [], []);
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => scopeBranchRows(await db.users.toArray(), actor, true),
+    [],
+    [currentActorKey(actor)]
+  );
 }
 
 export function useLiveAuditLogs(currentUser?: SystemUser | null): SystemAuditLog[] {
@@ -189,19 +214,17 @@ export function useLiveAuditLogs(currentUser?: SystemUser | null): SystemAuditLo
 }
 
 export function useLiveOutbox(statusFilter?: OutboxQueueItem['status'] | 'all'): OutboxQueueItem[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (statusFilter && statusFilter !== 'all') {
-        return await db.outbox
-          .where('status')
-          .equals(statusFilter)
-          .reverse()
-          .sortBy('createdAt');
-      }
-      return await db.outbox.toCollection().reverse().sortBy('createdAt');
+      const rows = statusFilter && statusFilter !== 'all'
+        ? await db.outbox.where('status').equals(statusFilter).reverse().sortBy('createdAt')
+        : await db.outbox.toCollection().reverse().sortBy('createdAt');
+      if (!actor?.tenantId) return [];
+      return scopeBranchRows(rows.filter((row) => row.tenantId === actor.tenantId), actor);
     },
     [],
-    [statusFilter]
+    [statusFilter, currentActorKey(actor)]
   );
 }
 
@@ -212,9 +235,13 @@ export function useLiveOutboxStats(): {
   synced: number;
   failed: number;
 } {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      const items = await db.outbox.toArray();
+      const allItems = await db.outbox.toArray();
+      const items = actor?.tenantId
+        ? scopeBranchRows(allItems.filter((row) => row.tenantId === actor.tenantId), actor)
+        : [];
       const stats = { total: items.length, pending: 0, syncing: 0, synced: 0, failed: 0 };
       for (const item of items) {
         if (item.status === 'PENDING') stats.pending++;
@@ -225,18 +252,34 @@ export function useLiveOutboxStats(): {
       return stats;
     },
     { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 },
-    []
+    [currentActorKey(actor)]
   );
 }
 
 export function useLiveConflicts(): SyncConflict[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
-    async () => await db.syncConflicts.toCollection().reverse().sortBy('detectedAt'),
+    async () => {
+      if (!actor?.tenantId) return [];
+      const rows = await db.syncConflicts.where('tenantId').equals(actor.tenantId).reverse().sortBy('detectedAt');
+      return scopeBranchRows(rows, actor);
+    },
     [],
-    []
+    [currentActorKey(actor)]
   );
 }
 
 export function useLiveBranches(): Branch[] {
-  return useLiveDexie(async () => await db.branches.toArray(), [], []);
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => {
+      const rows = await db.branches.toArray();
+      if (!actor?.active || !actor.tenantId) return [];
+      if (actor.role === 'ADMIN') return rows;
+      const allowed = getAuthorizedBranchIds(actor);
+      return rows.filter((branch) => allowed.has(branch.id));
+    },
+    [],
+    [currentActorKey(actor)]
+  );
 }

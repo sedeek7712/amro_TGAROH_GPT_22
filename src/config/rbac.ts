@@ -263,7 +263,7 @@ export function assertBranchAccess(
   }
 
   const normalizedTarget = targetBranchId?.trim();
-  if (options?.requireTarget && !normalizedTarget) {
+  if (!normalizedTarget) {
     throw new PermissionError('حظر عزل الفروع: يجب تحديد معرف فرع صالح لتنفيذ العملية.', 'branch:required');
   }
 
@@ -277,10 +277,6 @@ export function assertBranchAccess(
       'حظر عزل الفروع: المستخدم غير مرتبط بأي فرع مصرح به.',
       'branch:unassigned'
     );
-  }
-
-  if (!normalizedTarget) {
-    return;
   }
 
   if (!allowed.has(normalizedTarget)) {

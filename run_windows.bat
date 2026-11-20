@@ -1,51 +1,64 @@
 @echo off
+setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
-title Integrated Commercial & Accounting ERP - Vite Local Web Launcher
+title نظام الإدارة التجارية والمحاسبية - تشغيل محلي
 
-echo ======================================================================
-echo       Integrated Commercial & Accounting ERP System
-echo       Local Vite + IndexedDB Offline-First Web Server (Windows)
-echo ======================================================================
+echo ================================================================
+echo       نظام الإدارة التجارية والمحاسبية المتكامل
+echo       Windows Local PWA - IndexedDB
+echo ================================================================
 echo.
 
-:: 1. Check for Node.js
+:: تحقق من Node.js
 where node >nul 2>&1
 if %ERRORLEVEL% neq 0 (
-    echo [X] Node.js is not found on your system!
-    echo     Please download and install Node.js ^(LTS version 20+^) from:
+    echo [X] لم يتم العثور على Node.js.
+    echo     ثبت إصدار LTS 20 أو أحدث من:
     echo     https://nodejs.org/
     echo.
     pause
     exit /b 1
 )
 
-echo [OK] Node.js detected successfully.
+echo [OK] تم العثور على Node.js.
 
-:: 2. Check if node_modules exists, install automatically if missing
+:: تثبيت الاعتماديات من ملف القفل عند أول تشغيل
 if not exist "node_modules\" (
     echo.
-    echo [*] Installing dependencies for the first time ^(npm install^)...
-    echo.
-    call npm install
-    if %ERRORLEVEL% neq 0 (
-        echo.
-        echo [!] Error occurred during npm install. Check your internet connection and try again.
+    echo [*] تثبيت ملفات التشغيل لأول مرة...
+    call npm ci
+    if errorlevel 1 (
+        echo [X] فشل تثبيت الاعتماديات. تحقق من اتصال الإنترنت ثم أعد المحاولة.
         pause
         exit /b 1
     )
-    echo [OK] Dependencies installed successfully.
 )
 
-:: 3. Launch browser and Vite local web server
+:: بناء نسخة الإنتاج قبل التشغيل لضمان عدم تشغيل ملفات قديمة
 echo.
-echo [OK] Launching Vite Local Web Server on http://localhost:3000 ...
-echo [*] Note: All operational data stays locally in browser IndexedDB ^(Dexie^).
-echo [*] To stop the server anytime, press Ctrl + C in this window.
-echo ======================================================================
+echo [*] إنشاء نسخة الإنتاج...
+call npm run build
+if errorlevel 1 (
+    echo [X] فشل البناء. لم يتم تشغيل النظام.
+    pause
+    exit /b 1
+)
+
+:: تشغيل نسخة الإنتاج على هذا الجهاز فقط
+echo.
+echo [OK] تم البناء بنجاح.
+echo [OK] افتح النظام من:
+echo     http://localhost:4173
+echo.
+echo [!] اترك هذه النافذة مفتوحة أثناء الاستخدام.
+echo [!] بيانات التشغيل محفوظة محلياً في متصفح هذا الجهاز.
+echo [!] لإيقاف النظام اضغط Ctrl + C.
+echo ================================================================
 echo.
 
-start "" http://localhost:3000
-call npm run dev
+start "" http://localhost:4173
+call npm run preview -- --host 127.0.0.1 --port 4173 --strictPort
 
 pause
+endlocal

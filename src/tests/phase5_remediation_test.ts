@@ -21,10 +21,11 @@ if (typeof globalThis.localStorage === 'undefined' || !globalThis.localStorage) 
 }
 
 import { db } from '../db/erpDatabase';
+import { authService, hashPassword } from '../services/authService';
 import { storage } from '../services/storageService';
 import { syncQueueService } from '../services/syncQueueService';
 import { dexieDataService } from '../services/dexieDataService';
-import { OutboxQueueItem, JournalEntry, Invoice } from '../types/erp';
+import { OutboxQueueItem, JournalEntry, Invoice, SystemUser } from '../types/erp';
 
 interface TestResult {
   scenarioNumber: number;
@@ -246,6 +247,30 @@ async function runTestSuite() {
   // سيناريو 6: منع تكرار الفاتورة في طابور المزامنة عند إعادة الإرسال (Deterministic Idempotency)
   // -------------------------------------------------------------------------
   try {
+    // تسجيل دخول اختباري فعلي؛ لا نسمح للاختبار بتجاوز شرط الجلسة الموثقة.
+    const syncTestPassword = 'Sync#Idempotency2026!';
+    const syncTestAdmin: SystemUser = {
+      id: 'usr-phase5-sync-admin',
+      tenantId: 'tenant_main',
+      username: 'phase5_sync_admin',
+      fullName: 'مدير اختبار المزامنة',
+      role: 'ADMIN' as const,
+      allowedActivities: ['pharmacy', 'grocery', 'bike_parts', 'equipment_parts'],
+      branchId: 'branch_main',
+      allowedBranches: ['branch_main'],
+      active: true,
+      passwordHash: await hashPassword(syncTestPassword),
+      mustChangePassword: false,
+    };
+    await db.users.put(syncTestAdmin);
+    const login = await authService.authenticate({
+      username: syncTestAdmin.username,
+      password: syncTestPassword,
+      users: [syncTestAdmin],
+      onUserUpdated: async (updated) => { await db.users.put(updated); },
+    });
+    assert(login.success && Boolean(login.session), 'يجب توثيق مدير الاختبار قبل اختبار منع تكرار المزامنة');
+
     const invoiceId = 'inv_test_idempotency_101';
     const idemKey = `IDEM-INVOICE-${invoiceId}`;
 

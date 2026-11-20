@@ -63,7 +63,13 @@ describe('DB InitState, Non-Destructive Migration, Atomic Backup & Currency Test
       passwordHash: await hashPassword('Admin#DbTest2026'),
     };
     await db.users.put(admin);
-    await authService.setAuthenticatedUserForSession(admin);
+    const login = await authService.authenticate({
+      username: admin.username,
+      password: 'Admin#DbTest2026',
+      users: [admin],
+      onUserUpdated: async (updated) => { await db.users.put(updated); },
+    });
+    assert.equal(login.success, true);
   });
 
   test('T-04 / DB-02 / DB-03: InitState transitions cleanly and migration preserves newer Dexie records & pre-migration backup', async () => {

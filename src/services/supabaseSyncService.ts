@@ -70,7 +70,7 @@ export class SupabaseSyncService {
   public getConfig(): SupabaseSyncConfig {
     const deviceId = this.getOrCreateDeviceId();
     const deviceName = this.getDeviceName();
-    const activeTenant = authService.getActiveTenantIdSync() || 'tenant_main';
+    const activeTenant = authService.getActiveTenantIdSync() || '';
 
     const defaultConfig: SupabaseSyncConfig = {
       supabaseUrl: '',
@@ -109,7 +109,7 @@ export class SupabaseSyncService {
     const merged: SupabaseSyncConfig = {
       ...current,
       ...newConfig,
-      tenantId: newConfig.tenantId?.trim() || current.tenantId || 'tenant_main',
+      tenantId: newConfig.tenantId?.trim() || current.tenantId || '',
       tableCursors: newConfig.tableCursors ?? current.tableCursors ?? {},
     };
     localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify(merged));
@@ -160,19 +160,36 @@ export class SupabaseSyncService {
    * التحقق من تطابق معرف المؤسسة مع الجلسة المصادق عليها (SYNC-05)
    */
   private resolveEffectiveTenant(config: SupabaseSyncConfig): { ok: boolean; tenantId: string; error?: string } {
-    const authTenant = authService.getActiveTenantIdSync();
+    const session = authService.getCurrentSessionSync();
+    const authTenant = authService.getActiveTenantIdSync()?.trim();
     const configured = config.tenantId?.trim();
-    if (authTenant && configured && configured !== 'tenant_default' && configured !== authTenant) {
+    if (!session || !authTenant) {
+      return { ok: false, tenantId: '', error: 'المزامنة السحابية متوقفة: يلزم تسجيل دخول موثق مرتبط بمؤسسة.' };
+    }
+    if (configured && configured !== authTenant) {
       return {
         ok: false,
         tenantId: authTenant,
         error: `حظر عزل المؤسسات: المؤسسة المضبوطة (${configured}) لا تطابق مؤسسة الجلسة المصادق عليها (${authTenant}).`,
       };
     }
+    // المفتاح العام ليس JWT لمستخدم ولا يحمل مطالبات المؤسسة والدور المطلوبة بواسطة سياسات قاعدة البيانات.
+    // لا يوجد حالياً تكامل مصادقة سحابي يوفر JWT مستخدم؛ لا نرسل بيانات محلية بهوية مجهولة.
     return {
-      ok: true,
-      tenantId: authTenant || configured || 'tenant_main',
+      ok: false,
+      tenantId: authTenant,
+      error: 'المزامنة السحابية معطلة بأمان: يلزم ربط مصادقة سحابية حقيقية وإرسال JWT للمستخدم؛ المفتاح العام وحده لا يكفي.',
     };
+  }
+
+  private resolveEffectiveBranch(config: SupabaseSyncConfig): { ok: boolean; branchId: string; error?: string } {
+    const session = authService.getCurrentSessionSync();
+    const branchId = config.branchId?.trim() || session?.branchId?.trim() || '';
+    if (!session || !branchId) return { ok: false, branchId: '', error: 'لا يوجد فرع موثق للمزامنة السحابية.' };
+    if (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(branchId)) {
+      return { ok: false, branchId: '', error: 'فرع المزامنة السحابية غير مصرح به للمستخدم الحالي.' };
+    }
+    return { ok: true, branchId };
   }
 
   /**
@@ -311,6 +328,8 @@ export class SupabaseSyncService {
 
     const tenantResolution = this.resolveEffectiveTenant(config);
     if (!tenantResolution.ok) return;
+    const branchResolution = this.resolveEffectiveBranch(config);
+    if (!branchResolution.ok) return;
 
     try {
       const cleanUrl = config.supabaseUrl.replace(/\/+$/, '');
@@ -319,7 +338,7 @@ export class SupabaseSyncService {
       const devicePayload = {
         device_id: config.deviceId,
         tenant_id: tenantResolution.tenantId,
-        branch_id: 'branch_main',
+        branch_id: branchResolution.branchId,
         device_name: config.deviceName,
         device_type: 'WEB',
         last_pull_at: config.lastPullTimestamp,
@@ -362,6 +381,8 @@ export class SupabaseSyncService {
       return { pushed: 0, failed: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
+    const branchResolution = this.resolveEffectiveBranch(config);
+    if (!branchResolution.ok) return { pushed: 0, failed: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };
 
     const cleanUrl = config.supabaseUrl.replace(/\/+$/, '');
     const items = await syncQueueService.claimReadyToSyncItems(config.deviceId, 25);
@@ -399,13 +420,18 @@ export class SupabaseSyncService {
           throw new Error(`نوع السجل غير مدعوم في السحابة: ${item.entityType}`);
         }
 
-        const itemTenant = item.tenantId && item.tenantId !== 'tenant_default' ? item.tenantId : effectiveTenantId;
+        const itemTenant = item.tenantId?.trim() || '';
+        const itemBranchId = item.branchId?.trim() || branchResolution.branchId;
         if (itemTenant !== effectiveTenantId) {
           throw new Error(
             `حظر عزل المؤسسات: السجل (${item.entityId}) ينتمي للمؤسسة (${itemTenant}) وليس (${effectiveTenantId}).`
           );
         }
 
+        const session = authService.getCurrentSessionSync();
+        if (!session || (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(itemBranchId))) {
+          throw new Error('حظر عزل الفروع: عنصر المزامنة تابع لفرع غير مصرح به.');
+        }
         const pkColumn = item.entityType === 'ACCOUNT' ? 'code' : 'id';
         let method: 'POST' | 'PATCH' = 'POST';
         let endpoint = `${cleanUrl}/rest/v1/${targetTable}`;
@@ -695,7 +721,7 @@ export class SupabaseSyncService {
         return {
           id: a.id,
           tenant_id: tenantId,
-          branch_id: defaultBranchId,
+          branch_id: a.branchId || defaultBranchId,
           record_number: a.recordNumber,
           type: a.type,
           depositor_name: a.depositorName,
@@ -747,6 +773,8 @@ export class SupabaseSyncService {
       return { pulled: 0, conflicts: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
+    const branchResolution = this.resolveEffectiveBranch(config);
+    if (!branchResolution.ok) return { pulled: 0, conflicts: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };
 
     const cleanUrl = config.supabaseUrl.replace(/\/+$/, '');
     let pulledCount = 0;
@@ -776,7 +804,7 @@ export class SupabaseSyncService {
     const pageSize = 100;
 
     for (const table of tablesToPull) {
-      const tableSince = nextCursors[table.name] || config.lastPullTimestamp || null;
+      const tableSince = nextCursors[table.name] || null;
       const timestampFilter = tableSince
         ? `&updated_at=gt.${encodeURIComponent(tableSince)}`
         : '';
@@ -787,9 +815,13 @@ export class SupabaseSyncService {
 
       try {
         while (true) {
+          const branchScopedTables = new Set(['erp_branches', 'erp_devices', 'erp_cash_boxes', 'erp_invoices', 'erp_journal_entries', 'erp_payment_vouchers', 'erp_amanat_items']);
+          const branchFilter = branchScopedTables.has(table.name)
+            ? `&branch_id=eq.${encodeURIComponent(branchResolution.branchId)}`
+            : '';
           const url = `${cleanUrl}/rest/v1/${table.name}?tenant_id=eq.${encodeURIComponent(
             effectiveTenantId
-          )}${timestampFilter}&order=updated_at.asc&limit=${pageSize}&offset=${offset}`;
+          )}${branchFilter}${timestampFilter}&order=updated_at.asc&limit=${pageSize}&offset=${offset}`;
 
           const res = await fetch(url, {
             method: 'GET',
@@ -858,8 +890,8 @@ export class SupabaseSyncService {
         tableSucceeded = false;
       }
 
-      if (tableSucceeded) {
-        nextCursors[table.name] = maxUpdatedAtInTable || new Date().toISOString();
+      if (tableSucceeded && maxUpdatedAtInTable) {
+        nextCursors[table.name] = maxUpdatedAtInTable;
       }
     }
 
@@ -1054,6 +1086,7 @@ export class SupabaseSyncService {
       case 'AMANAT': {
         const amanat: AmanatRecord = {
           id: String(row.id),
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
           recordNumber: String(row.record_number),
           type: (row.type as AmanatRecord['type']) || 'CASH',
           depositorName: String(row.depositor_name),

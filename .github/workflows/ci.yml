@@ -88,6 +88,8 @@ jobs:
   windows-exe-preview:
     runs-on: windows-latest
     steps:
+      - name: Enable long Git paths for existing Arabic PDF filenames
+        run: git config --global core.longpaths true
       - name: Checkout source
         uses: actions/checkout@v4
       - name: Setup Node.js

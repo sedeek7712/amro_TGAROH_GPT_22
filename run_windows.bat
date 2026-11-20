@@ -27,7 +27,11 @@ if not exist "node_modules\" (
     echo.
     echo [*] Installing dependencies for the first time ^(npm install^)...
     echo.
-    call npm install
+    if exist "package-lock.json" (
+        call npm ci
+    ) else (
+        call npm install
+    )
     if %ERRORLEVEL% neq 0 (
         echo.
         echo [!] Error occurred during npm install. Check your internet connection and try again.

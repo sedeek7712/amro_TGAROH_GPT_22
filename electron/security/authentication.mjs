@@ -107,10 +107,13 @@ export class DesktopAuthenticationService {
   }
 
   getSetupStatus() {
-    const count = this.database.prepare(
-      'SELECT COUNT(*) AS count FROM users WHERE tenant_id = ?'
-    ).get(this.tenantId).count;
-    return { setupRequired: count === 0, userCount: count };
+    const status = this.database.prepare(
+      "SELECT COUNT(*) AS user_count, COALESCE(SUM(CASE WHEN role='ADMIN' AND active=1 AND COALESCE(password_hash,'')<>'' THEN 1 ELSE 0 END),0) AS configured_admins FROM users WHERE tenant_id = ?"
+    ).get(this.tenantId);
+    return {
+      setupRequired: status.configured_admins === 0,
+      userCount: status.user_count,
+    };
   }
 
   createInitialAdmin(input) {
@@ -129,33 +132,51 @@ export class DesktopAuthenticationService {
     const passwordIssue = passwordError(password, username);
     if (passwordIssue) throw new Error(passwordIssue);
 
+    const existingAdminRow = this.database.prepare(
+      "SELECT tenant_id,id,branch_id,username,role,active,password_hash,data_json FROM users WHERE tenant_id=? AND role='ADMIN' AND active=1 AND COALESCE(password_hash,'')='' ORDER BY id LIMIT 1"
+    ).get(this.tenantId);
+
+    if (!existingAdminRow && status.userCount > 0) {
+      throw new Error('توجد حسابات مستخدمين ولكن لا يوجد مدير عام غير مهيأ. يلزم استيراد نسخة صحيحة أو مراجعة المدير قبل الإعداد.');
+    }
+
+    const branchId = existingAdminRow?.branch_id || 'branch_main';
     const branch = this.database.prepare(
       'SELECT id FROM branches WHERE tenant_id = ? AND id = ? AND active = 1'
-    ).get(this.tenantId, 'branch_main');
-    if (!branch) throw new Error('الفرع الرئيسي غير موجود أو غير نشط. تعذر إعداد المدير.');
+    ).get(this.tenantId, branchId);
+    if (!branch) throw new Error('فرع المدير غير موجود أو غير نشط. تعذر إعداد المدير.');
 
+    const existingAdmin = parseUserRow(existingAdminRow);
     const user = {
-      id: randomUUID(),
+      ...(existingAdmin || {}),
+      id: existingAdmin?.id || randomUUID(),
       tenantId: this.tenantId,
       username,
-      fullName,
+      fullName: existingAdmin?.fullName || fullName,
       role: 'ADMIN',
-      allowedActivities: ['pharmacy', 'grocery', 'bike_parts', 'equipment_parts'],
-      branchId: 'branch_main',
-      allowedBranches: ['branch_main'],
+      allowedActivities: existingAdmin?.allowedActivities || ['pharmacy', 'grocery', 'bike_parts', 'equipment_parts'],
+      branchId,
+      allowedBranches: Array.isArray(existingAdmin?.allowedBranches) && existingAdmin.allowedBranches.length
+        ? existingAdmin.allowedBranches
+        : [branchId],
       active: true,
       mustChangePassword: false,
       failedLoginAttempts: 0,
+      lockedUntil: undefined,
       updatedAt: new Date(this.now()).toISOString(),
     };
     const passwordHash = hashPasswordForDesktop(password);
-    this.database.prepare(
-      'INSERT INTO users (tenant_id,id,branch_id,username,role,active,password_hash,data_json) VALUES (?,?,?,?,?,?,?,?)'
-    ).run(
-      this.tenantId, user.id, user.branchId, user.username, user.role, 1,
-      passwordHash, toStoredUser(user)
-    );
-    return { success: true, user: sanitizeUser(user) };
+    const result = existingAdmin
+      ? this.database.prepare(
+          'UPDATE users SET branch_id=?,username=?,role=?,active=1,password_hash=?,data_json=? WHERE tenant_id=? AND id=?'
+        ).run(branchId, username, 'ADMIN', passwordHash, toStoredUser(user), this.tenantId, user.id)
+      : this.database.prepare(
+          'INSERT INTO users (tenant_id,id,branch_id,username,role,active,password_hash,data_json) VALUES (?,?,?,?,?,?,?,?)'
+        ).run(this.tenantId, user.id, branchId, username, 'ADMIN', 1, passwordHash, toStoredUser(user));
+    if (existingAdmin && result.changes !== 1) {
+      throw new Error('تعذر تحديث حساب المدير الأولي.');
+    }
+    return { success: true, user: sanitizeUser({ ...user, passwordHash }) };
   }
 
   authenticate(input) {
@@ -236,7 +257,22 @@ export class DesktopAuthenticationService {
     this.saveUser(cleanUser);
 
     if (cleanUser.mustChangePassword) {
-      return { success: true, mustChangePassword: true, user: sanitizeUser(cleanUser) };
+      const token = randomBytes(32).toString('base64url');
+      const expiresAt = this.now() + 10 * 60 * 1000;
+      this.sessions.set(token, {
+        userId: cleanUser.id,
+        tenantId: cleanUser.tenantId,
+        issuedAt: this.now(),
+        expiresAt,
+        passwordChangeOnly: true,
+      });
+      return {
+        success: true,
+        mustChangePassword: true,
+        token,
+        expiresAt: new Date(expiresAt).toISOString(),
+        user: sanitizeUser(cleanUser),
+      };
     }
     return this.issueSession(cleanUser);
   }
@@ -250,6 +286,7 @@ export class DesktopAuthenticationService {
       tenantId: user.tenantId,
       issuedAt,
       expiresAt,
+      passwordChangeOnly: false,
     });
     return {
       success: true,
@@ -266,6 +303,7 @@ export class DesktopAuthenticationService {
       this.sessions.delete(token);
       return null;
     }
+    if (session.passwordChangeOnly) return null;
     const row = this.database.prepare(
       'SELECT tenant_id,id,branch_id,username,role,active,password_hash,data_json FROM users WHERE tenant_id = ? AND id = ?'
     ).get(session.tenantId, session.userId);
@@ -293,14 +331,19 @@ export class DesktopAuthenticationService {
   }
 
   completeMandatoryPasswordChange(input) {
-    const actor = this.getActor(input && input.token);
-    if (!actor) throw new Error('انتهت الجلسة أو لم تعد صالحة.');
+    const token = input && input.token;
+    const session = typeof token === 'string' ? this.sessions.get(token) : null;
+    if (!session || !session.passwordChangeOnly || this.now() >= session.expiresAt) {
+      this.sessions.delete(token);
+      throw new Error('انتهت مهلة تغيير كلمة المرور أو أن الرمز غير صالح.');
+    }
     const row = this.database.prepare(
       'SELECT tenant_id,id,branch_id,username,role,active,password_hash,data_json FROM users WHERE tenant_id = ? AND id = ?'
-    ).get(actor.tenantId, actor.id);
+    ).get(session.tenantId, session.userId);
     const user = parseUserRow(row);
-    if (!user || !user.mustChangePassword) {
-      throw new Error('هذا الحساب ليس في وضع تغيير كلمة المرور الإلزامي.');
+    if (!user || !user.active || user.tenantId !== this.tenantId || !user.mustChangePassword) {
+      this.sessions.delete(token);
+      throw new Error('هذا الحساب لم يعد مخولاً لتغيير كلمة المرور.');
     }
     const passwordIssue = passwordError(input.newPassword, user.username);
     if (passwordIssue) throw new Error(passwordIssue);
@@ -314,7 +357,7 @@ export class DesktopAuthenticationService {
       updatedAt: new Date(this.now()).toISOString(),
     };
     this.saveUser(updated);
-    this.sessions.delete(input.token);
+    this.sessions.delete(token);
     return this.issueSession(updated);
   }
 

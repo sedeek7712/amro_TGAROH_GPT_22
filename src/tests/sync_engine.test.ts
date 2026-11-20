@@ -101,6 +101,7 @@ describe('Sync Engine Regression Tests (SYN-03, SYNC-01..06)', () => {
       serverUrl: 'http://sync.test.local/api/v1',
       tenantId: 'tenant_main',
       branchId: 'branch_main',
+      apiToken: 'test-only-user-token',
       autoSync: false,
       lastSyncedAt: null,
     });
@@ -158,10 +159,10 @@ describe('Sync Engine Regression Tests (SYN-03, SYNC-01..06)', () => {
 
     const pushEmpty = await supabaseSync.pushOutboxToSupabase();
     assert.equal(pushEmpty.pushed, 0);
-    assert.equal(pushEmpty.failed, 1);
+    assert.equal(pushEmpty.failed, 0);
+    assert.ok(pushEmpty.errors[0]?.includes('JWT للمستخدم'), 'Cloud push must require a real user JWT, not the public anon key');
     assert.equal((await db.outbox.get(qUpdate.id))?.status, 'PENDING');
-    assert.equal(recordedCalls[0]?.method, 'PATCH');
-    assert.ok(recordedCalls[0]?.url.includes('id=eq.prod-supa-upd'));
+    assert.equal(recordedCalls.length, 0, 'No local data may be sent with an anonymous public key');
   });
 
   test('SYNC-02 / SYNC-03: Supabase pull paginates >100 rows completely and keeps cursors isolated on partial table failure', async () => {
@@ -204,14 +205,14 @@ describe('Sync Engine Regression Tests (SYN-03, SYNC-01..06)', () => {
     }) as typeof fetch;
 
     const pullRes = await supabaseSync.pullDeltaFromSupabase();
-    assert.equal(pullRes.pulled, 125, 'All 125 paginated products must be pulled');
-    assert.equal((await db.products.toArray()).length, 125);
-    assert.ok(pullRes.errors.length >= 1, 'Failure on erp_invoices must be reported');
+    assert.equal(pullRes.pulled, 0, 'Cloud pull must stop until a real user JWT is available');
+    assert.equal((await db.products.toArray()).length, 0, 'Anonymous requests must not import remote data');
+    assert.ok(pullRes.errors[0]?.includes('JWT للمستخدم'));
 
     const cfg = supabaseSync.getConfig();
-    assert.ok(cfg.tableCursors?.['erp_products'], 'Succeeded table cursor must advance');
-    assert.equal(cfg.tableCursors?.['erp_invoices'], undefined, 'Failed table cursor must NOT advance');
-    assert.equal(cfg.lastPullTimestamp, null, 'Global lastPullTimestamp must not advance on partial failure');
+    assert.equal(cfg.tableCursors?.['erp_products'], undefined, 'No cursor may advance when cloud auth is unavailable');
+    assert.equal(cfg.tableCursors?.['erp_invoices'], undefined);
+    assert.equal(cfg.lastPullTimestamp, null);
   });
 
   test('SYNC-05 & SYNC-06: Rejects cross-tenant mismatch and claims items exclusively via atomic lease', async () => {

@@ -469,7 +469,7 @@ class AuthService {
       throw new Error('حظر أمني: تبديل الجلسة متاح للمدير العام النشط المصادق عليه فقط.');
     }
 
-    const freshAdmin = authoritativeUsers.find((u) => u.id === currentActor.id);
+    const freshAdmin = params.authoritativeUsers.find((u) => u.id === currentActor.id);
     if (!freshAdmin || freshAdmin.role !== 'ADMIN' || !freshAdmin.active) {
       throw new Error('حظر أمني: حساب المدير العام غير نشط أو تم سحب صلاحيته.');
     }
@@ -479,7 +479,7 @@ class AuthService {
       throw new Error('كلمة مرور المدير العام غير صحيحة. تم حظر تبديل الجلسة.');
     }
 
-    const freshTarget = authoritativeUsers.find((u) => u.id === params.targetUser.id);
+    const freshTarget = params.authoritativeUsers.find((u) => u.id === params.targetUser.id);
     if (!freshTarget || !freshTarget.active) {
       throw new Error('لا يمكن التبديل إلى حساب غير موجود أو موقوف.');
     }

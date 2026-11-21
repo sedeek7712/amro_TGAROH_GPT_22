@@ -7,6 +7,7 @@
 import {
   CommercialActivity,
   CommercialActivityId,
+  CompanyProfile,
   Account,
   Product,
   Party,
@@ -171,21 +172,7 @@ export const INITIAL_USERS: SystemUser[] = [
 ];
 
 // --- واجهة بيانات الشركة القابلة للتخصيص ---
-export interface CompanyProfile {
-  nameAr: string;         // اسم الشركة بالعربية
-  nameEn?: string;        // اسم الشركة بالإنجليزية
-  logo?: string;          // base64 string للشعار
-  address?: string;       // العنوان
-  phone?: string;         // الهاتف
-  email?: string;         // البريد
-  taxNumber?: string;     // الرقم الضريبي
-  currencyCode?: string;  // رمز العملة القياسي (SAR افتراضي)
-  currency: string;       // العملة (ريال سعودي افتراضي)
-  currencySymbol: string; // رمز العملة (ر.س)
-  website?: string;       // الموقع
-  headerNote?: string;    // ملاحظة رأس الفاتورة
-  footerNote?: string;    // ملاحظة ذيل الفاتورة
-}
+export type { CompanyProfile };
 
 // المفاتيح المعيارية الجديدة للمشروع المستقل
 const STORAGE_KEYS = {

@@ -7,6 +7,7 @@
 import {
   CommercialActivity,
   CommercialActivityId,
+  CompanyProfile,
   Account,
   Product,
   Party,
@@ -28,6 +29,12 @@ export interface IDataService {
 
   // الأنشطة التجارية الأربعة
   getActivities(): Promise<CommercialActivity[]>;
+
+  // ملف الشركة وإعدادات الجهاز
+  getCompanyProfile(): Promise<CompanyProfile>;
+  saveCompanyProfile(profile: CompanyProfile): Promise<CompanyProfile>;
+  getTerminalCode(): Promise<string>;
+  setTerminalCode(terminalCode: string): Promise<string>;
 
   // الدليل المحاسبي ومراكز التكلفة
   getAccounts(): Promise<Account[]>;
@@ -64,6 +71,7 @@ export interface IDataService {
     invoice: Invoice;
     totalCogs: number;
     stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
 
   createPurchaseInvoiceAtomic(params: {
@@ -75,6 +83,7 @@ export interface IDataService {
       batchNumber?: string;
       expiryDate?: string;
     }>;
+    clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
 
   createJournalEntryAtomic(entry: JournalEntry): Promise<JournalEntry>;
@@ -118,6 +127,42 @@ export interface IDataService {
   // النسخ الاحتياطي والاستعادة المستقلة دون إنترنت
   exportBackupJSON(): Promise<string>;
   importBackupJSON(jsonContent: string): Promise<{ success: boolean; error?: string }>;
+
+  // واجهات المجال التي تحتاجها الشاشات، مستقلة عن مزود التخزين.
+  saveProductAtomic(product: Product, isUpdate?: boolean): Promise<Product>;
+  deleteProductAtomic(productId: string): Promise<void>;
+  adjustProductStockAtomic(params: {
+    productId: string;
+    deltaQuantity: number;
+    reason: string;
+    batchNumber?: string;
+    expiryDate?: string;
+  }): Promise<Product>;
+  createAccountAtomic(account: Account): Promise<Account>;
+  createCashBoxAtomic(box: CashBox): Promise<CashBox>;
+  createCashVoucherAtomic(params: {
+    voucher: PaymentVoucher;
+  }): Promise<{ success: boolean; voucher: PaymentVoucher; journalEntry: JournalEntry }>;
+  createAmanatDepositAtomic(params: {
+    record: AmanatRecord;
+    cashBoxId?: string;
+  }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
+  returnAmanatAtomic(params: {
+    recordId: string;
+    cashBoxId?: string;
+    recipientSignatureName?: string;
+  }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
+  savePartyAtomic(party: Party, isUpdate?: boolean): Promise<Party>;
+  saveUserAtomic(user: SystemUser): Promise<SystemUser>;
+  createUserAtomic(params: {
+    username: string;
+    fullName: string;
+    role: SystemUser['role'];
+    allowedActivities: CommercialActivityId[];
+    branchId: string;
+    allowedBranches?: string[];
+    plainPassword: string;
+  }): Promise<SystemUser>;
 
   // تصفير الدفاتر للبدء النظيف
   resetToCleanBooks(): Promise<void>;

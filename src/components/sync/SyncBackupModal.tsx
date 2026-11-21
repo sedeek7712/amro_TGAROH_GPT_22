@@ -35,7 +35,7 @@ import {
   Store,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { djangoSync, DjangoSyncConfig } from '../../services/djangoSyncService';
 import { supabaseSync } from '../../services/supabaseSyncService';
 import { syncQueueService } from '../../services/syncQueueService';
@@ -176,7 +176,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
   const handleSelectActiveBranch = async (branchId: string) => {
     setFeedback(null);
     try {
-      await dexieDataService.setActiveBranchId(branchId);
+      await dataService.setActiveBranchId(branchId);
       setActiveBranchId(branchId);
       const cfg = djangoSync.getConfig();
       cfg.branchId = branchId;
@@ -220,7 +220,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
     };
 
     try {
-      await dexieDataService.addBranch(branch);
+      await dataService.addBranch(branch);
       setShowAddBranch(false);
       setNewBranchName('');
       setNewBranchCode('');
@@ -332,7 +332,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
     setFeedback(null);
     setIsWorking(true);
     try {
-      const jsonStr = await dexieDataService.exportBackupJSON();
+      const jsonStr = await dataService.exportBackupJSON();
       const blob = new Blob([jsonStr], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -363,7 +363,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
           message: 'تنبيه: سيؤدي استيراد النسخة الاحتياطية إلى استبدال البيانات الحالية في IndexedDB بعد التحقق من سلامة Checksum. هل ترغب بالاستمرار؟',
           danger: true,
           onConfirm: async () => {
-            const res = await dexieDataService.importBackupJSON(content);
+            const res = await dataService.importBackupJSON(content);
             if (res.success) {
               setFeedback({ type: 'success', text: 'تمت استعادة النسخة الاحتياطية بنجاح!' });
               onRefresh();
@@ -393,7 +393,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
       danger: true,
       onConfirm: async () => {
         try {
-          await dexieDataService.resetToCleanBooks();
+          await dataService.resetToCleanBooks();
           setFeedback({ type: 'success', text: 'تمت تهيئة الدفاتر من جديد نظيفة وبيضاء بنجاح.' });
           onRefresh();
         } catch (err: unknown) {

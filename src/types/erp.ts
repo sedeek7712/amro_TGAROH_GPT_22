@@ -267,6 +267,7 @@ export interface SystemUser {
   allowedBranches?: string[]; // الفروع المصرح للمستخدم بالوصول لها
   active: boolean;
   passwordHash?: string;    // مشتق كلمة المرور الآمن (PBKDF2-SHA256) - لا تخزن كنص صريح
+  hasPassword?: boolean;    // مؤشر وجود كلمة مرور دون كشف المشتق في الواجهة المكتبية
   mustChangePassword?: boolean; // إلزام تغيير كلمة المرور الأولية عند أول دخول
   failedLoginAttempts?: number;
   lockedUntil?: string;     // توقيت انتهاء القفل المؤقت ISO
@@ -390,6 +391,23 @@ export interface CloudSyncResult {
   errors: string[];
   durationMs: number;
   timestamp: string;
+}
+
+export interface CompanyProfile {
+  nameAr: string;
+  nameEn?: string;
+  logo?: string;
+  address?: string;
+  phone?: string;
+  email?: string;
+  taxNumber?: string;
+  currencyCode?: string;
+  currency: string;
+  currencySymbol: string;
+  currencyDecimalPlaces?: number;
+  website?: string;
+  headerNote?: string;
+  footerNote?: string;
 }
 
 

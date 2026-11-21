@@ -48,6 +48,11 @@ export const CURRENCY_PRESETS: Record<SupportedCurrencyCode, CurrencyConfig> = {
 };
 
 const COMPANY_PROFILE_STORAGE_KEY = 'multi_activity_erp_company_profile';
+let desktopCurrencyOverride: CurrencyConfig | null = null;
+
+export function setDesktopCurrencyOverride(config: CurrencyConfig | null): void {
+  desktopCurrencyOverride = config ? { ...config, roundingMode: 'HALF_UP' } : null;
+}
 
 /**
  * تقريب مالي موحد بنمط Half-Up يمنع تراكم فروقات الفاصلة العائمة
@@ -67,7 +72,13 @@ export function roundMoney(
  * قراءة إعدادات العملة المركزية المعتمدة من ملف الشركة
  */
 export function getActiveCurrencyConfig(): CurrencyConfig {
+  if (desktopCurrencyOverride) {
+    return desktopCurrencyOverride;
+  }
   try {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      return DEFAULT_CURRENCY_CONFIG;
+    }
     if (typeof localStorage === 'undefined') {
       return DEFAULT_CURRENCY_CONFIG;
     }
@@ -123,6 +134,11 @@ export function setActiveCurrencyConfig(
     decimalPlaces: nextDecimalPlaces,
     roundingMode: 'HALF_UP',
   };
+
+  if (typeof window !== 'undefined' && window.amroDesktop) {
+    desktopCurrencyOverride = updated;
+    return updated;
+  }
 
   if (typeof localStorage !== 'undefined') {
     let existingProfile: Record<string, unknown> = { nameAr: 'نظام الإدارة التجارية' };

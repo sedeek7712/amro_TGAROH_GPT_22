@@ -20,7 +20,7 @@ import {
   AlertCircle,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveParties, useLiveInvoices, useLiveVouchers } from '../../hooks/useLiveDexie';
 import { Party, PartyType, Invoice, PaymentVoucher } from '../../types/erp';
@@ -84,7 +84,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
 
     setIsSubmitting(true);
     try {
-      await dexieDataService.savePartyAtomic(newParty, false);
+      await dataService.savePartyAtomic(newParty, false);
       setIsAddModalOpen(false);
       setFormName('');
       setFormPhone('');

@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
-import { dexieDataService } from '../../services/dexieDataService';
+import { dataService } from '../../services/dataService';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId } from '../../types/erp';
@@ -225,7 +225,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           scientificName: formScientificName.trim() || undefined,
           trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
         };
-        await dexieDataService.saveProductAtomic(updated, true);
+        await dataService.saveProductAtomic(updated, true);
       } else {
         const newProductId = storage.generateUUID();
         const batches: ProductBatch[] = [];
@@ -267,7 +267,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
           batches: batches.length > 0 ? batches : undefined,
         };
-        await dexieDataService.saveProductAtomic(newProduct, false);
+        await dataService.saveProductAtomic(newProduct, false);
       }
 
       setIsAddModalOpen(false);
@@ -285,7 +285,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setTableError(null);
     setIsSubmitting(true);
     try {
-      await dexieDataService.deleteProductAtomic(deleteConfirmProduct.id);
+      await dataService.deleteProductAtomic(deleteConfirmProduct.id);
       setDeleteConfirmProduct(null);
       onRefresh();
     } catch (err: unknown) {
@@ -309,7 +309,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
     setIsSubmitting(true);
     try {
-      await dexieDataService.adjustProductStockAtomic({
+      await dataService.adjustProductStockAtomic({
         productId: adjustProduct.id,
         deltaQuantity: delta,
         reason: adjustReason.trim(),

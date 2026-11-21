@@ -10,6 +10,7 @@
  */
 
 import { AuthSession, SystemUser } from '../types/erp';
+import { desktopSession } from './desktopSession';
 
 const AUTH_SESSION_KEY = 'multi_activity_erp_auth_session';
 const KEYSTORE_DB_NAME = 'multi_activity_erp_keystore';
@@ -757,10 +758,16 @@ class AuthService {
   }
 
   public getCurrentActorSync(): SystemUser | null {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      return desktopSession.getActor();
+    }
     return inMemoryUser;
   }
 
   public getActiveTenantIdSync(): string | null {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      return desktopSession.getActor()?.tenantId?.trim() || null;
+    }
     const sess = this.getCurrentSessionSync();
     if (sess?.tenantId?.trim()) return sess.tenantId.trim();
     if (inMemoryUser?.tenantId?.trim()) return inMemoryUser.tenantId.trim();
@@ -770,6 +777,10 @@ class AuthService {
   public logout(): void {
     inMemorySession = null;
     inMemoryUser = null;
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      desktopSession.clear();
+      return;
+    }
     if (typeof localStorage !== 'undefined') {
       localStorage.removeItem(AUTH_SESSION_KEY);
       localStorage.removeItem('multi_activity_erp_current_user');

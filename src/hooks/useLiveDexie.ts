@@ -9,7 +9,8 @@ import { liveQuery } from 'dexie';
 import { db } from '../db/erpDatabase';
 import { dexieDataService, InitState } from '../services/dexieDataService';
 import { authService } from '../services/authService';
-import { filterAuditLogsForUser, filterRecordsByBranchScope, getAuthorizedBranchIds } from '../config/rbac';
+import { desktopSession } from '../services/desktopSession';
+import { filterAuditLogsForUser, filterRecordsByBranchScope, getAuthorizedBranchIds, hasPermission } from '../config/rbac';
 import {
   Product,
   CommercialActivityId,
@@ -50,11 +51,14 @@ function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
 export function useLiveDexie<T>(
   querier: () => Promise<T> | T,
   initialValue: T,
-  deps: unknown[] = []
+  deps: unknown[] = [],
+  desktopQuerier?: () => Promise<T> | T
 ): T {
   const [data, setData] = useState<T>(initialValue);
 
   useEffect(() => {
+    // Electron uses SQLite only. Do not even open IndexedDB via liveQuery in Windows.
+    if (typeof window !== 'undefined' && window.amroDesktop) return;
     let isMounted = true;
     Promise.resolve(querier())
       .then((res) => {
@@ -83,6 +87,38 @@ export function useLiveDexie<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps);
 
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.amroDesktop || !desktopQuerier) return;
+    let isMounted = true;
+
+    const runQuery = () => {
+      if (!desktopSession.getToken()) {
+        if (isMounted) setData(initialValue);
+        return;
+      }
+      Promise.resolve(desktopQuerier())
+        .then((res) => {
+          if (isMounted && res !== undefined && res !== null) {
+            setData(res);
+          }
+        })
+        .catch(() => {
+          if (isMounted) setData(initialValue);
+        });
+    };
+
+    runQuery();
+    const unsubscribe = desktopSession.subscribe(() => {
+      runQuery();
+    });
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, deps);
+
   return data;
 }
 
@@ -93,6 +129,8 @@ export function useDexieInitStatus(): { state: InitState; error: string | null }
   });
 
   useEffect(() => {
+    // Dexie initialization status is not part of the Electron runtime.
+    if (typeof window !== 'undefined' && window.amroDesktop) return;
     const timer = setInterval(() => {
       const nextState = dexieDataService.getInitState();
       const nextError = dexieDataService.getInitError();
@@ -113,6 +151,7 @@ export function useDexieInitStatus(): { state: InitState; error: string | null }
 }
 
 export function useLiveProducts(activityId?: CommercialActivityId | 'all'): Product[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
       if (activityId && activityId !== 'all') {
@@ -121,7 +160,13 @@ export function useLiveProducts(activityId?: CommercialActivityId | 'all'): Prod
       return await db.products.toArray();
     },
     [],
-    [activityId]
+    [activityId, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'inventory:view')) return [];
+      return await window.amroDesktop!.getProducts({ token, activityId });
+    }
   );
 }
 
@@ -135,12 +180,29 @@ export function useLiveInvoices(activityId?: CommercialActivityId | 'all'): Invo
       return scopeBranchRows(rows, actor);
     },
     [],
-    [activityId, currentActorKey(actor)]
+    [activityId, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'invoices:view')) return [];
+      return await window.amroDesktop!.getInvoices({ token, activityId });
+    }
   );
 }
 
 export function useLiveAccounts(): Account[] {
-  return useLiveDexie(async () => await db.accounts.toArray(), [], []);
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => await db.accounts.toArray(),
+    [],
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'view:accounting')) return [];
+      return await window.amroDesktop!.getAccounts({ token });
+    }
+  );
 }
 
 export function useLiveJournalEntries(costCenterId?: CostCenterId | 'all'): JournalEntry[] {
@@ -153,11 +215,18 @@ export function useLiveJournalEntries(costCenterId?: CostCenterId | 'all'): Jour
       return scopeBranchRows(rows, actor);
     },
     [],
-    [costCenterId, currentActorKey(actor)]
+    [costCenterId, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'view:accounting')) return [];
+      return await window.amroDesktop!.getJournalEntries({ token, costCenterId });
+    }
   );
 }
 
 export function useLiveParties(type?: PartyType): Party[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
       if (type) {
@@ -166,13 +235,29 @@ export function useLiveParties(type?: PartyType): Party[] {
       return await db.parties.toArray();
     },
     [],
-    [type]
+    [type, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'party:view')) return [];
+      return await window.amroDesktop!.getParties({ token, type });
+    }
   );
 }
 
 export function useLiveCashBoxes(): CashBox[] {
   const actor = authService.getCurrentActorSync();
-  return useLiveDexie(async () => scopeBranchRows(await db.cashBoxes.toArray(), actor), [], [currentActorKey(actor)]);
+  return useLiveDexie(
+    async () => scopeBranchRows(await db.cashBoxes.toArray(), actor),
+    [],
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'cashbox:view')) return [];
+      return await window.amroDesktop!.getCashBoxes({ token });
+    }
+  );
 }
 
 export function useLiveVouchers(): PaymentVoucher[] {
@@ -180,7 +265,13 @@ export function useLiveVouchers(): PaymentVoucher[] {
   return useLiveDexie(
     async () => scopeBranchRows(await db.vouchers.toCollection().reverse().sortBy('date'), actor),
     [],
-    [currentActorKey(actor)]
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'vouchers:view')) return [];
+      return await window.amroDesktop!.getVouchers({ token });
+    }
   );
 }
 
@@ -189,7 +280,13 @@ export function useLiveAmanatRecords(): AmanatRecord[] {
   return useLiveDexie(
     async () => scopeBranchRows(await db.amanatRecords.toCollection().reverse().sortBy('receivedDate'), actor),
     [],
-    [currentActorKey(actor)]
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'amanat:view')) return [];
+      return await window.amroDesktop!.getAmanatRecords({ token });
+    }
   );
 }
 
@@ -198,7 +295,13 @@ export function useLiveUsers(): SystemUser[] {
   return useLiveDexie(
     async () => scopeBranchRows(await db.users.toArray(), actor, true),
     [],
-    [currentActorKey(actor)]
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'users:read')) return [];
+      return await window.amroDesktop!.getUsers({ token });
+    }
   );
 }
 
@@ -209,7 +312,13 @@ export function useLiveAuditLogs(currentUser?: SystemUser | null): SystemAuditLo
       return filterAuditLogsForUser(allLogs, currentUser);
     },
     [],
-    [currentUser?.id, currentUser?.role]
+    [currentUser?.id, currentUser?.role],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'view:audit_logs')) return [];
+      return await window.amroDesktop!.getAuditLogs({ token });
+    }
   );
 }
 
@@ -224,7 +333,13 @@ export function useLiveOutbox(statusFilter?: OutboxQueueItem['status'] | 'all'):
       return scopeBranchRows(rows.filter((row) => row.tenantId === actor.tenantId), actor);
     },
     [],
-    [statusFilter, currentActorKey(actor)]
+    [statusFilter, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'sync:manage')) return [];
+      return await window.amroDesktop!.getOutboxQueue({ token, statusFilter: statusFilter || 'all', sortDir: 'desc' });
+    }
   );
 }
 
@@ -252,7 +367,15 @@ export function useLiveOutboxStats(): {
       return stats;
     },
     { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 },
-    [currentActorKey(actor)]
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'sync:manage')) {
+        return { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 };
+      }
+      return await window.amroDesktop!.getOutboxStats({ token });
+    }
   );
 }
 
@@ -265,7 +388,13 @@ export function useLiveConflicts(): SyncConflict[] {
       return scopeBranchRows(rows, actor);
     },
     [],
-    [currentActorKey(actor)]
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'sync:manage')) return [];
+      return await window.amroDesktop!.getConflicts({ token });
+    }
   );
 }
 
@@ -280,6 +409,12 @@ export function useLiveBranches(): Branch[] {
       return rows.filter((branch) => allowed.has(branch.id));
     },
     [],
-    [currentActorKey(actor)]
+    [currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'branches:view')) return [];
+      return await window.amroDesktop!.getBranches({ token });
+    }
   );
 }

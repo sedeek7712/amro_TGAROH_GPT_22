@@ -23,6 +23,7 @@ import {
   Building2,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
+import { desktopSession } from '../../services/desktopSession';
 import { accounting } from '../../services/accountingEngine';
 import { dataService } from '../../services/dataService';
 import { authService } from '../../services/authService';
@@ -72,7 +73,9 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
   const [newAccParent, setNewAccParent] = useState('');
   const [accountError, setAccountError] = useState<string | null>(null);
 
-  const actor = authService.getCurrentActorSync() || storage.getCurrentUser();
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const actor =
+    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const canViewProfits = hasPermission(actor, 'view:profits');
   const currencySymbol = getActiveCurrencyConfig().symbol;
 
@@ -134,7 +137,9 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
 
     setIsSubmitting(true);
     try {
-      const activeBranchId = storage.getActiveBranchId();
+      const activeBranchId = isDesktop
+        ? desktopSession.getActiveBranchId() || 'branch_main'
+        : storage.getActiveBranchId();
       const persisted = await dataService.createJournalEntryAtomic({
         id: storage.generateUUID(),
         entryNumber: '',

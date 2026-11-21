@@ -34,7 +34,8 @@ import {
   Layers,
   ChevronDown,
 } from 'lucide-react';
-import { storage } from '../../services/storageService';
+import { storage, OFFICIAL_ACTIVITIES } from '../../services/storageService';
+import { desktopSession } from '../../services/desktopSession';
 import { accounting } from '../../services/accountingEngine';
 import {
   useLiveProducts,
@@ -61,7 +62,9 @@ type ReportTab =
   | 'amanat_custody';
 
 export const ReportsManager: React.FC = () => {
-  const actor = authService.getCurrentActorSync() || storage.getCurrentUser();
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const actor =
+    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const canViewProfits = hasPermission(actor, 'view:profits');
   const currencySymbol = getActiveCurrencyConfig().symbol;
   const [activeTab, setActiveTab] = useState<ReportTab>(
@@ -98,7 +101,12 @@ export const ReportsManager: React.FC = () => {
     docType: 'STATEMENT',
   });
 
-  const activities = storage.getActivities();
+  const desktopActivities = desktopSession.getActivitiesSnapshot();
+  const activities = isDesktop
+    ? desktopActivities.length > 0
+      ? desktopActivities
+      : OFFICIAL_ACTIVITIES
+    : storage.getActivities();
   const liveProducts = useLiveProducts();
   const liveAccounts = useLiveAccounts();
   const liveJournalEntries = useLiveJournalEntries();
@@ -108,9 +116,11 @@ export const ReportsManager: React.FC = () => {
   const liveAmanat = useLiveAmanatRecords();
   const liveBranches = useLiveBranches();
 
-  const activeBranchId = storage.getActiveBranchId();
+  const activeBranchId = isDesktop
+    ? desktopSession.getActiveBranchId() || liveBranches[0]?.id || 'branch_main'
+    : storage.getActiveBranchId();
   const activeBranch = liveBranches.find((b) => b.id === activeBranchId) || liveBranches[0];
-  const currentUser = storage.getCurrentUser();
+  const currentUser = actor;
 
   // 1. تقييم المخزون العام
   const stockValuation = useMemo(() => {

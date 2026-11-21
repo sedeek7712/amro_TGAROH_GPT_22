@@ -55,7 +55,9 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
 
   const records = useLiveAmanatRecords();
   const cashBoxes = useLiveCashBoxes();
-  const currentUser = authService.getCurrentActorSync() || storage.getCurrentUser();
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const currentUser =
+    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const currencySymbol = getActiveCurrencyConfig().symbol;
 
   // تصفية السجلات

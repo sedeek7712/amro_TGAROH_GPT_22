@@ -27,7 +27,7 @@ import {
   formatScaledInt,
   MONEY_SCALE,
   parseScaledInt,
-  STOCK_SCALE,
+  QTY_SCALE,
   unitsToNumber,
 } from '../money.mjs';
 import {
@@ -145,10 +145,12 @@ function sanitizeBackupSettings(raw, backupDirectory) {
   };
 }
 
-export function pruneAutoExitBackups(directory, maxRetained) {
+export function pruneAutoBackups(directory, maxRetained, prefixes = ['auto-exit-', 'auto-scheduled-']) {
   if (!directory || !existsSync(directory)) return 0;
   const limit = Math.max(1, Number(maxRetained || 15));
-  const files = listSqliteBackups(directory).filter((f) => f.filename.startsWith('auto-exit-'));
+  const files = listSqliteBackups(directory).filter((f) =>
+    prefixes.some((prefix) => f.filename.startsWith(prefix))
+  );
   let removed = 0;
   for (let i = limit; i < files.length; i += 1) {
     try {
@@ -157,6 +159,10 @@ export function pruneAutoExitBackups(directory, maxRetained) {
     } catch {}
   }
   return removed;
+}
+
+export function pruneAutoExitBackups(directory, maxRetained) {
+  return pruneAutoBackups(directory, maxRetained, ['auto-exit-']);
 }
 
 export function createBackupSyncService(database, backupDirectory) {
@@ -331,7 +337,7 @@ export function createBackupSyncService(database, backupDirectory) {
           productId: row.product_id,
           batchNumber: row.batch_number,
           expiryDate: row.expiry_date || '',
-          quantity: unitsToNumber(parseScaledInt(row.quantity_decimal, STOCK_SCALE, 'batchQty'), STOCK_SCALE),
+          quantity: unitsToNumber(parseScaledInt(row.quantity_decimal, QTY_SCALE, 'batchQty'), QTY_SCALE),
           costPrice: unitsToNumber(parseScaledInt(row.cost_price_decimal, MONEY_SCALE, 'batchCost'), MONEY_SCALE),
         };
         productBatches.push(batchObj);
@@ -351,7 +357,7 @@ export function createBackupSyncService(database, backupDirectory) {
         code: row.code,
         barcode: row.barcode || undefined,
         category: row.category || '',
-        currentStock: unitsToNumber(parseScaledInt(row.current_stock_decimal, STOCK_SCALE, 'productStock'), STOCK_SCALE),
+        currentStock: unitsToNumber(parseScaledInt(row.current_stock_decimal, QTY_SCALE, 'productStock'), QTY_SCALE),
         batches: batchesByProduct.get(row.id) || [],
       }));
 
@@ -1207,8 +1213,8 @@ export function createBackupSyncService(database, backupDirectory) {
               database.prepare('DELETE FROM product_batches WHERE tenant_id = ? AND product_id = ?').run(tenantId, id);
               database.prepare('DELETE FROM products WHERE tenant_id = ? AND id = ?').run(tenantId, id);
             } else {
-              const stockUnits = parseScaledInt(row.stock_quantity ?? row.current_stock ?? row.currentStock ?? 0, STOCK_SCALE, 'remoteStock');
-              const stockDec = formatScaledInt(stockUnits, STOCK_SCALE);
+              const stockUnits = parseScaledInt(row.stock_quantity ?? row.current_stock ?? row.currentStock ?? 0, QTY_SCALE, 'remoteStock');
+              const stockDec = formatScaledInt(stockUnits, QTY_SCALE);
               const batchesRaw = Array.isArray(row.batches_data) ? row.batches_data : (Array.isArray(row.batches) ? row.batches : []);
               const batches = batchesRaw.map((b) => ({
                 ...b,
@@ -1227,7 +1233,7 @@ export function createBackupSyncService(database, backupDirectory) {
                 unit: String(row.unit || 'حبه'),
                 purchasePrice: Number(row.cost_price ?? row.purchase_price ?? row.purchasePrice ?? 0),
                 sellPrice: Number(row.selling_price ?? row.sell_price ?? row.sellPrice ?? 0),
-                currentStock: unitsToNumber(stockUnits, STOCK_SCALE),
+                currentStock: unitsToNumber(stockUnits, QTY_SCALE),
                 minStockAlert: Number(row.min_limit ?? row.min_stock_alert ?? row.minStockAlert ?? 0),
                 storageLocation: row.storage_location ? String(row.storage_location) : undefined,
                 trackExpiry: Boolean(row.track_expiry ?? row.trackExpiry),
@@ -1245,7 +1251,7 @@ export function createBackupSyncService(database, backupDirectory) {
                 'INSERT INTO product_batches (tenant_id,id,product_id,batch_number,expiry_date,quantity_decimal,cost_price_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)'
               );
               for (const b of batches) {
-                const qDec = formatScaledInt(parseScaledInt(b.quantity ?? 0, STOCK_SCALE, 'remoteBatchQty'), STOCK_SCALE);
+                const qDec = formatScaledInt(parseScaledInt(b.quantity ?? 0, QTY_SCALE, 'remoteBatchQty'), QTY_SCALE);
                 const cDec = formatScaledInt(parseScaledInt(b.costPrice ?? product.purchasePrice, MONEY_SCALE, 'remoteBatchCost'), MONEY_SCALE);
                 batchStmt.run(tenantId, b.id, product.id, String(b.batchNumber || ''), String(b.expiryDate || ''), qDec, cDec, JSON.stringify(b));
               }
@@ -1325,7 +1331,7 @@ export function createBackupSyncService(database, backupDirectory) {
               'INSERT INTO invoice_items (tenant_id,invoice_id,id,product_id,quantity_decimal,unit_price_decimal,total_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)'
             );
             for (const it of inv.items) {
-              const qDec = formatScaledInt(parseScaledInt(it.quantity ?? 0, STOCK_SCALE, 'remoteItemQty'), STOCK_SCALE);
+              const qDec = formatScaledInt(parseScaledInt(it.quantity ?? 0, QTY_SCALE, 'remoteItemQty'), QTY_SCALE);
               const uDec = formatScaledInt(parseScaledInt(it.unitPrice ?? 0, MONEY_SCALE, 'remoteItemPrice'), MONEY_SCALE);
               const tDec = formatScaledInt(parseScaledInt(it.total ?? 0, MONEY_SCALE, 'remoteItemTotal'), MONEY_SCALE);
               itemStmt.run(tenantId, inv.id, String(it.id || randomUUID()), String(it.productId || ''), qDec, uDec, tDec, JSON.stringify(it));

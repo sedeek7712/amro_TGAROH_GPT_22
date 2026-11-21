@@ -4,7 +4,7 @@
  * يدعم المزامنة ثنائية الاتجاه مع Django REST Framework و PostgreSQL / Supabase
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   RefreshCw,
   Download,
@@ -33,8 +33,12 @@ import {
   Building2,
   Plus,
   Store,
+  HardDrive,
+  FolderOpen,
+  Save,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
+import { desktopSession } from '../../services/desktopSession';
 import { dataService } from '../../services/dataService';
 import { djangoSync, DjangoSyncConfig } from '../../services/djangoSyncService';
 import { supabaseSync } from '../../services/supabaseSyncService';
@@ -42,6 +46,7 @@ import { syncQueueService } from '../../services/syncQueueService';
 import { useNetworkStatus } from '../../services/networkMonitor';
 import { useLiveOutbox, useLiveOutboxStats, useLiveConflicts, useLiveBranches } from '../../hooks/useLiveDexie';
 import { OutboxQueueItem, SupabaseSyncConfig, CloudSyncResult, SyncConflict, Branch } from '../../types/erp';
+import { DesktopBackupSettings, DesktopNativeBackupInfo } from '../../types/desktop';
 import { SUPABASE_RLS_SQL } from '../../db/supabaseRlsPolicies';
 
 interface SyncBackupModalProps {
@@ -67,14 +72,38 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
   } | null>(null);
   const [isWorking, setIsWorking] = useState(false);
 
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+
   // حالة الفروع ونقاط البيع
-  const [activeBranchId, setActiveBranchId] = useState<string>(() => storage.getActiveBranchId());
+  const [activeBranchId, setActiveBranchId] = useState<string>(() =>
+    isDesktop ? desktopSession.getActiveBranchId() || 'branch_main' : storage.getActiveBranchId()
+  );
   const [showAddBranch, setShowAddBranch] = useState(false);
   const [newBranchName, setNewBranchName] = useState('');
   const [newBranchCode, setNewBranchCode] = useState('');
   const [newBranchAddress, setNewBranchAddress] = useState('');
   const [newBranchPhone, setNewBranchPhone] = useState('');
   const [newBranchIsMain, setNewBranchIsMain] = useState(false);
+
+  // حالة النسخ الاحتياطي الأصلي لـ SQLite (Windows)
+  const [nativeBackups, setNativeBackups] = useState<DesktopNativeBackupInfo[]>([]);
+  const [backupSettings, setBackupSettings] = useState<DesktopBackupSettings>({
+    autoBackupOnExit: true,
+    autoBackupIntervalHours: 24,
+    maxRetainedBackups: 14,
+    customBackupDirectory: '',
+    defaultBackupDirectory: '',
+  });
+  const [isLoadingNativeBackups, setIsLoadingNativeBackups] = useState(false);
+  const [isCreatingNativeBackup, setIsCreatingNativeBackup] = useState(false);
+  const [showDiagnosticsPanel, setShowDiagnosticsPanel] = useState(false);
+  const [isLoadingDiagnostics, setIsLoadingDiagnostics] = useState(false);
+  const [diagnosticReport, setDiagnosticReport] = useState<{
+    logFilePath: string;
+    totalLines: number;
+    entries: Array<{ timestamp: string; level: string; category: string; message: string }>;
+    runtime?: { schemaVersion: number; sqliteVersion: string; appVersion: string; platform: string; arch: string };
+  } | null>(null);
 
   // حالة Supabase
   const [supabaseConfig, setSupabaseConfig] = useState<SupabaseSyncConfig>(supabaseSync.getConfig());
@@ -110,7 +139,71 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
     errors: string[];
   } | null>(null);
 
-  const sqlScript = storage.exportPostgreSqlSchemaAndData();
+  const refreshDesktopBackupData = useCallback(async () => {
+    if (!isDesktop || !window.amroDesktop) return;
+    const token = desktopSession.getToken();
+    if (!token) return;
+    setIsLoadingNativeBackups(true);
+    try {
+      const [backups, settings] = await Promise.all([
+        window.amroDesktop.listNativeBackups({ token }),
+        window.amroDesktop.getBackupSettings({ token }),
+      ]);
+      setNativeBackups(backups);
+      setBackupSettings(settings);
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر تحميل إعدادات وقائمة النسخ الاحتياطي.',
+      });
+    } finally {
+      setIsLoadingNativeBackups(false);
+    }
+  }, [isDesktop]);
+
+  useEffect(() => {
+    if (!isDesktop) return;
+    let active = true;
+    const syncBranchAndConfigs = async () => {
+      try {
+        await Promise.all([
+          djangoSync.refreshConfigFromDesktop(),
+          supabaseSync.refreshConfigFromDesktop(),
+        ]);
+        if (!active) return;
+        setSyncConfig(djangoSync.getConfig());
+        setSupabaseConfig(supabaseSync.getConfig());
+        const desktopBranch = desktopSession.getActiveBranchId();
+        if (desktopBranch) setActiveBranchId(desktopBranch);
+      } catch (err: unknown) {
+        if (active) {
+          setFeedback({
+            type: 'error',
+            text: err instanceof Error ? err.message : 'تعذر قراءة إعدادات المزامنة من SQLite.',
+          });
+        }
+      }
+    };
+    void syncBranchAndConfigs();
+    void refreshDesktopBackupData();
+
+    const unsubscribe = desktopSession.subscribe((domains) => {
+      if (!active) return;
+      if (domains.includes('branches') || domains.includes('session') || domains.includes('all')) {
+        const b = desktopSession.getActiveBranchId();
+        if (b) setActiveBranchId(b);
+      }
+      if (domains.includes('backup') || domains.includes('all')) {
+        void refreshDesktopBackupData();
+      }
+    });
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [isDesktop, refreshDesktopBackupData]);
+
+  const sqlScript = showSqlViewer ? storage.exportPostgreSqlSchemaAndData() : '';
 
   const handleSyncAllDjango = async () => {
     setIsSyncingDjango(true);
@@ -360,7 +453,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
       if (content) {
         setConfirmModal({
           title: 'تأكيد استعادة النسخة الاحتياطية',
-          message: 'تنبيه: سيؤدي استيراد النسخة الاحتياطية إلى استبدال البيانات الحالية في IndexedDB بعد التحقق من سلامة Checksum. هل ترغب بالاستمرار؟',
+          message: `تنبيه: سيؤدي استيراد النسخة الاحتياطية إلى استبدال البيانات الحالية في ${isDesktop ? 'SQLite' : 'IndexedDB'} بعد التحقق من سلامة Checksum والأرصدة. هل ترغب بالاستمرار؟`,
           danger: true,
           onConfirm: async () => {
             const res = await dataService.importBackupJSON(content);
@@ -378,6 +471,201 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
       }
     };
     reader.readAsText(file);
+  };
+
+  // دوال النسخ الاحتياطي الأصلي لقواعد SQLite (Windows)
+  const handleCreateNativeBackupNow = async () => {
+    if (!window.amroDesktop) return;
+    setFeedback(null);
+    setIsCreatingNativeBackup(true);
+    try {
+      const created = await window.amroDesktop.createNativeBackupNow({
+        token: desktopSession.requireToken(),
+        prefix: 'manual',
+      });
+      await refreshDesktopBackupData();
+      setFeedback({
+        type: 'success',
+        text: `تم إنشاء نسخة SQLite احتياطية آمنة: ${created.filename}${created.copiedToCustomPath ? ' (مع نسخة في المسار المخصص)' : ''}.`,
+      });
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر إنشاء نسخة SQLite الاحتياطية.',
+      });
+    } finally {
+      setIsCreatingNativeBackup(false);
+    }
+  };
+
+  const handleExportNativeSqliteDialog = async () => {
+    if (!window.amroDesktop) return;
+    setFeedback(null);
+    setIsWorking(true);
+    try {
+      const res = await window.amroDesktop.exportSqliteBackupDialog({
+        token: desktopSession.requireToken(),
+      });
+      if (!res.canceled) {
+        setFeedback({
+          type: 'success',
+          text: `تم تصدير قاعدة البيانات SQLite إلى: ${res.path || res.filename}`,
+        });
+      }
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر تصدير ملف SQLite.',
+      });
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const handleRestoreNativeSqliteDialog = () => {
+    if (!window.amroDesktop) return;
+    setConfirmModal({
+      title: 'استعادة قاعدة بيانات SQLite من ملف خارجي',
+      message:
+        'سيتم التحقق من سلامة ملف .sqlite وتوافق إصدار الترحيلات، مع إنشاء نسخة أمان تلقائية قبل الاستبدال، ثم إغلاق الجلسة الحالية وإعادة التحقق من الدخول. هل ترغب بالاستمرار؟',
+      danger: true,
+      onConfirm: async () => {
+        try {
+          const res = await window.amroDesktop!.restoreSqliteBackupDialog({
+            token: desktopSession.requireToken(),
+          });
+          if (!res.canceled && res.success) {
+            setFeedback({
+              type: 'success',
+              text: `تمت استعادة قاعدة البيانات بنجاح وحفظ نسخة أمان في: ${res.safetyBackupPath || 'مجلد النسخ الاحتياطية'}.`,
+            });
+            onRefresh();
+          }
+        } catch (err: unknown) {
+          setFeedback({
+            type: 'error',
+            text: err instanceof Error ? err.message : 'فشلت استعادة ملف SQLite.',
+          });
+        }
+      },
+    });
+  };
+
+  const handleRestoreNativeBackupPath = (backup: DesktopNativeBackupInfo) => {
+    if (!window.amroDesktop) return;
+    setConfirmModal({
+      title: 'استعادة نسخة SQLite محفوظة',
+      message: `سيتم استبدال القاعدة الحالية بالنسخة (${backup.filename}) بعد أخذ نسخة أمان تلقائية قبل الاستعادة، وسيُطلب تسجيل الدخول مجدداً. هل تؤكد الاستعادة؟`,
+      danger: true,
+      onConfirm: async () => {
+        try {
+          const res = await window.amroDesktop!.restoreSqliteBackupPath({
+            token: desktopSession.requireToken(),
+            sourcePath: backup.path,
+          });
+          if (res.success) {
+            setFeedback({
+              type: 'success',
+              text: `تمت الاستعادة بنجاح من (${backup.filename}).`,
+            });
+            onRefresh();
+          }
+        } catch (err: unknown) {
+          setFeedback({
+            type: 'error',
+            text: err instanceof Error ? err.message : 'فشل استعادة النسخة المحددة.',
+          });
+        }
+      },
+    });
+  };
+
+  const handleChooseCustomBackupDirectory = async () => {
+    if (!window.amroDesktop) return;
+    try {
+      const res = await window.amroDesktop.chooseBackupDirectoryDialog({
+        token: desktopSession.requireToken(),
+      });
+      if (!res.canceled && res.directory) {
+        setBackupSettings((prev) => ({ ...prev, customBackupDirectory: res.directory || '' }));
+      }
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر اختيار مجلد النسخ الاحتياطي.',
+      });
+    }
+  };
+
+  const handleSaveNativeBackupSettings = async () => {
+    if (!window.amroDesktop) return;
+    setFeedback(null);
+    setIsWorking(true);
+    try {
+      const saved = await window.amroDesktop.saveBackupSettings({
+        token: desktopSession.requireToken(),
+        settings: backupSettings,
+      });
+      setBackupSettings(saved);
+      await refreshDesktopBackupData();
+      setFeedback({ type: 'success', text: 'تم حفظ إعدادات النسخ الاحتياطي التلقائي والمسار الخارجي بنجاح.' });
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر حفظ إعدادات النسخ الاحتياطي.',
+      });
+    } finally {
+      setIsWorking(false);
+    }
+  };
+
+  const handleToggleDiagnostics = async () => {
+    if (!window.amroDesktop) return;
+    if (showDiagnosticsPanel) {
+      setShowDiagnosticsPanel(false);
+      return;
+    }
+    setIsLoadingDiagnostics(true);
+    setFeedback(null);
+    try {
+      const data = await window.amroDesktop.getDiagnosticLog({
+        token: desktopSession.requireToken(),
+        maxLines: 80,
+      });
+      setDiagnosticReport(data);
+      setShowDiagnosticsPanel(true);
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر تحميل سجل التشخيص والأخطاء.',
+      });
+    } finally {
+      setIsLoadingDiagnostics(false);
+    }
+  };
+
+  const handleExportDiagnostics = async () => {
+    if (!window.amroDesktop) return;
+    setFeedback(null);
+    setIsWorking(true);
+    try {
+      const res = await window.amroDesktop.exportDiagnosticLogDialog({
+        token: desktopSession.requireToken(),
+      });
+      if (!res.canceled) {
+        setFeedback({
+          type: 'success',
+          text: `تم حفظ تقرير التشخيص المنقّح أمنياً (${res.entryCount || 0} سجل) في: ${res.path || res.filename}`,
+        });
+      }
+    } catch (err: unknown) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'تعذر تصدير تقرير التشخيص والأخطاء.',
+      });
+    } finally {
+      setIsWorking(false);
+    }
   };
 
   const handleCopySql = () => {
@@ -971,7 +1259,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
                           كود: {b.code}
                         </span>
                         <span className="text-xs text-slate-500">
-                          بادئة الفواتير: {storage.generateBranchInvoiceNumber('INV', b.code)}
+                          بادئة الفواتير: {`INV-${b.code}-${new Date().getFullYear()}-00001`}
                         </span>
                       </div>
                     </div>
@@ -1498,6 +1786,276 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
               </div>
             </div>
           </div>
+
+          {isDesktop && (
+            <div className="bg-white rounded-xl border border-emerald-200 p-5 shadow-sm space-y-5">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-slate-100 pb-4">
+                <div>
+                  <div className="flex items-center gap-2 text-slate-900 font-bold text-sm">
+                    <HardDrive className="w-5 h-5 text-emerald-600" />
+                    <span>النسخ الاحتياطي الأصلي لقاعدة SQLite (نسخة Windows)</span>
+                  </div>
+                  <p className="text-xs text-slate-600 mt-1">
+                    نسخ مباشر باستخدام SQLite Online Backup API مع فحص السلامة (`PRAGMA integrity_check`) وحفظ خارج مجلد التثبيت.
+                  </p>
+                </div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    disabled={isCreatingNativeBackup}
+                    onClick={handleCreateNativeBackupNow}
+                    className="px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:opacity-60 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <Database className="w-3.5 h-3.5" />
+                    <span>{isCreatingNativeBackup ? 'جارٍ النسخ...' : 'إنشاء نسخة SQLite فورية'}</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isWorking}
+                    onClick={handleExportNativeSqliteDialog}
+                    className="px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <Download className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>حفظ في قرص/فلاش خارجي (.sqlite)</span>
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isWorking}
+                    onClick={handleRestoreNativeSqliteDialog}
+                    className="px-3.5 py-2 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-300 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors"
+                  >
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>استعادة من ملف (.sqlite)</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Backup Settings */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 bg-slate-50 p-4 rounded-xl border border-slate-200">
+                <label className="flex items-center gap-2.5 text-xs font-bold text-slate-800 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={backupSettings.autoBackupOnExit}
+                    onChange={(e) =>
+                      setBackupSettings((prev) => ({ ...prev, autoBackupOnExit: e.target.checked }))
+                    }
+                    className="rounded border-slate-300 text-emerald-600 focus:ring-emerald-500"
+                  />
+                  <span>نسخ تلقائي آمن عند إغلاق البرنامج</span>
+                </label>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    نسخ دوري كل (ساعة — 0 للتعطيل):
+                  </label>
+                  <input
+                    type="number"
+                    min={0}
+                    max={720}
+                    value={backupSettings.autoBackupIntervalHours}
+                    onChange={(e) =>
+                      setBackupSettings((prev) => ({
+                        ...prev,
+                        autoBackupIntervalHours: Math.max(0, Math.min(720, Number(e.target.value) || 0)),
+                      }))
+                    }
+                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    الحد الأقصى للنسخ المحتفظ بها:
+                  </label>
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={backupSettings.maxRetainedBackups}
+                    onChange={(e) =>
+                      setBackupSettings((prev) => ({
+                        ...prev,
+                        maxRetainedBackups: Math.max(1, Number(e.target.value) || 14),
+                      }))
+                    }
+                    className="w-full px-3 py-1.5 bg-white border border-slate-300 rounded-lg text-xs font-mono"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                    مجلد النسخ الخارجي الإضافي (اختياري):
+                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      readOnly
+                      value={backupSettings.customBackupDirectory || ''}
+                      placeholder="المسار الافتراضي داخل AppData"
+                      className="flex-1 px-2.5 py-1.5 bg-white border border-slate-300 rounded-lg text-[11px] font-mono text-slate-700"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleChooseCustomBackupDirectory}
+                      className="px-2.5 py-1.5 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-lg text-[11px] font-bold flex items-center gap-1 shrink-0"
+                    >
+                      <FolderOpen className="w-3.5 h-3.5" />
+                      <span>اختيار</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isWorking}
+                      onClick={handleSaveNativeBackupSettings}
+                      className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-[11px] font-bold flex items-center gap-1 shrink-0"
+                    >
+                      <Save className="w-3.5 h-3.5" />
+                      <span>حفظ</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Native Backups Table */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-bold text-slate-800">سجل النسخ الاحتياطية المحفوظة ({nativeBackups.length})</span>
+                  <button
+                    type="button"
+                    onClick={refreshDesktopBackupData}
+                    className="text-emerald-700 hover:text-emerald-800 font-bold flex items-center gap-1"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${isLoadingNativeBackups ? 'animate-spin' : ''}`} />
+                    <span>تحديث القائمة</span>
+                  </button>
+                </div>
+
+                {nativeBackups.length === 0 ? (
+                  <div className="p-6 text-center text-xs text-slate-500 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                    لا توجد نسخ SQLite محفوظة في السجل بعد. اضغط «إنشاء نسخة SQLite فورية» لإنشاء أول نسخة.
+                  </div>
+                ) : (
+                  <div className="overflow-x-auto border border-slate-200 rounded-xl">
+                    <table className="w-full text-right text-xs">
+                      <thead className="bg-slate-50 text-slate-700 border-b border-slate-200 font-bold">
+                        <tr>
+                          <th className="p-2.5">اسم الملف</th>
+                          <th className="p-2.5">الموقع</th>
+                          <th className="p-2.5">الحجم</th>
+                          <th className="p-2.5">التاريخ والوقت</th>
+                          <th className="p-2.5 text-center">استعادة</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {nativeBackups.map((bk) => (
+                          <tr key={bk.path} className="hover:bg-slate-50">
+                            <td className="p-2.5 font-mono text-[11px] font-bold text-slate-800">{bk.filename}</td>
+                            <td className="p-2.5">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                  bk.location === 'custom'
+                                    ? 'bg-blue-100 text-blue-800'
+                                    : 'bg-slate-100 text-slate-700'
+                                }`}
+                              >
+                                {bk.location === 'custom' ? 'مسار مخصص' : 'افتراضي'}
+                              </span>
+                            </td>
+                            <td className="p-2.5 font-mono text-[11px] text-slate-600">
+                              {(bk.sizeBytes / 1024).toFixed(1)} KB
+                            </td>
+                            <td className="p-2.5 text-[11px] text-slate-500">
+                              {new Date(bk.modifiedAt).toLocaleString('ar-SA')}
+                            </td>
+                            <td className="p-2.5 text-center">
+                              <button
+                                type="button"
+                                onClick={() => handleRestoreNativeBackupPath(bk)}
+                                className="px-2.5 py-1 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded text-[11px] font-bold"
+                              >
+                                استعادة
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+
+              {/* Diagnostics & Error Log Section */}
+              <div className="pt-4 border-t border-slate-100 space-y-3">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 text-xs font-bold text-slate-800">
+                      <Activity className="w-4 h-4 text-slate-700" />
+                      <span>سجل الأخطاء والتشخيص (Desktop Diagnostics Log)</span>
+                    </div>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      سجل دوّار داخل مجلد AppData يوثق أحداث التشغيل والأعطال منقّحاً من كلمات المرور والمفاتيح.
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      disabled={isLoadingDiagnostics}
+                      onClick={handleToggleDiagnostics}
+                      className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-800 border border-slate-300 rounded-lg text-xs font-bold flex items-center gap-1.5"
+                    >
+                      <FileCode className="w-3.5 h-3.5" />
+                      <span>{showDiagnosticsPanel ? 'إخفاء السجل' : isLoadingDiagnostics ? 'جارٍ التحميل...' : 'استعراض السجل'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={isWorking}
+                      onClick={handleExportDiagnostics}
+                      className="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold flex items-center gap-1.5"
+                    >
+                      <Download className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>تصدير تقرير التشخيص</span>
+                    </button>
+                  </div>
+                </div>
+
+                {showDiagnosticsPanel && diagnosticReport && (
+                  <div className="bg-slate-950 text-slate-100 rounded-xl p-4 space-y-2 border border-slate-800">
+                    <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400 border-b border-slate-800 pb-2">
+                      <span>إجمالي السجلات النشطة: {diagnosticReport.totalLines}</span>
+                      {diagnosticReport.runtime && (
+                        <span className="font-mono">
+                          SQLite {diagnosticReport.runtime.sqliteVersion} | Schema v{diagnosticReport.runtime.schemaVersion} | {diagnosticReport.runtime.platform}-{diagnosticReport.runtime.arch}
+                        </span>
+                      )}
+                    </div>
+                    <div className="max-h-56 overflow-y-auto space-y-1 font-mono text-[11px]" dir="ltr">
+                      {diagnosticReport.entries.length === 0 ? (
+                        <div className="text-slate-500 text-center py-3">No diagnostic entries recorded yet.</div>
+                      ) : (
+                        diagnosticReport.entries.map((entry, idx) => (
+                          <div key={`${entry.timestamp}-${idx}`} className="flex items-start gap-2 border-b border-slate-900 pb-1">
+                            <span
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold shrink-0 ${
+                                entry.level === 'ERROR'
+                                  ? 'bg-rose-900/70 text-rose-300'
+                                  : entry.level === 'WARN'
+                                    ? 'bg-amber-900/70 text-amber-300'
+                                    : 'bg-emerald-900/70 text-emerald-300'
+                              }`}
+                            >
+                              {entry.level}
+                            </span>
+                            <span className="text-slate-500 shrink-0">{entry.timestamp.slice(0, 19).replace('T', ' ')}</span>
+                            <span className="text-sky-300 shrink-0">[{entry.category}]</span>
+                            <span className="text-slate-200 break-all">{entry.message}</span>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

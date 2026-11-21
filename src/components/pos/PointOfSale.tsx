@@ -21,9 +21,10 @@ import {
   Building2,
   X,
 } from 'lucide-react';
-import { storage } from '../../services/storageService';
+import { storage, OFFICIAL_ACTIVITIES } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
 import { dataService } from '../../services/dataService';
+import { desktopSession } from '../../services/desktopSession';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
@@ -62,8 +63,8 @@ export const PointOfSale: React.FC<POSProps> = ({
   const [customCustomerName, setCustomCustomerName] = useState<string>('عميل نقدي عام');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH');
   const [discountAmount, setDiscountAmount] = useState<number>(0);
-  const [selectedCashBoxId, setSelectedCashBoxId] = useState<string>(
-    () => storage.getCashBoxes()[0]?.id || ''
+  const [selectedCashBoxId, setSelectedCashBoxId] = useState<string>(() =>
+    typeof window !== 'undefined' && window.amroDesktop ? '' : storage.getCashBoxes()[0]?.id || ''
   );
   const [paidAmountInput, setPaidAmountInput] = useState<string>('');
   const [invoiceNotes, setInvoiceNotes] = useState<string>('');
@@ -80,6 +81,12 @@ export const PointOfSale: React.FC<POSProps> = ({
   const customers = useLiveParties('CUSTOMER');
   const cashBoxes = useLiveCashBoxes();
   const currencySymbol = getActiveCurrencyConfig().symbol;
+
+  useEffect(() => {
+    if (!selectedCashBoxId && cashBoxes.length > 0) {
+      setSelectedCashBoxId((cashBoxes.find((b) => b.isDefault) || cashBoxes[0]).id);
+    }
+  }, [cashBoxes, selectedCashBoxId]);
 
   // تصفية المنتجات حسب البحث
   const filteredProducts = products.filter((p) => {
@@ -232,7 +239,10 @@ export const PointOfSale: React.FC<POSProps> = ({
       }
     }
 
-    const activeBranch = storage.getActiveBranch();
+    const activeBranchId =
+      typeof window !== 'undefined' && window.amroDesktop
+        ? desktopSession.getActiveBranchId() || 'branch_main'
+        : storage.getActiveBranch().id;
     const selectedCust = customers.find((c) => c.id === selectedCustomerId);
     const finalPartyName = selectedCust ? selectedCust.nameAr : customCustomerName;
 
@@ -241,7 +251,7 @@ export const PointOfSale: React.FC<POSProps> = ({
       invoiceNumber: '',
       type: 'SALE',
       activityId: currentActivity,
-      branchId: activeBranch.id,
+      branchId: activeBranchId,
       partyId: selectedCustomerId || undefined,
       partyName: finalPartyName,
       date: new Date().toISOString().split('T')[0],
@@ -763,7 +773,12 @@ export const PointOfSale: React.FC<POSProps> = ({
       {/* Invoice Printable Receipt Modal */}
       <ReceiptModal
         invoice={completedInvoice}
-        activity={storage.getActivities().find((a) => a.id === completedInvoice?.activityId)}
+        activity={(typeof window !== 'undefined' && window.amroDesktop
+          ? desktopSession.getActivitiesSnapshot().length > 0
+            ? desktopSession.getActivitiesSnapshot()
+            : OFFICIAL_ACTIVITIES
+          : storage.getActivities()
+        ).find((a) => a.id === completedInvoice?.activityId)}
         onClose={() => setCompletedInvoice(null)}
       />
     </div>

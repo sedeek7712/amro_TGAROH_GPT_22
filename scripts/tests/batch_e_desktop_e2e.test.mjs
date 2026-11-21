@@ -1,0 +1,472 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { openErpDatabase, restoreSqliteBackupFile, verifySqliteFile } from '../../electron/sqlite/database.mjs';
+import { DesktopAuthenticationService } from '../../electron/security/authentication.mjs';
+import { createDesktopBackend } from '../../electron/sqlite/desktop-backend.mjs';
+
+test('Batch E End-to-End Desktop ERP Workflow on Real SQLite (Core -> Inventory -> Purchases -> POS -> Cash -> Amanat -> Ledger -> Backup/Restore -> Restart Persistence)', async () => {
+  const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'erp-batch-e-'));
+
+  try {
+    // 1. Fresh boot & initial admin setup
+    const rt1 = await openErpDatabase({ userDataPath });
+    const auth1 = new DesktopAuthenticationService(rt1.database);
+    const backend1 = createDesktopBackend({
+      database: rt1.database,
+      backupDirectory: rt1.backupDirectory,
+      authenticationService: auth1,
+    });
+
+    const setupRes = auth1.createInitialAdmin({
+      username: 'owner',
+      fullName: 'عمرو النماري',
+      password: 'OwnerPass#2026',
+    });
+    assert.equal(setupRes.success, true);
+
+    const loginRes = auth1.authenticate({ username: 'owner', password: 'OwnerPass#2026' });
+    assert.equal(loginRes.success, true);
+    const adminToken = loginRes.token;
+
+    // 2. Company profile, terminal code, and second branch creation
+    const updatedProfile = backend1.saveCompanyProfile({
+      token: adminToken,
+      profile: {
+        id: 'company_main',
+        nameAr: 'مؤسسة عمرو النماري التجارية',
+        phone: '777123456',
+        address: 'صنعاء - شارع تعز',
+        currency: 'ريال يمني',
+        currencyCode: 'YER',
+        currencySymbol: 'ر.ي',
+        currencyDecimalPlaces: 2,
+        taxNumber: '3000112233',
+      },
+    });
+    assert.equal(updatedProfile.nameAr, 'مؤسسة عمرو النماري التجارية');
+
+    const termCode = backend1.setTerminalCode({ token: adminToken, terminalCode: 'POS02' });
+    assert.equal(termCode, 'POS02');
+
+    backend1.addBranch({
+      token: adminToken,
+      branch: {
+        id: 'branch_taiz',
+        code: 'BR02',
+        nameAr: 'فرع تعز',
+        isMain: false,
+        active: true,
+        createdAt: new Date().toISOString(),
+      },
+    });
+
+    // 3. RBAC enforcement test: cashier cannot access accounting ledger or profits
+    const cashier = backend1.createUser({
+      token: adminToken,
+      input: {
+        username: 'cashier_e2e',
+        fullName: 'كاشير الفرع',
+        role: 'CASHIER',
+        allowedActivities: ['pharmacy', 'grocery'],
+        branchId: 'branch_main',
+        allowedBranches: ['branch_main'],
+        plainPassword: 'CashierE2E#2026',
+      },
+    });
+    assert.equal(cashier.username, 'cashier_e2e');
+
+    const cashierLogin = auth1.authenticate({
+      username: 'cashier_e2e',
+      password: 'CashierE2E#2026',
+    });
+    assert.equal(cashierLogin.success, true);
+
+    assert.throws(
+      () => backend1.getJournalEntries({ token: cashierLogin.token, costCenterId: 'all' }),
+      /حظر|صلاحيات/
+    );
+    assert.throws(
+      () =>
+        backend1.saveCompanyProfile({
+          token: cashierLogin.token,
+          profile: updatedProfile,
+        }),
+      /حظر|صلاحيات/
+    );
+
+    // 4. Create products (pharmacy with FEFO + grocery)
+    backend1.saveProductAtomic({
+      token: adminToken,
+      product: {
+        id: 'prod-e2e-pharm',
+        activityId: 'pharmacy',
+        code: 'PH-100',
+        nameAr: 'أموكسيسيلين 500 ملغ',
+        category: 'مضادات حيوية',
+        unit: 'علبة',
+        purchasePrice: 12,
+        sellPrice: 18,
+        currentStock: 0,
+        minStockAlert: 5,
+        trackExpiry: true,
+        batches: [],
+      },
+      isUpdate: false,
+    });
+
+    // 5. Supplier & Customer parties
+    backend1.savePartyAtomic({
+      token: adminToken,
+      party: {
+        id: 'sup-e2e-1',
+        type: 'SUPPLIER',
+        nameAr: 'شركة الدواء الوطنية',
+        phone: '771000001',
+        balance: 0,
+      },
+      isUpdate: false,
+    });
+    backend1.savePartyAtomic({
+      token: adminToken,
+      party: {
+        id: 'cust-e2e-1',
+        type: 'CUSTOMER',
+        nameAr: 'مستوصف الأمل',
+        phone: '772000002',
+        balance: 0,
+      },
+      isUpdate: false,
+    });
+
+    // 6. Seed cash box funds via manual capital JV so cash purchases & payouts have real liquidity
+    backend1.createJournalEntryAtomic({
+      token: adminToken,
+      entry: {
+        id: 'jv-e2e-capital',
+        entryNumber: '',
+        date: '2026-11-20',
+        description: 'إيداع رأس مال افتتاحي في الصندوق',
+        costCenterId: 'general',
+        branchId: 'branch_main',
+        status: 'POSTED',
+        referenceType: 'MANUAL',
+        isAutoGenerated: false,
+        lines: [
+          {
+            id: 'jvl-cap-1',
+            accountCode: '1101',
+            accountName: 'الصندوق الرئيسي (الخزينة)',
+            debit: 5000,
+            credit: 0,
+            costCenterId: 'general',
+            memo: 'رأس مال افتتاحي',
+          },
+          {
+            id: 'jvl-cap-2',
+            accountCode: '3101',
+            accountName: 'رأس المال المخصص',
+            debit: 0,
+            credit: 5000,
+            costCenterId: 'general',
+            memo: 'رأس مال افتتاحي',
+          },
+        ],
+      },
+    });
+    const cashBoxBefore = backend1.getCashBoxes({ token: adminToken }).find((c) => c.id === 'cb-1');
+    assert.ok(cashBoxBefore);
+
+    // Ensure cb-1 has cash if createJournalEntryAtomic updates account 1101 independently from cb-1
+    backend1.createCashBoxAtomic({
+      token: adminToken,
+      box: {
+        id: 'cb-e2e-main',
+        code: 'CB-E2E-01',
+        type: 'CASH',
+        nameAr: 'خزينة نقطة البيع 2',
+        accountCode: '1101',
+        balance: 2000,
+        currency: 'YER',
+        branchId: 'branch_main',
+      },
+    });
+
+    // 7. Purchase Invoice (20 units @ 12 = 240 on credit) + FEFO batch
+    const purRes = backend1.createPurchaseInvoiceAtomic({
+      token: adminToken,
+      params: {
+        clientRequestId: 'req-pur-e2e-1',
+        invoice: {
+          id: 'inv-pur-e2e-1',
+          invoiceNumber: '',
+          type: 'PURCHASE',
+          activityId: 'pharmacy',
+          branchId: 'branch_main',
+          partyId: 'sup-e2e-1',
+          partyName: 'شركة الدواء الوطنية',
+          date: '2026-11-20',
+          items: [
+            {
+              id: 'item-pur-1',
+              productId: 'prod-e2e-pharm',
+              productName: 'أموكسيسيلين 500 ملغ',
+              quantity: 20,
+              unitPrice: 12,
+              discount: 0,
+              total: 240,
+            },
+          ],
+          subtotal: 240,
+          discount: 0,
+          tax: 0,
+          total: 240,
+          paidAmount: 0,
+          paymentMethod: 'CREDIT',
+        },
+        itemsWithBatches: [
+          {
+            productId: 'prod-e2e-pharm',
+            quantity: 20,
+            costPrice: 12,
+            batchNumber: 'BATCH-AMX-01',
+            expiryDate: '2027-09-30',
+          },
+        ],
+      },
+    });
+    assert.equal(purRes.success, true);
+
+    // 8. POS Sales Invoice by Cashier (5 units @ 18 = 90 CASH into cb-e2e-main)
+    const saleRes = backend1.createSalesInvoiceAtomic({
+      token: cashierLogin.token,
+      params: {
+        clientRequestId: 'req-sale-e2e-1',
+        invoice: {
+          id: 'inv-sale-e2e-1',
+          invoiceNumber: '',
+          type: 'SALE',
+          activityId: 'pharmacy',
+          branchId: 'branch_main',
+          partyId: 'cust-e2e-1',
+          partyName: 'مستوصف الأمل',
+          date: '2026-11-20',
+          items: [
+            {
+              id: 'item-sale-1',
+              productId: 'prod-e2e-pharm',
+              productName: 'أموكسيسيلين 500 ملغ',
+              quantity: 5,
+              unitPrice: 18,
+              discount: 0,
+              total: 90,
+            },
+          ],
+          subtotal: 90,
+          discount: 0,
+          tax: 0,
+          total: 90,
+          paidAmount: 90,
+          paymentMethod: 'CASH',
+          cashBoxId: 'cb-e2e-main',
+        },
+        totalCogs: 60,
+        stockDeductions: [
+          { productId: 'prod-e2e-pharm', quantity: 5, batchNumber: 'BATCH-AMX-01' },
+        ],
+      },
+    });
+    assert.equal(saleRes.success, true);
+
+    // 9. Payment voucher to supplier (100 cash)
+    const payVoucherRes = backend1.createCashVoucherAtomic({
+      token: adminToken,
+      params: {
+        voucher: {
+          id: 'vch-e2e-1',
+          voucherNumber: '',
+          type: 'PAYMENT',
+          date: '2026-11-20',
+          amount: 100,
+          cashBoxId: 'cb-e2e-main',
+          accountCode: '2101',
+          partyId: 'sup-e2e-1',
+          partyName: 'شركة الدواء الوطنية',
+          description: 'سداد دفعة من فاتورة المشتريات',
+          branchId: 'branch_main',
+          costCenterId: 'general',
+        },
+      },
+    });
+    assert.equal(payVoucherRes.success, true);
+
+    // 10. Amanat cash deposit (300) + return (300)
+    const amanatDep = backend1.createAmanatDepositAtomic({
+      token: adminToken,
+      params: {
+        record: {
+          id: 'amn-e2e-1',
+          recordNumber: '',
+          depositorName: 'سعيد المودع',
+          depositorPhone: '773000003',
+          type: 'CASH',
+          amount: 300,
+          status: 'HELD',
+          receivedDate: '2026-11-20',
+          receivedBy: 'عمرو النماري',
+          cashBoxId: 'cb-e2e-main',
+        },
+        cashBoxId: 'cb-e2e-main',
+      },
+    });
+    assert.equal(amanatDep.success, true);
+
+    const amanatRet = backend1.returnAmanatAtomic({
+      token: adminToken,
+      params: {
+        recordId: 'amn-e2e-1',
+        cashBoxId: 'cb-e2e-main',
+        recipientSignatureName: 'سعيد المودع',
+      },
+    });
+    assert.equal(amanatRet.record.status, 'RETURNED');
+
+    // 11. Manual JV + Reversal Entry check
+    const manualJv = backend1.createJournalEntryAtomic({
+      token: adminToken,
+      entry: {
+        id: 'jv-e2e-exp',
+        entryNumber: '',
+        date: '2026-11-20',
+        description: 'مصروف كهرباء مكرر للتجربة',
+        costCenterId: 'general',
+        branchId: 'branch_main',
+        status: 'POSTED',
+        referenceType: 'MANUAL',
+        isAutoGenerated: false,
+        lines: [
+          {
+            id: 'jvl-exp-1',
+            accountCode: '5202',
+            accountName: 'كهرباء ومياه وهاتف',
+            debit: 45,
+            credit: 0,
+            costCenterId: 'general',
+            memo: 'فاتورة كهرباء',
+          },
+          {
+            id: 'jvl-exp-2',
+            accountCode: '2101',
+            accountName: 'الموردون والدائنون',
+            debit: 0,
+            credit: 45,
+            costCenterId: 'general',
+            memo: 'استحقاق كهرباء',
+          },
+        ],
+      },
+    });
+    const revJv = backend1.reverseJournalEntryAtomic({
+      token: adminToken,
+      originalEntryId: manualJv.id,
+      reversalReason: 'قيد مكرر - تم عكسه محاسبياً',
+    });
+    assert.equal(revJv.reversedEntryId, manualJv.id);
+    assert.equal(
+      backend1.getJournalEntryById({ token: adminToken, id: manualJv.id }).status,
+      'REVERSED'
+    );
+
+    // 12. Verify stock, supplier balance, cashBox balance, and global balanced ledger before backup
+    const prodAfter = backend1.getProductById({ token: adminToken, id: 'prod-e2e-pharm' });
+    assert.equal(prodAfter.currentStock, 15);
+    assert.equal(prodAfter.batches[0].quantity, 15);
+
+    const supplierAfter = backend1.getPartyById({ token: adminToken, id: 'sup-e2e-1' });
+    assert.equal(supplierAfter.balance, -140); // -240 credit purchase + 100 payment = -140 payable
+
+    const cashBoxAfter = backend1.getCashBoxes({ token: adminToken }).find((c) => c.id === 'cb-e2e-main');
+    // 2000 + 90 sale - 100 supplier payment + 300 amanat - 300 return = 1990
+    assert.equal(cashBoxAfter.balance, 1990);
+
+    const allJournals = backend1.getJournalEntries({ token: adminToken, costCenterId: 'all' });
+    let totalDebitsCents = 0;
+    let totalCreditsCents = 0;
+    for (const jv of allJournals) {
+      let jvDebit = 0;
+      let jvCredit = 0;
+      for (const line of jv.lines) {
+        jvDebit += Math.round(line.debit * 100);
+        jvCredit += Math.round(line.credit * 100);
+      }
+      assert.equal(jvDebit, jvCredit, `Journal ${jv.id} must be strictly balanced`);
+      totalDebitsCents += jvDebit;
+      totalCreditsCents += jvCredit;
+    }
+    assert.equal(totalDebitsCents, totalCreditsCents);
+
+    // 13. Native SQLite Online Backup, mutate DB after backup, restore backup, verify rollback
+    const nativeBackup = await backend1.createNativeBackupNow({
+      token: adminToken,
+      prefix: 'e2e-golden',
+    });
+    const verification = verifySqliteFile(nativeBackup.path);
+    assert.equal(verification.valid, true);
+
+    // Mutate DB after backup
+    backend1.savePartyAtomic({
+      token: adminToken,
+      party: {
+        id: 'cust-post-backup',
+        type: 'CUSTOMER',
+        nameAr: 'عميل بعد النسخة الاحتياطية',
+        phone: '770000999',
+        balance: 0,
+      },
+      isUpdate: false,
+    });
+    assert.ok(backend1.getPartyById({ token: adminToken, id: 'cust-post-backup' }));
+
+    // Restore from native SQLite backup safely
+    const restoreRes = await restoreSqliteBackupFile({
+      databasePath: rt1.databasePath,
+      backupDirectory: rt1.backupDirectory,
+      sourceBackupPath: nativeBackup.path,
+      currentDatabase: rt1.database,
+      reopenOptions: { userDataPath },
+    });
+    assert.ok(restoreRes.safetyBackupPath);
+    restoreRes.databaseRuntime.database.close();
+
+    // 14. Re-open fresh runtime (simulates Windows app / machine restart) and assert exact state
+    const rt2 = await openErpDatabase({ userDataPath });
+    const auth2 = new DesktopAuthenticationService(rt2.database);
+    const backend2 = createDesktopBackend({
+      database: rt2.database,
+      backupDirectory: rt2.backupDirectory,
+      authenticationService: auth2,
+    });
+
+    const login2 = auth2.authenticate({ username: 'owner', password: 'OwnerPass#2026' });
+    assert.equal(login2.success, true);
+    const token2 = login2.token;
+
+    assert.equal(backend2.getCompanyProfile({ token: token2 }).nameAr, 'مؤسسة عمرو النماري التجارية');
+    assert.equal(backend2.getPartyById({ token: token2, id: 'cust-post-backup' }), undefined);
+    assert.equal(backend2.getProductById({ token: token2, id: 'prod-e2e-pharm' }).currentStock, 15);
+    assert.equal(backend2.getPartyById({ token: token2, id: 'sup-e2e-1' }).balance, -140);
+    assert.equal(
+      backend2.getCashBoxes({ token: token2 }).find((c) => c.id === 'cb-e2e-main').balance,
+      1990
+    );
+
+    const outboxStats = backend2.getOutboxStats({ token: token2 });
+    assert.ok(outboxStats.pending >= 6, 'Outbox must record offline SQLite mutations');
+
+    rt2.database.close();
+  } finally {
+    rmSync(userDataPath, { recursive: true, force: true });
+  }
+});

@@ -8,6 +8,9 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { storage } from './services/storageService';
 import { authService } from './services/authService';
 import { desktopAuthAdapter } from './services/desktopAuthAdapter';
+import { desktopSession } from './services/desktopSession';
+import { djangoSync } from './services/djangoSyncService';
+import { supabaseSync } from './services/supabaseSyncService';
 import { dexieDataService } from './services/dexieDataService';
 import { useDexieInitStatus, useLiveCashBoxes, useLiveUsers } from './hooks/useLiveDexie';
 import { ActivityId, SystemUser } from './types/erp';
@@ -47,8 +50,11 @@ export default function App() {
   const [isInstallModalOpen, setIsInstallModalOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState<boolean>(false);
   const [desktopToken, setDesktopToken] = useState<string | null>(null);
+  const [desktopHydrating, setDesktopHydrating] = useState<boolean>(false);
+  const [desktopAuthNotice, setDesktopAuthNotice] = useState<string | null>(null);
   const isDesktopRuntime = desktopAuthAdapter.isAvailable();
   const [showMobileBanner, setShowMobileBanner] = useState(() => {
+    if (isDesktopRuntime) return false;
     if (typeof window !== 'undefined') {
       const isStandalone =
         window.matchMedia('(display-mode: standalone)').matches ||
@@ -110,6 +116,28 @@ export default function App() {
     return () => window.removeEventListener('storage', onStorage);
   }, [isDesktopRuntime, initStatus.state, liveUsers]);
 
+  useEffect(() => {
+    if (!isDesktopRuntime || !window.amroDesktop) return;
+    const unsubSession = desktopSession.subscribe((domains) => {
+      if (domains.includes('session') || domains.includes('all')) {
+        const actor = desktopSession.getActor();
+        if (actor) setCurrentUser(actor);
+        setDesktopToken(desktopSession.getToken());
+      }
+    });
+    const unsubInvalidated = window.amroDesktop.onAuthInvalidated((reason) => {
+      desktopSession.clear();
+      setDesktopToken(null);
+      setIsLoggedIn(false);
+      setActiveView('dashboard');
+      setDesktopAuthNotice(reason || 'تم إنهاء الجلسة تلقائياً لحماية قاعدة البيانات.');
+    });
+    return () => {
+      unsubSession();
+      unsubInvalidated();
+    };
+  }, [isDesktopRuntime]);
+
   const handleRefresh = useCallback(() => {
     setRefreshKey((prev) => prev + 1);
     const actor = authService.getCurrentActorSync();
@@ -121,10 +149,12 @@ export default function App() {
       desktopAuthAdapter.logout(desktopToken).catch((error) => {
         console.error('[App] Desktop logout failed:', error);
       });
+      desktopSession.clear();
     } else if (!isDesktopRuntime) {
       authService.logout();
     }
     setDesktopToken(null);
+    setDesktopAuthNotice(null);
     setIsLoggedIn(false);
     setActiveView('dashboard');
   }, [desktopToken, isDesktopRuntime]);
@@ -158,31 +188,63 @@ export default function App() {
   // إذا لم يكن مسجلاً دخوله اعرض شاشة الدخول
   if (!isLoggedIn) {
     return (
-      <LoginScreen
-        onLogin={(user, token) => {
-          setCurrentUser(user);
-          if (isDesktopRuntime && token) setDesktopToken(token);
-          setIsLoggedIn(true);
-        }}
-      />
-    );
-  }
-
-  if (isDesktopRuntime) {
-    return (
-      <div dir="rtl" className="min-h-screen flex items-center justify-center bg-slate-950 p-5 text-white">
-        <section className="w-full max-w-xl rounded-2xl border border-amber-500/30 bg-slate-900 p-6 text-center shadow-2xl">
-          <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-amber-500/15 text-amber-300">
-            <ShieldAlert className="h-7 w-7" />
+      <div className="min-h-screen w-full relative">
+        {desktopAuthNotice && (
+          <div
+            dir="rtl"
+            className="fixed top-4 left-1/2 -translate-x-1/2 z-50 max-w-lg w-[92%] bg-amber-950/95 border border-amber-500/50 text-amber-100 px-4 py-3 rounded-xl shadow-2xl flex items-center justify-between gap-3 text-xs"
+          >
+            <span>{desktopAuthNotice}</span>
+            <button
+              type="button"
+              onClick={() => setDesktopAuthNotice(null)}
+              className="p-1 text-amber-300 hover:text-white rounded"
+            >
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <h1 className="text-lg font-bold">تم التحقق من تسجيل الدخول المكتبي</h1>
-          <p className="mt-2 text-sm text-slate-300">مرحباً {currentUser.fullName}.</p>
-          <div className="mt-5 rounded-xl border border-amber-400/20 bg-amber-500/10 p-4 text-right text-sm leading-7 text-amber-100">
-            واجهة البيع والمخزون والمحاسبة لم تُربط بعد بخدمات SQLite. أوقفنا فتح العمليات المالية في نسخة Windows حتى لا تعمل على قاعدة Dexie منفصلة أو تعرض أرصدة غير صحيحة.
+        )}
+        <LoginScreen
+          onLogin={async (user, token) => {
+            setDesktopAuthNotice(null);
+            if (isDesktopRuntime && token) {
+              setDesktopHydrating(true);
+              try {
+                desktopSession.setActorSession(token, user);
+                await desktopSession.hydrate(token, user);
+                await Promise.all([
+                  djangoSync.refreshConfigFromDesktop(),
+                  supabaseSync.refreshConfigFromDesktop(),
+                ]);
+                setDesktopToken(token);
+                setCurrentUser(desktopSession.getActor() || user);
+                setIsLoggedIn(true);
+              } catch (err: unknown) {
+                desktopSession.clear();
+                setDesktopToken(null);
+                setIsLoggedIn(false);
+                setDesktopAuthNotice(
+                  err instanceof Error
+                    ? `تعذر تحميل بيانات جلسة SQLite: ${err.message}`
+                    : 'تعذر تحميل بيانات الجلسة المكتبية من SQLite.'
+                );
+              } finally {
+                setDesktopHydrating(false);
+              }
+              return;
+            }
+            setCurrentUser(user);
+            setIsLoggedIn(true);
+          }}
+        />
+        {desktopHydrating && (
+          <div
+            dir="rtl"
+            className="fixed inset-0 z-50 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center text-white text-sm font-bold"
+          >
+            جارٍ تهيئة جلسة SQLite المحلية وتحميل إعدادات الفروع...
           </div>
-          <p className="mt-3 text-xs text-slate-400">بيانات الدخول والجلسة محفوظة في SQLite وذاكرة العملية الرئيسية. لا يتم تخزين رمز الجلسة في المتصفح.</p>
-          <button onClick={handleLogout} className="mt-6 rounded-xl bg-slate-700 px-6 py-3 text-sm font-bold hover:bg-slate-600">تسجيل الخروج</button>
-        </section>
+        )}
       </div>
     );
   }
@@ -198,7 +260,7 @@ export default function App() {
         currentUser={currentUser}
         isMobileOpen={isMobileMenuOpen}
         setIsMobileOpen={setIsMobileMenuOpen}
-        onOpenInstallModal={() => setIsInstallModalOpen(true)}
+        onOpenInstallModal={isDesktopRuntime ? undefined : () => setIsInstallModalOpen(true)}
         onLogout={handleLogout}
       />
 
@@ -216,7 +278,7 @@ export default function App() {
         />
 
         {/* Mobile Install Promotion Banner */}
-        {showMobileBanner && (
+        {!isDesktopRuntime && showMobileBanner && (
           <div className="lg:hidden bg-gradient-to-r from-emerald-800 via-teal-800 to-emerald-900 text-white px-3 py-2 flex items-center justify-between gap-2 text-xs shadow-md shrink-0 border-b border-emerald-700/50 select-none animate-fadeIn">
             <div
               onClick={() => setIsInstallModalOpen(true)}
@@ -387,13 +449,15 @@ export default function App() {
             </button>
           )}
 
-          <button
-            onClick={() => setIsInstallModalOpen(true)}
-            className="flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold text-emerald-400 hover:text-emerald-300 transition-colors"
-          >
-            <Smartphone className="w-5 h-5" />
-            <span>تثبيت</span>
-          </button>
+          {!isDesktopRuntime && (
+            <button
+              onClick={() => setIsInstallModalOpen(true)}
+              className="flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold text-emerald-400 hover:text-emerald-300 transition-colors"
+            >
+              <Smartphone className="w-5 h-5" />
+              <span>تثبيت</span>
+            </button>
+          )}
 
           <button
             onClick={() => setIsMobileMenuOpen(true)}
@@ -406,10 +470,12 @@ export default function App() {
       </div>
 
       {/* PWA Mobile App Installation Modal */}
-      <PWAInstallModal
-        isOpen={isInstallModalOpen}
-        onClose={() => setIsInstallModalOpen(false)}
-      />
+      {!isDesktopRuntime && (
+        <PWAInstallModal
+          isOpen={isInstallModalOpen}
+          onClose={() => setIsInstallModalOpen(false)}
+        />
+      )}
     </div>
   );
 }

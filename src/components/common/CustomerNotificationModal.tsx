@@ -26,6 +26,8 @@ import {
   Download,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
+import { desktopSession } from '../../services/desktopSession';
+import { useLiveBranches } from '../../hooks/useLiveDexie';
 import { getActiveCurrencyConfig } from '../../config/currency';
 
 export interface CustomerNotificationModalProps {
@@ -68,8 +70,16 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   const [copied, setCopied] = useState(false);
   const [canShare, setCanShare] = useState(false);
 
-  const activeBranch = storage.getBranches().find((b) => b.id === storage.getActiveBranchId());
-  const companyName = 'نظام الإدارة التجارية والمحاسبية المتكامل';
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const liveBranches = useLiveBranches();
+  const activeBranchId = isDesktop ? desktopSession.getActiveBranchId() : storage.getActiveBranchId();
+  const activeBranch =
+    liveBranches.find((b) => b.id === activeBranchId) ||
+    liveBranches[0] ||
+    (isDesktop ? desktopSession.getActiveBranch() : storage.getBranches().find((b) => b.id === activeBranchId));
+  const companyName =
+    (isDesktop ? desktopSession.getCompanyProfile()?.nameAr : storage.getCompanyProfile().nameAr) ||
+    'نظام الإدارة التجارية والمحاسبية المتكامل';
   const branchName = activeBranch ? activeBranch.nameAr : 'الفرع الرئيسي';
   const currencySymbol = getActiveCurrencyConfig().symbol;
 

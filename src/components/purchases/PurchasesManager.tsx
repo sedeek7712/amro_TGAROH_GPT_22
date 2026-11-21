@@ -19,6 +19,7 @@ import {
   Building2,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
+import { desktopSession } from '../../services/desktopSession';
 import { dataService } from '../../services/dataService';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveInvoices, useLiveParties, useLiveCashBoxes, useLiveProducts } from '../../hooks/useLiveDexie';
@@ -161,7 +162,10 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
       }
     }
 
-    const activeBranch = storage.getActiveBranch();
+    const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+    const activeBranchId = isDesktop
+      ? desktopSession.getActiveBranchId() || 'branch_main'
+      : storage.getActiveBranch().id;
     const selectedSupplier = suppliers.find((s) => s.id === supplierId);
     const finalPartyName = selectedSupplier ? selectedSupplier.nameAr : supplierName || 'مورد عام';
 
@@ -189,7 +193,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
       invoiceNumber: '',
       type: 'PURCHASE',
       activityId,
-      branchId: activeBranch.id,
+      branchId: activeBranchId,
       partyId: supplierId || undefined,
       partyName: finalPartyName,
       date: invoiceDate,

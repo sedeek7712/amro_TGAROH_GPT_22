@@ -22,6 +22,7 @@ import { ActiveView } from './Sidebar';
 import { useNetworkStatus } from '../../services/networkMonitor';
 import { useLiveOutboxStats, useLiveBranches } from '../../hooks/useLiveDexie';
 import { storage } from '../../services/storageService';
+import { desktopSession } from '../../services/desktopSession';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { canAccessView } from '../../config/rbac';
 
@@ -45,10 +46,23 @@ export const TopBar: React.FC<TopBarProps> = ({
   onOpenInstallModal,
 }) => {
   const { isOnline } = useNetworkStatus();
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const outboxStats = useLiveOutboxStats();
   const branches = useLiveBranches();
-  const activeBranchId = storage.getActiveBranchId();
-  const activeBranch = branches.find((b) => b.id === activeBranchId) || branches[0] || storage.getActiveBranch();
+  const activeBranchId = isDesktop
+    ? desktopSession.getActiveBranchId() || currentUser.branchId || 'branch_main'
+    : storage.getActiveBranchId();
+  const activeBranch =
+    branches.find((b) => b.id === activeBranchId) ||
+    branches[0] ||
+    (isDesktop ? desktopSession.getActiveBranch() : storage.getActiveBranch()) || {
+      id: activeBranchId,
+      code: 'BR01',
+      nameAr: 'الفرع الرئيسي',
+      isMain: true,
+      active: true,
+      createdAt: '',
+    };
 
   const viewTitles: Record<ActiveView, string> = {
     dashboard: 'لوحة التحكم المركزية',
@@ -180,16 +194,18 @@ export const TopBar: React.FC<TopBarProps> = ({
           </div>
         )}
 
-        {/* Install Mobile App Button */}
-        <button
-          onClick={onOpenInstallModal}
-          className="flex items-center gap-1 px-2.5 py-1.5 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-all whitespace-nowrap border border-emerald-500/30"
-          title="تثبيت التطبيق على الهاتف الذكي"
-        >
-          <Smartphone className="w-3.5 h-3.5 text-emerald-200" />
-          <span className="hidden sm:inline">تثبيت التطبيق</span>
-          <span className="sm:hidden">تطبيق</span>
-        </button>
+        {/* Install Mobile App Button (Web/PWA only) */}
+        {!isDesktop && (
+          <button
+            onClick={onOpenInstallModal}
+            className="flex items-center gap-1 px-2.5 py-1.5 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-all whitespace-nowrap border border-emerald-500/30"
+            title="تثبيت التطبيق على الهاتف الذكي"
+          >
+            <Smartphone className="w-3.5 h-3.5 text-emerald-200" />
+            <span className="hidden sm:inline">تثبيت التطبيق</span>
+            <span className="sm:hidden">تطبيق</span>
+          </button>
+        )}
 
         {/* Quick POS Button */}
         {canAccessPos && (

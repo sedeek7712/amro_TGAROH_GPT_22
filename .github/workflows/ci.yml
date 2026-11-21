@@ -51,6 +51,9 @@ jobs:
       - name: Run unit & regression tests (node:test)
         run: npm test
 
+      - name: Run SQLite desktop backend E2E & module tests
+        run: npm run test:sqlite
+
       - name: Run legacy remediation & E2E suites
         run: npm run test:legacy
 
@@ -84,6 +87,9 @@ jobs:
 
       - name: Verify legacy backup import on Node 24
         run: node scripts/verify_sqlite_import.mjs
+
+      - name: Run SQLite desktop backend tests on Node 24
+        run: node --test scripts/tests/*.test.mjs
 
       - name: Check Electron main, preload and security modules
         run: node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/security/authentication.mjs

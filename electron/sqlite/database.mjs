@@ -369,6 +369,13 @@ export async function openErpDatabase(options) {
     };
   } catch (error) {
     try { database.close(); } catch {}
+    if (preMigrationBackups.length > 0 && existsSync(preMigrationBackups[0])) {
+      try {
+        removeWalSidecars(databasePath);
+        rmSync(databasePath, { force: true });
+        copyFileSync(preMigrationBackups[0], databasePath);
+      } catch {}
+    }
     throw error;
   }
 }

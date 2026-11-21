@@ -2,28 +2,64 @@
  * وحدة إعدادات الشركة — تخصيص الاسم والشعار والبيانات التجارية
  */
 
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Building2, Save, CheckCircle, Image, X, Phone, Mail,
   MapPin, FileText, Hash, Globe, AlertCircle,
 } from 'lucide-react';
-import { storage, CompanyProfile } from '../../services/storageService';
+import { CompanyProfile } from '../../services/storageService';
+import { dataService } from '../../services/dataService';
+import { desktopSession } from '../../services/desktopSession';
 import { CURRENCY_PRESETS, SupportedCurrencyCode } from '../../config/currency';
 
 interface CompanySettingsProps {
   onRefresh: () => void;
 }
 
+const DEFAULT_FALLBACK_PROFILE: CompanyProfile = {
+  nameAr: 'نظام الإدارة التجارية والمحاسبية المتكامل',
+  currencyCode: 'SAR',
+  currency: 'ريال سعودي',
+  currencySymbol: 'ر.س',
+  currencyDecimalPlaces: 2,
+};
+
 export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) => {
-  const [profile, setProfile] = useState<CompanyProfile>(() => storage.getCompanyProfile());
+  const [profile, setProfile] = useState<CompanyProfile>(() => {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      return desktopSession.getCompanyProfile() || DEFAULT_FALLBACK_PROFILE;
+    }
+    return DEFAULT_FALLBACK_PROFILE;
+  });
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
   const [logoError, setLogoError] = useState<string | null>(null);
   const [logoPreview, setLogoPreview] = useState<string | null>(profile.logo || null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  useEffect(() => {
+    let active = true;
+    dataService
+      .getCompanyProfile()
+      .then((loaded) => {
+        if (!active || !loaded) return;
+        setProfile(loaded);
+        setLogoPreview(loaded.logo || null);
+      })
+      .catch((err) => {
+        if (!active) return;
+        setSaveError(err instanceof Error ? err.message : 'تعذر تحميل بيانات المنشأة.');
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
   const handleChange = (field: keyof CompanyProfile, value: string) => {
     setProfile((prev) => ({ ...prev, [field]: value }));
     setSaved(false);
+    setSaveError(null);
   };
 
   const handleCurrencyPresetChange = (code: SupportedCurrencyCode) => {
@@ -36,6 +72,7 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
       currencySymbol: preset.symbol,
     }));
     setSaved(false);
+    setSaveError(null);
   };
 
   const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -63,15 +100,36 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const handleSave = () => {
-    storage.saveCompanyProfile(profile);
-    setSaved(true);
-    onRefresh();
-    setTimeout(() => setSaved(false), 3000);
+  const handleSave = async () => {
+    if (isSaving) return;
+    setSaveError(null);
+    if (!profile.nameAr?.trim()) {
+      setSaveError('اسم الشركة بالعربية مطلوب.');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const updated = await dataService.saveCompanyProfile(profile);
+      setProfile(updated);
+      setLogoPreview(updated.logo || null);
+      setSaved(true);
+      onRefresh();
+      setTimeout(() => setSaved(false), 3000);
+    } catch (err: unknown) {
+      setSaveError(err instanceof Error ? err.message : 'تعذر حفظ إعدادات الشركة.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   return (
     <div className="p-4 sm:p-6 max-w-3xl mx-auto space-y-6" dir="rtl">
+      {saveError && (
+        <div role="alert" className="flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-xs font-bold text-rose-800">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{saveError}</span>
+        </div>
+      )}
       {/* العنوان */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -85,12 +143,13 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
         </div>
         <button
           onClick={handleSave}
+          disabled={isSaving}
           className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold shadow-sm transition-all ${
-            saved ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-emerald-600 hover:bg-emerald-700 text-white'
+            saved ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white'
           }`}
         >
           {saved ? <CheckCircle className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-          {saved ? 'تم الحفظ!' : 'حفظ التغييرات'}
+          {isSaving ? 'جارٍ الحفظ...' : saved ? 'تم الحفظ!' : 'حفظ التغييرات'}
         </button>
       </div>
 

@@ -17,6 +17,7 @@ import { db } from '../db/erpDatabase';
 import { syncQueueService } from './syncQueueService';
 import { networkMonitor } from './networkMonitor';
 import { authService } from './authService';
+import { desktopSession } from './desktopSession';
 import { getActiveCurrencyConfig } from '../config/currency';
 import {
   SupabaseSyncConfig,
@@ -41,41 +42,66 @@ export class SupabaseSyncService {
   private isSyncing = false;
   private autoSyncTimer: ReturnType<typeof setInterval> | null = null;
   private initialized = false;
+  private desktopConfigCache: SupabaseSyncConfig | null = null;
+  private fallbackDesktopDeviceId: string | null = null;
 
   constructor() {
     this.initAutoSyncWorker();
   }
 
+  private generateDeviceId(): string {
+    return `dev_${typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15)}`;
+  }
+
   public getOrCreateDeviceId(): string {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      if (this.desktopConfigCache?.deviceId) return this.desktopConfigCache.deviceId;
+      if (!this.fallbackDesktopDeviceId) {
+        this.fallbackDesktopDeviceId = this.generateDeviceId();
+      }
+      return this.fallbackDesktopDeviceId;
+    }
     if (typeof localStorage === 'undefined') return 'device_server_runtime';
     let deviceId = localStorage.getItem(DEVICE_ID_KEY);
     if (!deviceId) {
-      deviceId = `dev_${crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).substring(2, 15)}`;
+      deviceId = this.generateDeviceId();
       localStorage.setItem(DEVICE_ID_KEY, deviceId);
     }
     return deviceId;
   }
 
   public getDeviceName(): string {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      return this.desktopConfigCache?.deviceName || 'نقطة بيع Windows';
+    }
     if (typeof localStorage === 'undefined') return 'جهاز المتصفح';
     return localStorage.getItem(DEVICE_NAME_KEY) || 'نقطة بيع رئيسية';
   }
 
   public setDeviceName(name: string): void {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      if (this.desktopConfigCache) {
+        this.desktopConfigCache = { ...this.desktopConfigCache, deviceName: name.trim() };
+      }
+      return;
+    }
     if (typeof localStorage !== 'undefined') {
       localStorage.setItem(DEVICE_NAME_KEY, name.trim());
     }
   }
 
   public getConfig(): SupabaseSyncConfig {
+    const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
     const deviceId = this.getOrCreateDeviceId();
     const deviceName = this.getDeviceName();
     const activeTenant = authService.getActiveTenantIdSync() || '';
+    const activeBranch = isDesktop ? (desktopSession.getActiveBranchId() || undefined) : undefined;
 
     const defaultConfig: SupabaseSyncConfig = {
       supabaseUrl: '',
       supabaseAnonKey: '',
       tenantId: activeTenant,
+      branchId: activeBranch,
       deviceId,
       deviceName,
       autoSync: false,
@@ -84,6 +110,18 @@ export class SupabaseSyncService {
       tableCursors: {},
       syncIntervalSeconds: 30,
     };
+
+    if (isDesktop) {
+      const cached = this.desktopConfigCache;
+      if (!cached) return defaultConfig;
+      return {
+        ...defaultConfig,
+        ...cached,
+        deviceId: cached.deviceId || deviceId,
+        deviceName: cached.deviceName || deviceName,
+        tableCursors: cached.tableCursors || {},
+      };
+    }
 
     if (typeof localStorage === 'undefined') return defaultConfig;
 
@@ -103,8 +141,31 @@ export class SupabaseSyncService {
     }
   }
 
+  public async refreshConfigFromDesktop(): Promise<SupabaseSyncConfig> {
+    if (typeof window !== 'undefined' && window.amroDesktop && desktopSession.getToken()) {
+      const token = desktopSession.requireToken();
+      const remote = await window.amroDesktop.getSyncConfig({ token, kind: 'supabase' });
+      const base = this.getConfig();
+      const remoteObj = remote && typeof remote === 'object' ? (remote as Partial<SupabaseSyncConfig>) : {};
+      const resolvedDeviceId = remoteObj.deviceId || base.deviceId || this.generateDeviceId();
+      this.desktopConfigCache = {
+        ...base,
+        ...remoteObj,
+        deviceId: resolvedDeviceId,
+        deviceName: remoteObj.deviceName || base.deviceName,
+        tableCursors: remoteObj.tableCursors || {},
+      };
+      if (!remoteObj.deviceId) {
+        await window.amroDesktop
+          .saveSyncConfig({ token, kind: 'supabase', config: this.desktopConfigCache })
+          .catch(() => {});
+      }
+      this.restartAutoSyncTimer();
+    }
+    return this.getConfig();
+  }
+
   public saveConfig(newConfig: Partial<SupabaseSyncConfig>): void {
-    if (typeof localStorage === 'undefined') return;
     const current = this.getConfig();
     const merged: SupabaseSyncConfig = {
       ...current,
@@ -112,6 +173,22 @@ export class SupabaseSyncService {
       tenantId: newConfig.tenantId?.trim() || current.tenantId || '',
       tableCursors: newConfig.tableCursors ?? current.tableCursors ?? {},
     };
+
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      this.desktopConfigCache = merged;
+      const token = desktopSession.getToken();
+      if (token) {
+        window.amroDesktop
+          .saveSyncConfig({ token, kind: 'supabase', config: merged })
+          .catch((err) => console.error('[SupabaseSync] Failed to persist desktop config:', err));
+      }
+      if (newConfig.autoSync !== undefined) {
+        this.restartAutoSyncTimer();
+      }
+      return;
+    }
+
+    if (typeof localStorage === 'undefined') return;
     localStorage.setItem(SUPABASE_CONFIG_KEY, JSON.stringify(merged));
 
     if (newConfig.deviceName) {
@@ -793,10 +870,16 @@ export class SupabaseSyncService {
       { name: 'erp_amanat_items', entityType: 'AMANAT', pkField: 'id' },
     ];
 
-    const pendingOutboxItems = await db.outbox
-      .where('status')
-      .anyOf(['PENDING', 'SYNCING'])
-      .toArray();
+    const bridge = typeof window !== 'undefined' ? window.amroDesktop : undefined;
+    const pendingOutboxItems = bridge
+      ? (
+          await bridge.getOutboxQueue({
+            token: desktopSession.requireToken(),
+            statusFilter: 'all',
+            sortDir: 'asc',
+          })
+        ).filter((o) => o.status === 'PENDING' || o.status === 'SYNCING')
+      : await db.outbox.where('status').anyOf(['PENDING', 'SYNCING']).toArray();
     const pendingMap = new Map<string, OutboxQueueItem>();
     pendingOutboxItems.forEach((o) => pendingMap.set(`${o.entityType}:${o.entityId}`, o));
 
@@ -871,7 +954,15 @@ export class SupabaseSyncService {
               continue;
             }
 
-            await this.applyRemoteRowToLocalDexie(table.entityType, rec);
+            if (bridge) {
+              await bridge.applyRemoteSyncEntity({
+                token: desktopSession.requireToken(),
+                entityType: table.entityType,
+                row: rec,
+              });
+            } else {
+              await this.applyRemoteRowToLocalDexie(table.entityType, rec);
+            }
             pulledCount++;
 
             if (typeof rec.updated_at === 'string') {
@@ -902,6 +993,9 @@ export class SupabaseSyncService {
       updatedConfig.lastPullTimestamp = new Date().toISOString();
     }
     this.saveConfig(updatedConfig);
+    if (bridge && pulledCount > 0) {
+      desktopSession.notifyChanged(['all']);
+    }
 
     return { pulled: pulledCount, conflicts: conflictsCount, errors };
   }

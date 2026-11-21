@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
 import { existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,10 +9,11 @@ import {
   restoreSqliteBackupFile,
 } from './sqlite/database.mjs';
 import { getAppSetting } from './sqlite/modules/core-service.mjs';
-import { pruneAutoExitBackups } from './sqlite/modules/backup-sync-service.mjs';
+import { pruneAutoBackups } from './sqlite/modules/backup-sync-service.mjs';
 import { assertPermission } from './sqlite/rbac.mjs';
 import { DesktopAuthenticationService } from './security/authentication.mjs';
 import { createDesktopBackend } from './sqlite/desktop-backend.mjs';
+import { createDiagnosticLogger } from './logging/diagnostic-logger.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STABLE_DATA_FOLDER = 'AmroAlnmaryERP';
@@ -23,6 +24,8 @@ let authenticationService = null;
 let desktopBackend = null;
 let shuttingDown = false;
 let exitBackupCompleted = false;
+let scheduledBackupTimer = null;
+let autoBackupInFlight = false;
 
 // The data directory is intentionally independent from the EXE installation directory
 // and remains stable even if the application display name changes.
@@ -30,6 +33,23 @@ const stableUserDataPath = path.join(app.getPath('appData'), STABLE_DATA_FOLDER)
 app.setName(STABLE_DATA_FOLDER);
 app.setAppUserModelId('com.amroalnmary.erp');
 app.setPath('userData', stableUserDataPath);
+
+const diagnosticLogger = createDiagnosticLogger({
+  logDirectory: path.join(stableUserDataPath, 'Logs'),
+});
+
+process.on('uncaughtException', (error) => {
+  diagnosticLogger.log('ERROR', 'process', 'Uncaught exception in Electron main process', error);
+});
+
+process.on('unhandledRejection', (reason) => {
+  diagnosticLogger.log(
+    'ERROR',
+    'process',
+    'Unhandled promise rejection in Electron main process',
+    reason instanceof Error ? reason : { reason: String(reason) }
+  );
+});
 
 const hasSingleInstance = app.requestSingleInstanceLock();
 if (!hasSingleInstance) {
@@ -77,6 +97,100 @@ if (!hasSingleInstance) {
     });
   }
 
+  function getStoredBackupSettings() {
+    if (!databaseRuntime) {
+      return {
+        autoBackupOnExit: true,
+        autoBackupIntervalHours: 24,
+        maxRetainedBackups: 15,
+        customBackupDirectory: '',
+      };
+    }
+    return getAppSetting(databaseRuntime.database, 'tenant_main', 'backup_settings', {
+      autoBackupOnExit: true,
+      autoBackupIntervalHours: 24,
+      maxRetainedBackups: 15,
+      customBackupDirectory: '',
+    });
+  }
+
+  async function runAutomaticBackup(prefix = 'auto-scheduled') {
+    if (!databaseRuntime || autoBackupInFlight) return null;
+    autoBackupInFlight = true;
+    try {
+      const settings = getStoredBackupSettings();
+      const maxRetained = Math.max(1, Number(settings?.maxRetainedBackups || 15));
+      const createdPath = await createSqliteBackup(
+        databaseRuntime.database,
+        databaseRuntime.backupDirectory,
+        { prefix }
+      );
+      pruneAutoBackups(databaseRuntime.backupDirectory, maxRetained);
+
+      const customDir =
+        typeof settings?.customBackupDirectory === 'string'
+          ? settings.customBackupDirectory.trim()
+          : '';
+      if (customDir && path.resolve(customDir) !== path.resolve(databaseRuntime.backupDirectory)) {
+        if (!existsSync(customDir)) mkdirSync(customDir, { recursive: true });
+        await backupSqliteToDestination(
+          databaseRuntime.database,
+          path.join(customDir, path.basename(createdPath))
+        );
+        pruneAutoBackups(customDir, maxRetained);
+      }
+
+      diagnosticLogger.log('INFO', 'backup', `Automatic backup completed (${prefix})`, {
+        filename: path.basename(createdPath),
+      });
+      return createdPath;
+    } catch (err) {
+      diagnosticLogger.log('ERROR', 'backup', `Automatic backup failed (${prefix})`, err);
+      return null;
+    } finally {
+      autoBackupInFlight = false;
+    }
+  }
+
+  function clearScheduledBackupTimer() {
+    if (scheduledBackupTimer) {
+      clearInterval(scheduledBackupTimer);
+      scheduledBackupTimer = null;
+    }
+  }
+
+  function syncScheduledBackupTimer() {
+    clearScheduledBackupTimer();
+    if (!databaseRuntime) return;
+    const settings = getStoredBackupSettings();
+    const intervalHours = Number(settings?.autoBackupIntervalHours ?? 24);
+    if (!Number.isFinite(intervalHours) || intervalHours <= 0) return;
+
+    const intervalMs = Math.max(1, intervalHours) * 60 * 60 * 1000;
+    scheduledBackupTimer = setInterval(() => {
+      if (!shuttingDown && databaseRuntime) {
+        void runAutomaticBackup('auto-scheduled').then((created) => {
+          if (created) emitDataChanged(['backup']);
+        });
+      }
+    }, intervalMs);
+    if (typeof scheduledBackupTimer.unref === 'function') {
+      scheduledBackupTimer.unref();
+    }
+  }
+
+  function handleTrustedIpc(channel, handler) {
+    ipcMain.handle(channel, async (event, ...args) => {
+      assertTrustedMainFrame(event);
+      try {
+        return await handler(event, ...args);
+      } catch (error) {
+        diagnosticLogger.log('ERROR', 'ipc', `IPC handler failed: ${channel}`, error);
+        throw error;
+      }
+    });
+  }
+
   async function performSqliteRestore(token, sourceBackupPath) {
     const actor = desktopBackend.requireActor(token);
     assertPermission(actor, 'backup:restore', 'استعادة نسخة احتياطية SQLite');
@@ -90,6 +204,11 @@ if (!hasSingleInstance) {
         reopenOptions,
       });
       bindDatabaseRuntime(restored.databaseRuntime);
+      syncScheduledBackupTimer();
+      diagnosticLogger.log('INFO', 'backup', 'SQLite database restored from backup', {
+        restoredFrom: path.basename(restored.restoredFrom),
+        safetyBackupPath: path.basename(restored.safetyBackupPath),
+      });
       emitAuthInvalidated('تمت استعادة قاعدة البيانات من النسخة الاحتياطية؛ يرجى تسجيل الدخول مجدداً.');
       emitDataChanged(['all', 'session']);
       return {
@@ -98,8 +217,10 @@ if (!hasSingleInstance) {
         safetyBackupPath: restored.safetyBackupPath,
       };
     } catch (error) {
+      diagnosticLogger.log('ERROR', 'backup', 'SQLite database restore failed', error);
       if (error && error.rolledBackRuntime) {
         bindDatabaseRuntime(error.rolledBackRuntime);
+        syncScheduledBackupTimer();
         emitAuthInvalidated('تعذرت استعادة النسخة وتم التراجع للوضع الآمن؛ يرجى تسجيل الدخول مجدداً.');
         emitDataChanged(['all', 'session']);
       }
@@ -108,8 +229,7 @@ if (!hasSingleInstance) {
   }
 
   function registerSafeIpcHandlers() {
-    ipcMain.handle('erp:runtime:status', (event) => {
-      assertTrustedMainFrame(event);
+    handleTrustedIpc('erp:runtime:status', () => {
       return {
         ...desktopBackend.getRuntimeStatus(),
         databaseFile: path.basename(databaseRuntime.databasePath),
@@ -491,10 +611,12 @@ if (!hasSingleInstance) {
 
     ipcMain.handle('erp:backup:save-settings', (event, input) => {
       assertTrustedMainFrame(event);
-      return desktopBackend.saveBackupSettings({
+      const saved = desktopBackend.saveBackupSettings({
         token: input?.token,
         settings: input?.settings,
       });
+      syncScheduledBackupTimer();
+      return saved;
     });
 
     ipcMain.handle('erp:backup:export-sqlite-dialog', async (event, input) => {
@@ -669,9 +791,67 @@ if (!hasSingleInstance) {
         row: input?.row,
       });
     });
+
+    handleTrustedIpc('erp:diagnostics:get-log', (_event, input) => {
+      const actor = desktopBackend.requireActor(input?.token);
+      assertPermission(actor, 'backup:manage', 'عرض سجل التشخيص والأخطاء');
+      const status = desktopBackend.getRuntimeStatus();
+      const recent = diagnosticLogger.readRecentEntries({ maxLines: input?.maxLines || 150 });
+      return {
+        ...recent,
+        runtime: {
+          ...status,
+          appVersion: app.getVersion(),
+          isPackaged: app.isPackaged,
+          platform: process.platform,
+          arch: process.arch,
+        },
+      };
+    });
+
+    handleTrustedIpc('erp:diagnostics:export-dialog', async (_event, input) => {
+      const actor = desktopBackend.requireActor(input?.token);
+      assertPermission(actor, 'backup:export', 'تصدير تقرير التشخيص والأخطاء');
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const res = await dialog.showSaveDialog(mainWindow, {
+        title: 'حفظ سجل التشخيص والأخطاء (Diagnostic Report)',
+        defaultPath: path.join(path.dirname(diagnosticLogger.getLogFilePath()), `amro-diagnostics-${stamp}.json`),
+        filters: [{ name: 'Diagnostic JSON Report', extensions: ['json', 'log'] }],
+      });
+      if (res.canceled || !res.filePath) {
+        return { canceled: true };
+      }
+      const status = desktopBackend.getRuntimeStatus();
+      const exported = diagnosticLogger.exportDiagnosticsReport(res.filePath, {
+        ...status,
+        appVersion: app.getVersion(),
+        isPackaged: app.isPackaged,
+        platform: process.platform,
+        arch: process.arch,
+        exportedBy: actor.username,
+      });
+      diagnosticLogger.log('INFO', 'diagnostics', 'Diagnostic report exported', {
+        filename: exported.filename,
+        entryCount: exported.entryCount,
+      });
+      return { canceled: false, ...exported };
+    });
+  }
+
+  function resolveWindowIconPath() {
+    const candidates = [
+      path.join(MODULE_DIR, '..', 'dist', 'pwa-512x512.png'),
+      path.join(MODULE_DIR, '..', 'public', 'pwa-512x512.png'),
+    ];
+    return candidates.find((p) => existsSync(p));
   }
 
   async function createMainWindow() {
+    const windowIconPath = resolveWindowIconPath();
+    if (app.isPackaged) {
+      Menu.setApplicationMenu(null);
+    }
+
     mainWindow = new BrowserWindow({
       width: 1440,
       height: 920,
@@ -680,14 +860,28 @@ if (!hasSingleInstance) {
       show: false,
       autoHideMenuBar: true,
       backgroundColor: '#0f172a',
+      ...(windowIconPath ? { icon: windowIconPath } : {}),
       webPreferences: {
         preload: path.join(MODULE_DIR, 'preload.cjs'),
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
         webviewTag: false,
+        devTools: !app.isPackaged,
       },
     });
+
+    if (app.isPackaged) {
+      mainWindow.webContents.on('before-input-event', (event, input) => {
+        const key = String(input.key || '').toUpperCase();
+        const isDevToolsShortcut =
+          key === 'F12' ||
+          ((input.control || input.meta) && input.shift && ['I', 'J', 'C'].includes(key));
+        if (isDevToolsShortcut) {
+          event.preventDefault();
+        }
+      });
+    }
 
     mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     mainWindow.webContents.on('will-navigate', (event, destination) => {
@@ -714,8 +908,14 @@ if (!hasSingleInstance) {
       const opened = await openErpDatabase({ userDataPath: app.getPath('userData') });
       bindDatabaseRuntime(opened);
       registerSafeIpcHandlers();
+      syncScheduledBackupTimer();
+      diagnosticLogger.log('INFO', 'startup', 'Desktop application started and SQLite verified', {
+        schemaVersion: desktopBackend.getRuntimeStatus().schemaVersion,
+        isPackaged: app.isPackaged,
+      });
       await createMainWindow();
     } catch (error) {
+      diagnosticLogger.log('ERROR', 'startup', 'Desktop application failed startup verification', error);
       const message = error instanceof Error ? error.message : 'Unknown startup error';
       dialog.showErrorBox(
         'تعذر تشغيل نظام عمرو النماري',
@@ -727,6 +927,7 @@ if (!hasSingleInstance) {
   });
 
   app.on('before-quit', async (event) => {
+    clearScheduledBackupTimer();
     if (exitBackupCompleted) return;
     if (shuttingDown) {
       event.preventDefault();
@@ -741,30 +942,12 @@ if (!hasSingleInstance) {
 
     event.preventDefault();
     try {
-      const settings = getAppSetting(databaseRuntime.database, 'tenant_main', 'backup_settings', {
-        autoBackupOnExit: true,
-        maxRetainedBackups: 15,
-        customBackupDirectory: '',
-      });
+      const settings = getStoredBackupSettings();
       if (settings && settings.autoBackupOnExit !== false) {
-        const createdPath = await createSqliteBackup(
-          databaseRuntime.database,
-          databaseRuntime.backupDirectory,
-          { prefix: 'auto-exit' }
-        );
-        pruneAutoExitBackups(databaseRuntime.backupDirectory, settings.maxRetainedBackups || 15);
-        const customDir = typeof settings.customBackupDirectory === 'string' ? settings.customBackupDirectory.trim() : '';
-        if (customDir && path.resolve(customDir) !== path.resolve(databaseRuntime.backupDirectory)) {
-          if (!existsSync(customDir)) mkdirSync(customDir, { recursive: true });
-          await backupSqliteToDestination(
-            databaseRuntime.database,
-            path.join(customDir, path.basename(createdPath))
-          );
-          pruneAutoExitBackups(customDir, settings.maxRetainedBackups || 15);
-        }
+        await runAutomaticBackup('auto-exit');
       }
     } catch (err) {
-      console.warn('[main] Auto-backup on exit notice:', err);
+      diagnosticLogger.log('WARN', 'backup', 'Auto-backup on exit warning', err);
     } finally {
       try {
         databaseRuntime.close();

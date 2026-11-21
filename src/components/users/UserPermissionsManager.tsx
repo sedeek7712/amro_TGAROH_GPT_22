@@ -14,11 +14,13 @@ import {
   Building2,
   Power,
 } from 'lucide-react';
-import { storage } from '../../services/storageService';
+import { storage, OFFICIAL_ACTIVITIES } from '../../services/storageService';
+import { desktopAuthAdapter } from '../../services/desktopAuthAdapter';
+import { desktopSession } from '../../services/desktopSession';
 import { dataService } from '../../services/dataService';
 import { hashPassword, validatePasswordStrength, verifyPassword } from '../../services/authService';
 import { useLiveBranches, useLiveUsers } from '../../hooks/useLiveDexie';
-import { SystemUser, UserRole, ActivityId } from '../../types/erp';
+import { SystemUser, UserRole, ActivityId, CommercialActivityId } from '../../types/erp';
 
 interface UserPermissionsManagerProps {
   currentUser: SystemUser;
@@ -67,7 +69,13 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
   const [resetPasswordConfirm, setResetPasswordConfirm] = useState('');
   const [resetPasswordError, setResetPasswordError] = useState<string | null>(null);
 
-  const activities = storage.getActivities();
+  const isDesktop = desktopAuthAdapter.isAvailable();
+  const desktopActivities = desktopSession.getActivitiesSnapshot();
+  const activities = isDesktop
+    ? desktopActivities.length > 0
+      ? desktopActivities
+      : OFFICIAL_ACTIVITIES
+    : storage.getActivities();
 
   const handleToggleActivity = async (userId: string, activityId: ActivityId) => {
     setStatusMessage(null);
@@ -215,6 +223,46 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
     if (!switchTargetUser) return;
     setSwitchError(null);
 
+    if (isDesktop) {
+      try {
+        const res = await desktopAuthAdapter.switchUser(
+          desktopSession.requireToken(),
+          adminVerifyPassword,
+          switchTargetUser.id
+        );
+        if (!res.success || !res.token || !res.user) {
+          setSwitchError(res.error || 'كلمة مرور المدير العام غير صحيحة. تم حظر التبديل.');
+          return;
+        }
+        const mappedUser: SystemUser = {
+          id: res.user.id,
+          tenantId: res.user.tenantId,
+          username: res.user.username,
+          fullName: res.user.fullName,
+          role: res.user.role,
+          allowedActivities: res.user.allowedActivities as CommercialActivityId[],
+          branchId: res.user.branchId,
+          allowedBranches: [...res.user.allowedBranches],
+          active: res.user.active,
+          hasPassword: res.user.hasPassword,
+          mustChangePassword: res.user.mustChangePassword,
+          failedLoginAttempts: res.user.failedLoginAttempts,
+        };
+        await desktopSession.hydrate(res.token, mappedUser);
+        setCurrentUser(mappedUser);
+        setSwitchTargetUser(null);
+        setAdminVerifyPassword('');
+        setStatusMessage({
+          type: 'success',
+          text: `تم التحقق وتبديل الجلسة النشطة إلى: ${mappedUser.fullName}.`,
+        });
+        onRefresh();
+      } catch (err: unknown) {
+        setSwitchError(err instanceof Error ? err.message : 'فشل تبديل الجلسة.');
+      }
+      return;
+    }
+
     const isValidAdminPass = await verifyPassword(adminVerifyPassword, currentUser.passwordHash);
     if (!isValidAdminPass) {
       setSwitchError('كلمة مرور المدير العام غير صحيحة. تم حظر التبديل.');
@@ -256,14 +304,38 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
     }
 
     try {
-      const passwordHash = await hashPassword(resetPasswordValue);
-      const updated = await dataService.saveUserAtomic({
-        ...passwordTargetUser,
-        passwordHash,
-        mustChangePassword: false,
-        failedLoginAttempts: 0,
-        lockedUntil: undefined,
-      });
+      let updated: SystemUser;
+      if (isDesktop) {
+        const res = await desktopAuthAdapter.adminResetPassword(
+          desktopSession.requireToken(),
+          passwordTargetUser.id,
+          resetPasswordValue
+        );
+        updated = {
+          id: res.id,
+          tenantId: res.tenantId,
+          username: res.username,
+          fullName: res.fullName,
+          role: res.role,
+          allowedActivities: res.allowedActivities as CommercialActivityId[],
+          branchId: res.branchId,
+          allowedBranches: [...res.allowedBranches],
+          active: res.active,
+          hasPassword: res.hasPassword,
+          mustChangePassword: res.mustChangePassword,
+          failedLoginAttempts: res.failedLoginAttempts,
+        };
+        desktopSession.notifyChanged(['users', 'auditLogs']);
+      } else {
+        const passwordHash = await hashPassword(resetPasswordValue);
+        updated = await dataService.saveUserAtomic({
+          ...passwordTargetUser,
+          passwordHash,
+          mustChangePassword: false,
+          failedLoginAttempts: 0,
+          lockedUntil: undefined,
+        });
+      }
       if (currentUser.id === updated.id) {
         await dataService.setCurrentUser(updated);
         setCurrentUser(updated);
@@ -386,7 +458,7 @@ export const UserPermissionsManager: React.FC<UserPermissionsManagerProps> = ({
                         موقوف
                       </span>
                     )}
-                    {!user.passwordHash && (
+                    {!(user.hasPassword ?? Boolean(user.passwordHash)) && (
                       <span className="px-2 py-0.5 rounded bg-amber-100 text-amber-800 text-[10px] font-bold">
                         بدون كلمة مرور
                       </span>

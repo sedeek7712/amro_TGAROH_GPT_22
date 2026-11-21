@@ -732,6 +732,26 @@ class AuthService {
   }
 
   public getCurrentSessionSync(): AuthSession | null {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      const actor = desktopSession.getActor();
+      const token = desktopSession.getToken();
+      if (!actor || !token) return null;
+      const activeBranch = desktopSession.getActiveBranchId() || actor.branchId || 'branch_main';
+      return {
+        userId: actor.id,
+        username: actor.username,
+        role: actor.role,
+        tenantId: actor.tenantId?.trim() || 'tenant_main',
+        branchId: activeBranch,
+        allowedBranches:
+          actor.allowedBranches && actor.allowedBranches.length > 0
+            ? actor.allowedBranches
+            : [activeBranch],
+        issuedAt: new Date().toISOString(),
+        expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        signature: 'electron_main_process_session',
+      };
+    }
     if (inMemorySession) {
       const exp = Date.parse(inMemorySession.expiresAt);
       if (Number.isFinite(exp) && Date.now() < exp) {

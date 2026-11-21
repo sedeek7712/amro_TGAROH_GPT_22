@@ -28,6 +28,7 @@ import {
 import { syncQueueService } from './syncQueueService';
 import { networkMonitor } from './networkMonitor';
 import { authService } from './authService';
+import { desktopSession } from './desktopSession';
 
 export interface DjangoSyncConfig {
   serverUrl: string;
@@ -62,6 +63,7 @@ class DjangoSyncService {
   private isProcessing = false;
   private syncTimer: ReturnType<typeof setInterval> | null = null;
   private initialized = false;
+  private desktopConfigCache: DjangoSyncConfig | null = null;
   private workerId = `django_${Math.random().toString(36).slice(2, 10)}`;
 
   constructor() {
@@ -103,7 +105,9 @@ class DjangoSyncService {
   }
 
   public getConfig(): DjangoSyncConfig {
-    const activeBranchId = storage.getActiveBranchId() || 'branch_main';
+    const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+    const activeBranchId =
+      (isDesktop ? desktopSession.getActiveBranchId() : storage.getActiveBranchId()) || 'branch_main';
     const activeTenantId = authService.getActiveTenantIdSync() || 'tenant_main';
     const defaultConfig: DjangoSyncConfig = {
       serverUrl: 'http://localhost:8000/api/v1',
@@ -116,6 +120,18 @@ class DjangoSyncService {
       branchId: activeBranchId,
       syncIntervalSeconds: 30,
     };
+
+    if (isDesktop) {
+      const cached = this.desktopConfigCache;
+      if (!cached) return defaultConfig;
+      return {
+        ...defaultConfig,
+        ...cached,
+        branchId: cached.branchId || activeBranchId,
+        tenantId: cached.tenantId || activeTenantId,
+        tableCursors: cached.tableCursors || {},
+      };
+    }
 
     if (typeof localStorage === 'undefined') {
       return defaultConfig;
@@ -139,7 +155,42 @@ class DjangoSyncService {
     }
   }
 
+  public async refreshConfigFromDesktop(): Promise<DjangoSyncConfig> {
+    if (typeof window !== 'undefined' && window.amroDesktop && desktopSession.getToken()) {
+      const remote = await window.amroDesktop.getSyncConfig({
+        token: desktopSession.requireToken(),
+        kind: 'django',
+      });
+      if (remote && typeof remote === 'object') {
+        this.desktopConfigCache = {
+          ...this.getConfig(),
+          ...(remote as Partial<DjangoSyncConfig>),
+        };
+      }
+      this.startPeriodicSyncTimer();
+    }
+    return this.getConfig();
+  }
+
   public saveConfig(config: DjangoSyncConfig): void {
+    if (typeof window !== 'undefined' && window.amroDesktop) {
+      this.desktopConfigCache = {
+        ...this.getConfig(),
+        ...config,
+      };
+      const token = desktopSession.getToken();
+      if (token) {
+        window.amroDesktop
+          .saveSyncConfig({
+            token,
+            kind: 'django',
+            config: this.desktopConfigCache,
+          })
+          .catch((err) => console.error('[DjangoSync] Failed to persist desktop config:', err));
+      }
+      this.startPeriodicSyncTimer();
+      return;
+    }
     if (typeof localStorage === 'undefined') return;
     localStorage.setItem(SYNC_CONFIG_KEY, JSON.stringify(config));
     this.startPeriodicSyncTimer();
@@ -467,10 +518,16 @@ class DjangoSyncService {
     let conflictsCount = 0;
     const errors: string[] = [];
 
-    const pendingOutboxItems = await db.outbox
-      .where('status')
-      .anyOf(['PENDING', 'SYNCING'])
-      .toArray();
+    const bridge = typeof window !== 'undefined' ? window.amroDesktop : undefined;
+    const pendingOutboxItems = bridge
+      ? (
+          await bridge.getOutboxQueue({
+            token: desktopSession.requireToken(),
+            statusFilter: 'all',
+            sortDir: 'asc',
+          })
+        ).filter((o) => o.status === 'PENDING' || o.status === 'SYNCING')
+      : await db.outbox.where('status').anyOf(['PENDING', 'SYNCING']).toArray();
     const pendingMap = new Map<string, OutboxQueueItem>();
     pendingOutboxItems.forEach((o) => pendingMap.set(`${o.entityType}:${o.entityId}`, o));
 
@@ -560,7 +617,15 @@ class DjangoSyncService {
               continue;
             }
 
-            await this.applyRemoteDjangoRow(ent.type, row);
+            if (bridge) {
+              await bridge.applyRemoteSyncEntity({
+                token: desktopSession.requireToken(),
+                entityType: ent.type,
+                row,
+              });
+            } else {
+              await this.applyRemoteDjangoRow(ent.type, row);
+            }
             pulledCount++;
           }
 
@@ -585,6 +650,9 @@ class DjangoSyncService {
       config.lastSyncedAt = latestServerCursor;
     }
     this.saveConfig(config);
+    if (bridge && pulledCount > 0) {
+      desktopSession.notifyChanged(['all']);
+    }
 
     return {
       pulled: pulledCount,

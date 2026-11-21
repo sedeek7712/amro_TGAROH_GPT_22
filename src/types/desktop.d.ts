@@ -336,6 +336,33 @@ declare global {
         row: Record<string, unknown>;
       }): Promise<void>;
 
+      getDiagnosticLog(input: { token: string; maxLines?: number }): Promise<{
+        logFilePath: string;
+        totalLines: number;
+        entries: Array<{
+          timestamp: string;
+          level: string;
+          category: string;
+          message: string;
+          meta?: unknown;
+        }>;
+        runtime: {
+          ready: boolean;
+          schemaVersion: number;
+          sqliteVersion: string;
+          appVersion: string;
+          isPackaged: boolean;
+          platform: string;
+          arch: string;
+        };
+      }>;
+      exportDiagnosticLogDialog(input: { token: string }): Promise<{
+        canceled: boolean;
+        path?: string;
+        filename?: string;
+        entryCount?: number;
+      }>;
+
       onDataChanged(callback: (domains: string[]) => void): () => void;
       onAuthInvalidated(callback: (reason: string) => void): () => void;
     };

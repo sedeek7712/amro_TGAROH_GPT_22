@@ -23,7 +23,6 @@ import {
 } from 'lucide-react';
 import { SalesBarChart } from '../charts/SalesBarChart';
 import { DonutChart } from '../charts/DonutChart';
-import { storage } from '../../services/storageService';
 import {
   useLiveInvoices,
   useLiveCashBoxes,
@@ -541,7 +540,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
       )}
 
       {/* Zero Mock Operations State & System Welcome */}
-      {invoices.length === 0 && storage.getProducts().length === 0 && (
+      {invoices.length === 0 && liveProducts.length === 0 && (
         <div className="bg-slate-50 rounded-xl border-2 border-dashed border-slate-300 p-8 text-center max-w-2xl mx-auto">
           <div className="w-12 h-12 rounded-full bg-emerald-100 text-emerald-800 flex items-center justify-center mx-auto mb-3">
             <Package className="w-6 h-6" />

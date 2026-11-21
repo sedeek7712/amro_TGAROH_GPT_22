@@ -168,7 +168,14 @@ export interface IDataService {
   resetToCleanBooks(): Promise<void>;
 }
 
-// تصدير تطبيق DexieDataService كخدمة البيانات المعيارية المستقلة
+// تصدير تطبيق خدمة البيانات الموحدة: SQLite في نسخة Windows/Electron و Dexie في الويب
 import { dexieDataService, DexieDataService } from './dexieDataService';
-export const dataService: IDataService = dexieDataService;
-export { dexieDataService, DexieDataService };
+import { sqliteDataService, SqliteDataService } from './sqliteDataService';
+
+const isElectronDesktop =
+  typeof window !== 'undefined' && Boolean((window as Window).amroDesktop);
+
+export const dataService: IDataService = isElectronDesktop
+  ? sqliteDataService
+  : dexieDataService;
+export { dexieDataService, DexieDataService, sqliteDataService, SqliteDataService };

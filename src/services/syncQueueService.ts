@@ -12,8 +12,13 @@
 import { db } from '../db/erpDatabase';
 import { OutboxQueueItem, SyncConflict } from '../types/erp';
 import { authService } from './authService';
+import { desktopSession } from './desktopSession';
 import { PermissionError } from '../config/rbac';
 import { storage } from './storageService';
+
+function getDesktopBridge() {
+  return typeof window !== 'undefined' ? window.amroDesktop : undefined;
+}
 
 export interface QueueStats {
   total: number;
@@ -92,6 +97,30 @@ class SyncQueueService {
       throw new PermissionError('حظر عزل الفروع: لا يمكن إنشاء عنصر لفرع غير مصرح به.', 'branch:access');
     }
     const tenantId = authenticatedTenantId;
+
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      const item = await bridge.queueOutboxItem({
+        token: desktopSession.requireToken(),
+        item: {
+          entityType: params.entityType,
+          entityId: params.entityId,
+          action: params.action,
+          payload: params.payload,
+          priority: params.priority,
+          idempotencyKey: params.idempotencyKey,
+          tenantId,
+          branchId,
+          dependsOn: params.dependsOn,
+        },
+      });
+      if (!item) {
+        throw new Error('تعذر تسجيل عنصر المزامنة في قاعدة بيانات SQLite.');
+      }
+      desktopSession.notifyChanged(['outbox']);
+      this.notifySubscribers();
+      return item;
+    }
 
     // مفتاح حتمي ثابت ومستقر: يعتمد على المؤسسة، نوع الكيان، معرّفه الثابت والإجراء
     const idempotencyKey =
@@ -185,6 +214,15 @@ class SyncQueueService {
    */
   public async getReadyToSyncItems(limit = 50): Promise<OutboxQueueItem[]> {
     const nowIso = new Date().toISOString();
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      const allItems = await bridge.getOutboxQueue({
+        token: desktopSession.requireToken(),
+        statusFilter: 'all',
+        sortDir: 'asc',
+      });
+      return this.filterAndSortReadyItems(allItems, nowIso, limit);
+    }
     const allItems = await db.outbox.toArray();
     return this.filterAndSortReadyItems(allItems, nowIso, limit);
   }
@@ -199,6 +237,20 @@ class SyncQueueService {
     leaseMs = 180_000
   ): Promise<OutboxQueueItem[]> {
     const owner = workerId.trim() || 'worker_default';
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      const claimed = await bridge.claimReadyToSyncItems({
+        token: desktopSession.requireToken(),
+        workerId: owner,
+        limit,
+        leaseMs,
+      });
+      if (claimed.length > 0) {
+        desktopSession.notifyChanged(['outbox']);
+        this.notifySubscribers();
+      }
+      return claimed;
+    }
     const claimed = await db.transaction('rw', db.outbox, async () => {
       const nowMs = Date.now();
       const nowIso = new Date(nowMs).toISOString();
@@ -247,6 +299,9 @@ class SyncQueueService {
    * تعليم مجموعة عناصر بأنها قيد المزامنة حالياً لمنع التكرار
    */
   public async markSyncing(ids: string[], workerId = 'worker_default', leaseMs = 180_000): Promise<void> {
+    if (getDesktopBridge()) {
+      return;
+    }
     const nowMs = Date.now();
     const now = new Date(nowMs).toISOString();
     const leaseExpiresAt = new Date(nowMs + leaseMs).toISOString();
@@ -269,6 +324,19 @@ class SyncQueueService {
    * استعادة السجلات العالقة بحالة SYNCING عند تشغيل التطبيق أو انتهاء مهلة الحجز (Lease Expiry)
    */
   public async recoverStuckSyncingItems(leaseTimeoutMinutes = 2): Promise<number> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      if (!desktopSession.getToken()) return 0;
+      const recovered = await bridge.recoverStuckSyncingItems({
+        token: desktopSession.requireToken(),
+        leaseTimeoutMinutes,
+      });
+      if (recovered > 0) {
+        desktopSession.notifyChanged(['outbox']);
+        this.notifySubscribers();
+      }
+      return recovered;
+    }
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     const cutoffTime = new Date(nowMs - leaseTimeoutMinutes * 60 * 1000).toISOString();
@@ -305,6 +373,17 @@ class SyncQueueService {
    * تأكيد نجاح المزامنة بعد استلام إقرار مؤكد وصريح من الخادم
    */
   public async markSynced(id: string, serverTimestamp?: string): Promise<void> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      await bridge.markOutboxSynced({
+        token: desktopSession.requireToken(),
+        id,
+        serverTimestamp,
+      });
+      desktopSession.notifyChanged(['outbox']);
+      this.notifySubscribers();
+      return;
+    }
     await db.transaction('rw', db.outbox, async () => {
       const item = await db.outbox.get(id);
       if (item) {
@@ -323,6 +402,18 @@ class SyncQueueService {
    * تسجيل فشل المزامنة وتطبيق خوارزمية التراجع الأسي (Exponential Backoff)
    */
   public async markFailed(id: string, errorMessage: string, isPermanent = false): Promise<void> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      await bridge.markOutboxFailed({
+        token: desktopSession.requireToken(),
+        id,
+        errorMessage,
+        isPermanent,
+      });
+      desktopSession.notifyChanged(['outbox']);
+      this.notifySubscribers();
+      return;
+    }
     await db.transaction('rw', db.outbox, async () => {
       const item = await db.outbox.get(id);
       if (!item) return;
@@ -354,6 +445,15 @@ class SyncQueueService {
    * إعادة ضبط العناصر الفاشلة للتمكن من إعادة محاولتها يدوياً
    */
   public async retryFailedItems(): Promise<number> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      const count = await bridge.retryFailedItems({ token: desktopSession.requireToken() });
+      if (count > 0) {
+        desktopSession.notifyChanged(['outbox']);
+        this.notifySubscribers();
+      }
+      return count;
+    }
     const count = await db.transaction('rw', db.outbox, async () => {
       const failedItems = await db.outbox.where('status').equals('FAILED').toArray();
       let updatedCount = 0;
@@ -376,6 +476,12 @@ class SyncQueueService {
    * إحصائيات حية لطابور الإرسال
    */
   public async getStats(): Promise<QueueStats> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      const token = desktopSession.getToken();
+      if (!token) return { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 };
+      return await bridge.getOutboxStats({ token });
+    }
     const items = await db.outbox.toArray();
     const stats: QueueStats = {
       total: items.length,
@@ -400,6 +506,18 @@ class SyncQueueService {
    * تحذير: لا يمس السجلات المعلقة أو الفاشلة مطلقاً!
    */
   public async purgeOldSyncedRecords(olderThanDays = 30): Promise<number> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      const count = await bridge.purgeOldSyncedRecords({
+        token: desktopSession.requireToken(),
+        olderThanDays,
+      });
+      if (count > 0) {
+        desktopSession.notifyChanged(['outbox']);
+        this.notifySubscribers();
+      }
+      return count;
+    }
     const cutoffDate = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000).toISOString();
     const oldSynced = await db.outbox
       .where('status')
@@ -437,6 +555,24 @@ class SyncQueueService {
     if (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(branchId)) {
       throw new PermissionError('حظر عزل الفروع: التعارض تابع لفرع غير مصرح به.', 'branch:access');
     }
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      const conflict = await bridge.recordConflict({
+        token: desktopSession.requireToken(),
+        params: {
+          tenantId,
+          branchId,
+          entityType: params.entityType,
+          entityId: params.entityId,
+          localPayload: params.localPayload,
+          remotePayload: params.remotePayload,
+          notes: params.notes,
+        },
+      });
+      desktopSession.notifyChanged(['syncConflicts']);
+      return conflict;
+    }
+
     const conflict: SyncConflict = {
       id: storage.generateUUID(),
       tenantId,
@@ -459,6 +595,10 @@ class SyncQueueService {
    * استرجاع كافة التعارضات المسجلة
    */
   public async getConflicts(): Promise<SyncConflict[]> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      return await bridge.getConflicts({ token: desktopSession.requireToken() });
+    }
     const tenantId = this.getCurrentTenantId(true);
     const session = authService.getCurrentSessionSync();
     if (!session) throw new PermissionError('حظر أمني: يلزم تسجيل الدخول لعرض التعارضات.', 'sync:manage');
@@ -476,6 +616,17 @@ class SyncQueueService {
     status: SyncConflict['status'],
     notes?: string
   ): Promise<void> {
+    const bridge = getDesktopBridge();
+    if (bridge) {
+      await bridge.resolveConflict({
+        token: desktopSession.requireToken(),
+        conflictId,
+        status,
+        notes,
+      });
+      desktopSession.notifyChanged(['syncConflicts', 'auditLogs']);
+      return;
+    }
     const tenantId = this.getCurrentTenantId(true);
     const session = authService.getCurrentSessionSync();
     if (!session) throw new PermissionError('حظر أمني: يلزم تسجيل الدخول لتسوية التعارض.', 'sync:manage');
@@ -496,9 +647,17 @@ class SyncQueueService {
    */
   public subscribe(callback: QueueSubscriber): () => void {
     this.subscribers.add(callback);
-    this.getStats().then((s) => callback(s));
+    this.getStats().then((s) => callback(s)).catch(() => {});
+    const unsubDesktop = getDesktopBridge()
+      ? desktopSession.subscribe((domains) => {
+          if (domains.includes('outbox') || domains.includes('all') || domains.includes('session')) {
+            this.getStats().then((s) => callback(s)).catch(() => {});
+          }
+        })
+      : null;
     return () => {
       this.subscribers.delete(callback);
+      if (unsubDesktop) unsubDesktop();
     };
   }
 

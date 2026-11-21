@@ -10,11 +10,19 @@ const loginRouter = read('src/components/auth/LoginScreen.tsx');
 const desktopLogin = read('src/components/auth/DesktopLoginScreen.tsx');
 const adapter = read('src/services/desktopAuthAdapter.ts');
 
+const dataServiceSource = read('src/services/dataService.ts');
+
 if (!/if\s*\(isDesktopRuntime\)\s*return;[\s\S]{0,220}dexieDataService\.initialize\(\)/.test(app)) {
   failures.push('Windows runtime must not initialize the Dexie application database.');
 }
-if (!/if\s*\(isDesktopRuntime\)\s*\{[\s\S]{0,900}واجهة البيع والمخزون والمحاسبة لم تُربط بعد بخدمات SQLite/.test(app)) {
-  failures.push('Windows must keep financial screens gated until the SQLite data provider is connected.');
+if (/واجهة البيع والمخزون والمحاسبة لم تُربط بعد بخدمات SQLite/.test(app)) {
+  failures.push('Temporary desktop blocker banner must be removed once SQLite data provider cutover is active.');
+}
+if (!/desktopSession\.hydrate\s*\(/.test(app) || !/onAuthInvalidated/.test(app)) {
+  failures.push('App.tsx must hydrate desktopSession on desktop login and subscribe to onAuthInvalidated.');
+}
+if (!/sqliteDataService/.test(dataServiceSource) || !/amroDesktop/.test(dataServiceSource) || !/\?\s*sqliteDataService\s*:\s*dexieDataService/.test(dataServiceSource)) {
+  failures.push('dataService.ts must select sqliteDataService in Electron runtime while keeping dexieDataService on Web.');
 }
 if (!/desktopAuthAdapter\.isAvailable\(\)/.test(loginRouter) || !/DesktopLoginScreen/.test(loginRouter)) {
   failures.push('Login router must select the dedicated Electron authentication screen.');
@@ -40,9 +48,9 @@ if (!/if\s*\(typeof window !== 'undefined' && window\.amroDesktop\) return;[\s\S
 }
 
 if (failures.length) {
-  console.error('FAIL: desktop authentication boundary');
+  console.error('FAIL: desktop authentication & SQLite cutover boundary');
   failures.forEach((message) => console.error(' - ' + message));
   process.exitCode = 1;
 } else {
-  console.log('PASS: Windows authentication is isolated from Dexie and browser session storage; financial UI remains gated.');
+  console.log('PASS: Windows authentication & SQLite data provider are isolated from Dexie and browser session storage.');
 }

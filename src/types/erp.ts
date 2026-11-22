@@ -82,6 +82,18 @@ export interface Product {
 export type AmanatType = 'CASH' | 'ITEM';
 export type AmanatStatus = 'HELD' | 'RETURNED' | 'CANCELLED';
 
+export interface AmanatReturnEvent {
+  id: string;
+  date: string;
+  amount: number;
+  cashBoxId?: string;
+  journalEntryId?: string;
+  recipientSignatureName?: string;
+  notes?: string;
+  createdBy?: string;
+  createdByName?: string;
+}
+
 export interface AmanatRecord {
   id: string;                   // UUID v4
   branchId?: string;            // الفرع المالك لسجل الأمانة
@@ -90,7 +102,10 @@ export interface AmanatRecord {
   depositorPhone: string;       // رقم الهاتف
   depositorNationalId?: string; // رقم الهوية إن وجد
   type: AmanatType;             // نقدية أم عينية
-  amount: number;               // المبلغ للأمانة النقدية
+  amount: number;               // المبلغ الإجمالي للأمانة النقدية
+  returnedAmount?: number;      // إجمالي المبلغ المردود حتى الآن
+  remainingAmount?: number;     // المتبقي من الأمانة النقدية
+  returnHistory?: AmanatReturnEvent[]; // سجل دفعات الرد الجزئي/الكلي
   cashBoxId?: string;           // الصندوق المحفوظ به إن كانت نقدية
   itemDescription?: string;     // وصف الصنف العيني ومواصفاته
   itemSerial?: string;          // الرقم التسلسلي للصنف العيني
@@ -98,11 +113,14 @@ export interface AmanatRecord {
   status: AmanatStatus;         // محفوظة، مستردة، ملغاة
   receivedDate: string;         // تاريخ الاستلام
   expectedReturnDate?: string;  // تاريخ الإرجاع المتوقع
-  returnedDate?: string;        // تاريخ الإرجاع الفعلي
+  returnedDate?: string;        // تاريخ الإرجاع النهائي الفعلي
+  cancelledDate?: string;       // تاريخ الإلغاء
+  cancelledReason?: string;     // سبب الإلغاء الموثق
   receivedBy: string;           // الموظف المستلم
   recipientSignatureName?: string; // اسم وتوقيع المستلم عند الإرجاع
   notes?: string;               // ملاحظات الحفظ
-  journalEntryId?: string;      // معرّف القيد المحاسبي (للأمانات النقدية فقط)
+  journalEntryId?: string;      // معرّف القيد المحاسبي للإيداع (للأمانات النقدية فقط)
+  returnJournalEntryId?: string; // معرّف آخر قيد رد/عكس أمانة
 }
 
 export type PartyType = 'CUSTOMER' | 'SUPPLIER';
@@ -172,6 +190,10 @@ export interface Invoice {
   status?: 'POSTED' | 'REVERSED';
   reversedByJournalId?: string;
   reversalReason?: string;
+  originalInvoiceId?: string;     // معرف الفاتورة الأصلية في حالة المرتجع
+  originalInvoiceNumber?: string; // رقم الفاتورة الأصلية في حالة المرتجع
+  returnReason?: string;          // سبب المرتجع الموثق
+  returnedAmount?: number;        // إجمالي المبالغ المخصومة/المرتجعة المرتبطة بالفاتورة الأصلية
   totalCogs?: number;
   stockDeductionsRecorded?: StockDeductionRecorded[];
 }
@@ -384,6 +406,12 @@ export interface SystemAuditLog {
   userName: string;
   action: string;
   details: string;
+  entityType?: string;
+  entityId?: string;
+  previousValue?: unknown;
+  newValue?: unknown;
+  reason?: string;
+  result?: 'SUCCESS' | 'FAILURE';
 }
 
 export interface OutboxQueueItem {

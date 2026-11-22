@@ -311,7 +311,54 @@ export function createDesktopBackend({
     createPurchaseInvoiceAtomic({ token, params }) {
       const actor = requireActor(token);
       const result = financial.createPurchaseInvoiceAtomic(actor, params);
-      onDataChanged(['invoices', 'products', 'parties', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
+      onDataChanged([
+        'invoices',
+        'products',
+        'parties',
+        'cashBoxes',
+        'accounts',
+        'journalEntries',
+        'paymentAllocations',
+        'partyAdvances',
+        'outbox',
+        'auditLogs',
+      ]);
+      return result;
+    },
+
+    createSalesReturnAtomic({ token, params }) {
+      const actor = requireActor(token);
+      const result = financial.createSalesReturnAtomic(actor, params);
+      onDataChanged([
+        'invoices',
+        'products',
+        'parties',
+        'cashBoxes',
+        'accounts',
+        'journalEntries',
+        'paymentAllocations',
+        'partyAdvances',
+        'outbox',
+        'auditLogs',
+      ]);
+      return result;
+    },
+
+    createPurchaseReturnAtomic({ token, params }) {
+      const actor = requireActor(token);
+      const result = financial.createPurchaseReturnAtomic(actor, params);
+      onDataChanged([
+        'invoices',
+        'products',
+        'parties',
+        'cashBoxes',
+        'accounts',
+        'journalEntries',
+        'paymentAllocations',
+        'partyAdvances',
+        'outbox',
+        'auditLogs',
+      ]);
       return result;
     },
 
@@ -430,6 +477,13 @@ export function createDesktopBackend({
     returnAmanatAtomic({ token, params }) {
       const actor = requireActor(token);
       const result = financial.returnAmanatAtomic(actor, params);
+      onDataChanged(['amanat', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
+      return result;
+    },
+
+    cancelAmanatAtomic({ token, params }) {
+      const actor = requireActor(token);
+      const result = financial.cancelAmanatAtomic(actor, params);
       onDataChanged(['amanat', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
       return result;
     },

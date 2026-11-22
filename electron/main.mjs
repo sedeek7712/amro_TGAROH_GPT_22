@@ -518,6 +518,16 @@ if (!hasSingleInstance) {
       return desktopBackend.createPurchaseInvoiceAtomic({ token: input?.token, params: input?.params });
     });
 
+    ipcMain.handle('erp:finance:create-sales-return', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.createSalesReturnAtomic({ token: input?.token, params: input?.params });
+    });
+
+    ipcMain.handle('erp:finance:create-purchase-return', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.createPurchaseReturnAtomic({ token: input?.token, params: input?.params });
+    });
+
     ipcMain.handle('erp:finance:get-cash-boxes', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.getCashBoxes({ token: input?.token });
@@ -596,6 +606,11 @@ if (!hasSingleInstance) {
     ipcMain.handle('erp:finance:return-amanat', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.returnAmanatAtomic({ token: input?.token, params: input?.params });
+    });
+
+    ipcMain.handle('erp:finance:cancel-amanat', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.cancelAmanatAtomic({ token: input?.token, params: input?.params });
     });
 
     ipcMain.handle('erp:finance:update-amanat', (event, input) => {

@@ -3,7 +3,7 @@
  * إدارة معزولة للمبالغ والأصناف المحفوظة وسندات الاستلام والإبراء
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   ShieldCheck,
   Plus,
@@ -19,11 +19,12 @@ import {
   AlertCircle,
   X,
   Check,
+  Ban,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { dataService } from '../../services/dataService';
 import { authService } from '../../services/authService';
-import { getActiveCurrencyConfig } from '../../config/currency';
+import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveAmanatRecords, useLiveCashBoxes } from '../../hooks/useLiveDexie';
 import { AmanatRecord, AmanatType, AmanatStatus } from '../../types/erp';
 import { AmanatReceiptModal } from '../common/AmanatReceiptModal';
@@ -38,6 +39,12 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
   const [isDepositModalOpen, setIsDepositModalOpen] = useState(false);
   const [selectedRecordToPrint, setSelectedRecordToPrint] = useState<AmanatRecord | null>(null);
   const [returnConfirmRecord, setReturnConfirmRecord] = useState<AmanatRecord | null>(null);
+  const [returnAmountInput, setReturnAmountInput] = useState<string>('');
+  const [returnCashBoxId, setReturnCashBoxId] = useState<string>('');
+  const [returnNotes, setReturnNotes] = useState<string>('');
+  const [cancelConfirmRecord, setCancelConfirmRecord] = useState<AmanatRecord | null>(null);
+  const [cancelReason, setCancelReason] = useState<string>('');
+  const [cancelError, setCancelError] = useState<string | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [returnError, setReturnError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -60,6 +67,28 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
     authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const currencySymbol = getActiveCurrencyConfig().symbol;
 
+  const defaultCashBoxId =
+    cashBoxes.find((b) => !b.isCentral && b.isDefault)?.id ||
+    cashBoxes.find((b) => !b.isCentral)?.id ||
+    cashBoxes[0]?.id ||
+    '';
+
+  useEffect(() => {
+    if (!cashBoxId && defaultCashBoxId) {
+      setCashBoxId(defaultCashBoxId);
+    }
+    if (!returnCashBoxId && defaultCashBoxId) {
+      setReturnCashBoxId(defaultCashBoxId);
+    }
+  }, [defaultCashBoxId, cashBoxId, returnCashBoxId]);
+
+  const getRecordRemaining = (r: AmanatRecord): number => {
+    if (r.type !== 'CASH') return 0;
+    if (r.status === 'CANCELLED') return 0;
+    if (r.remainingAmount !== undefined) return roundMoney(Math.max(0, r.remainingAmount));
+    return roundMoney(Math.max(0, r.amount - (r.returnedAmount || 0)));
+  };
+
   // تصفية السجلات
   const filteredRecords = records.filter((r) => {
     const q = searchQuery.toLowerCase();
@@ -79,10 +108,10 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
     return true;
   });
 
-  // إحصائيات الأمانات
+  // إحصائيات الأمانات (تحسب المتبقي الفعلي بعد الرد الجزئي)
   const heldCashTotal = records
     .filter((r) => r.status === 'HELD' && r.type === 'CASH')
-    .reduce((sum, r) => sum + r.amount, 0);
+    .reduce((sum, r) => sum + getRecordRemaining(r), 0);
 
   const heldItemsCount = records.filter((r) => r.status === 'HELD' && r.type === 'ITEM').length;
   const returnedCount = records.filter((r) => r.status === 'RETURNED').length;
@@ -102,7 +131,7 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
       return;
     }
 
-    const targetBox = depositType === 'CASH' ? cashBoxId || cashBoxes[0]?.id || 'cb-1' : undefined;
+    const targetBox = depositType === 'CASH' ? cashBoxId || defaultCashBoxId : undefined;
     const newRecord: AmanatRecord = {
       id: storage.generateUUID(),
       recordNumber: '',
@@ -146,32 +175,76 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
     }
   };
 
-  // فتح نافذة تأكيد تسليم الأمانة وإبراء الذمة
+  // فتح نافذة تأكيد تسليم / رد جزئي للأمانة
   const handleReturnAmanat = (record: AmanatRecord) => {
+    const rem = getRecordRemaining(record);
     setReturnError(null);
+    setReturnAmountInput(record.type === 'CASH' ? String(rem) : '');
+    setReturnCashBoxId(record.cashBoxId || defaultCashBoxId);
+    setReturnNotes('');
     setReturnConfirmRecord(record);
   };
 
-  // تنفيذ تسليم الأمانة بعد التأكيد في الواجهة
+  // تنفيذ تسليم / رد الأمانة بعد التأكيد في الواجهة
   const confirmReturnAmanat = async () => {
     if (!returnConfirmRecord || isSubmitting) return;
     const record = returnConfirmRecord;
+    const rem = getRecordRemaining(record);
+    const parsedReturn = record.type === 'CASH' ? roundMoney(Number(returnAmountInput) || 0) : 0;
+
+    if (record.type === 'CASH' && (parsedReturn <= 0 || parsedReturn > rem + 0.001)) {
+      setReturnError(`يرجى إدخال مبلغ رد صحيح بين 0.01 و ${rem.toFixed(2)} ${currencySymbol}.`);
+      return;
+    }
+
     setReturnError(null);
     setIsSubmitting(true);
 
     try {
       const targetBox =
-        record.type === 'CASH' ? record.cashBoxId || cashBoxes[0]?.id || 'cb-1' : undefined;
+        record.type === 'CASH' ? returnCashBoxId || record.cashBoxId || defaultCashBoxId : undefined;
       const res = await dataService.returnAmanatAtomic({
         recordId: record.id,
         cashBoxId: targetBox,
+        returnAmount: record.type === 'CASH' ? parsedReturn : undefined,
         recipientSignatureName: record.depositorName,
+        notes: returnNotes.trim() || undefined,
       });
       setSelectedRecordToPrint(res.record);
       setReturnConfirmRecord(null);
       onRefresh();
     } catch (err: unknown) {
       setReturnError(err instanceof Error ? err.message : 'تعذر تنفيذ عملية تسليم الأمانة.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleOpenCancelAmanat = (record: AmanatRecord) => {
+    setCancelError(null);
+    setCancelReason('');
+    setCancelConfirmRecord(record);
+  };
+
+  const confirmCancelAmanat = async () => {
+    if (!cancelConfirmRecord || isSubmitting) return;
+    if (!cancelReason.trim()) {
+      setCancelError('سبب إلغاء سند الأمانة مطلوب لتوثيق القيد العكسي وسجل التدقيق.');
+      return;
+    }
+    setCancelError(null);
+    setIsSubmitting(true);
+    try {
+      const res = await dataService.cancelAmanatAtomic({
+        recordId: cancelConfirmRecord.id,
+        reason: cancelReason.trim(),
+      });
+      setSelectedRecordToPrint(res.record);
+      setCancelConfirmRecord(null);
+      setCancelReason('');
+      onRefresh();
+    } catch (err: unknown) {
+      setCancelError(err instanceof Error ? err.message : 'تعذر إلغاء سند الأمانة.');
     } finally {
       setIsSubmitting(false);
     }
@@ -255,6 +328,16 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
               المستردة والمسلمة
             </button>
             <button
+              onClick={() => setFilterStatus('CANCELLED')}
+              className={`px-3 py-1.5 rounded-md font-semibold transition-all ${
+                filterStatus === 'CANCELLED'
+                  ? 'bg-white text-purple-900 shadow-sm'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              الملغاة
+            </button>
+            <button
               onClick={() => setFilterStatus('ALL')}
               className={`px-3 py-1.5 rounded-md font-semibold transition-all ${
                 filterStatus === 'ALL' ? 'bg-white text-purple-900 shadow-sm' : 'text-slate-600 hover:text-slate-900'
@@ -300,76 +383,111 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
                   </td>
                 </tr>
               ) : (
-                filteredRecords.map((r) => (
-                  <tr key={r.id} className="hover:bg-slate-50/80 transition-colors">
-                    <td className="py-3 px-4 font-mono font-bold text-slate-900">{r.recordNumber}</td>
-                    <td className="py-3 px-4">
-                      <div className="font-bold text-slate-900">{r.depositorName}</div>
-                      <div className="text-[11px] text-slate-500 font-mono">{r.depositorPhone}</div>
-                    </td>
-                    <td className="py-3 px-4">
-                      <span
-                        className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold ${
-                          r.type === 'CASH'
-                            ? 'bg-purple-100 text-purple-800'
-                            : 'bg-blue-100 text-blue-800'
-                        }`}
-                      >
-                        {r.type === 'CASH' ? 'أمانة نقدية' : 'أمانة عينية'}
-                      </span>
-                    </td>
-                    <td className="py-3 px-4">
-                      {r.type === 'CASH' ? (
-                        <div className="font-mono tabular-nums font-bold text-slate-900 text-sm">
-                          {r.amount.toFixed(2)} {currencySymbol}
-                        </div>
-                      ) : (
-                        <div>
-                          <div className="font-medium text-slate-900 line-clamp-1">{r.itemDescription}</div>
-                          {r.itemSerial && (
-                            <div className="text-[10px] text-slate-400 font-mono">سيريال: {r.itemSerial}</div>
+                filteredRecords.map((r) => {
+                  const returnedAmt = roundMoney(r.returnedAmount || 0);
+                  const remainingAmt = getRecordRemaining(r);
+                  return (
+                    <tr key={r.id} className="hover:bg-slate-50/80 transition-colors">
+                      <td className="py-3 px-4 font-mono font-bold text-slate-900">{r.recordNumber}</td>
+                      <td className="py-3 px-4">
+                        <div className="font-bold text-slate-900">{r.depositorName}</div>
+                        <div className="text-[11px] text-slate-500 font-mono">{r.depositorPhone}</div>
+                      </td>
+                      <td className="py-3 px-4">
+                        <span
+                          className={`inline-block px-2 py-0.5 rounded text-[11px] font-semibold ${
+                            r.type === 'CASH'
+                              ? 'bg-purple-100 text-purple-800'
+                              : 'bg-blue-100 text-blue-800'
+                          }`}
+                        >
+                          {r.type === 'CASH' ? 'أمانة نقدية' : 'أمانة عينية'}
+                        </span>
+                      </td>
+                      <td className="py-3 px-4">
+                        {r.type === 'CASH' ? (
+                          <div>
+                            <div className="font-mono tabular-nums font-bold text-slate-900 text-sm">
+                              {r.amount.toFixed(2)} {currencySymbol}
+                            </div>
+                            {(returnedAmt > 0 || (r.status === 'HELD' && remainingAmt !== r.amount)) && (
+                              <div className="text-[10px] font-mono text-slate-600 mt-0.5">
+                                مردود: {returnedAmt.toFixed(2)} | متبقٍ:{' '}
+                                <strong className="text-purple-800">{remainingAmt.toFixed(2)}</strong>
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <div>
+                            <div className="font-medium text-slate-900 line-clamp-1">{r.itemDescription}</div>
+                            {r.itemSerial && (
+                              <div className="text-[10px] text-slate-400 font-mono">سيريال: {r.itemSerial}</div>
+                            )}
+                          </div>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center font-mono text-slate-600">{r.receivedDate}</td>
+                      <td className="py-3 px-4 text-center">
+                        <span
+                          className={`inline-block px-2.5 py-0.5 rounded-full font-bold text-[10px] ${
+                            r.status === 'HELD'
+                              ? 'bg-amber-100 text-amber-900'
+                              : r.status === 'RETURNED'
+                              ? 'bg-emerald-100 text-emerald-900'
+                              : 'bg-slate-200 text-slate-700'
+                          }`}
+                        >
+                          {r.status === 'HELD'
+                            ? returnedAmt > 0
+                              ? 'رد جزئي - محفوظ الباقي'
+                              : 'محفوظة في الأمانات'
+                            : r.status === 'RETURNED'
+                            ? 'تم تسليمها وإبراء الذمة'
+                            : 'ملغاة'}
+                        </span>
+                        {r.returnedDate && (
+                          <div className="text-[10px] text-slate-400 mt-0.5 font-mono">بتاريخ: {r.returnedDate}</div>
+                        )}
+                        {r.cancelledDate && (
+                          <div className="text-[10px] text-rose-500 mt-0.5 font-mono">ألغيت: {r.cancelledDate}</div>
+                        )}
+                      </td>
+                      <td className="py-3 px-4 text-center text-slate-600">{r.receivedBy}</td>
+                      <td className="py-3 px-4 text-center">
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            onClick={() => setSelectedRecordToPrint(r)}
+                            className="p-1.5 text-slate-600 hover:text-purple-700 hover:bg-slate-100 rounded-md transition-colors"
+                            title="طباعة السند الرسمي"
+                          >
+                            <Printer className="w-3.5 h-3.5" />
+                          </button>
+                          {r.status === 'HELD' && (
+                            <>
+                              <button
+                                onClick={() => handleReturnAmanat(r)}
+                                className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-bold transition-colors"
+                                title="تسليم / رد جزئي أو كلي"
+                              >
+                                {r.type === 'CASH' ? 'تسليم / رد' : 'تسليم'}
+                              </button>
+                              {returnedAmt === 0 && (
+                                <button
+                                  onClick={() => handleOpenCancelAmanat(r)}
+                                  className="px-2 py-1 bg-slate-200 hover:bg-rose-100 hover:text-rose-800 text-slate-700 rounded text-[11px] font-bold transition-colors flex items-center gap-0.5"
+                                  title="إلغاء سند الأمانة"
+                                >
+                                  <Ban className="w-3 h-3" />
+                                  <span>إلغاء</span>
+                                </button>
+                              )}
+                            </>
                           )}
                         </div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-center font-mono text-slate-600">{r.receivedDate}</td>
-                    <td className="py-3 px-4 text-center">
-                      <span
-                        className={`inline-block px-2.5 py-0.5 rounded-full font-bold text-[10px] ${
-                          r.status === 'HELD'
-                            ? 'bg-amber-100 text-amber-900'
-                            : 'bg-emerald-100 text-emerald-900'
-                        }`}
-                      >
-                        {r.status === 'HELD' ? 'محفوظة في الأمانات' : 'تم تسليمها وإبراء الذمة'}
-                      </span>
-                      {r.returnedDate && (
-                        <div className="text-[10px] text-slate-400 mt-0.5 font-mono">بتاريخ: {r.returnedDate}</div>
-                      )}
-                    </td>
-                    <td className="py-3 px-4 text-center text-slate-600">{r.receivedBy}</td>
-                    <td className="py-3 px-4 text-center">
-                      <div className="flex items-center justify-center gap-1.5">
-                        <button
-                          onClick={() => setSelectedRecordToPrint(r)}
-                          className="p-1.5 text-slate-600 hover:text-purple-700 hover:bg-slate-100 rounded-md transition-colors"
-                          title="طباعة السند الرسمي"
-                        >
-                          <Printer className="w-3.5 h-3.5" />
-                        </button>
-                        {r.status === 'HELD' && (
-                          <button
-                            onClick={() => handleReturnAmanat(r)}
-                            className="px-2 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded text-[11px] font-bold transition-colors"
-                            title="تسليم الأمانة وإبراء الذمة"
-                          >
-                            تسليم
-                          </button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -550,13 +668,15 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
         </div>
       )}
 
-      {/* Return Confirmation Modal */}
+      {/* Return Confirmation Modal (Partial or Full) */}
       {returnConfirmRecord && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
           <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
             <div className="flex items-center gap-3 text-amber-600">
               <ShieldCheck className="w-6 h-6 shrink-0" />
-              <h3 className="text-base font-bold text-slate-900">تأكيد تسليم الأمانة وإبراء الذمة</h3>
+              <h3 className="text-base font-bold text-slate-900">
+                {returnConfirmRecord.type === 'CASH' ? 'تسليم / رد أمانة نقدية' : 'تأكيد تسليم الأمانة وإبراء الذمة'}
+              </h3>
             </div>
             {returnError && (
               <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg text-xs flex items-center gap-2">
@@ -564,17 +684,64 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
                 <span>{returnError}</span>
               </div>
             )}
-            <p className="text-sm text-slate-600 leading-relaxed">
-              هل تؤكد تسليم وإبراء ذمة الأمانة رقم{' '}
-              <span className="font-mono font-bold text-slate-900">({returnConfirmRecord.recordNumber})</span>{' '}
-              لصالح المودع{' '}
-              <span className="font-bold text-slate-900">({returnConfirmRecord.depositorName})</span>؟
+            <div className="text-xs text-slate-600 leading-relaxed space-y-3">
+              <p>
+                الأمانة رقم{' '}
+                <span className="font-mono font-bold text-slate-900">({returnConfirmRecord.recordNumber})</span>{' '}
+                للمودع <span className="font-bold text-slate-900">({returnConfirmRecord.depositorName})</span>
+              </p>
+
               {returnConfirmRecord.type === 'CASH' && (
-                <span className="block mt-2 text-xs font-semibold text-purple-700 bg-purple-50 p-2 rounded">
-                  سيتم توليد قيد صرف محاسبي لتسوية التزام الأمانة وخفض الصندوق بمبلغ ({returnConfirmRecord.amount.toFixed(2)} {currencySymbol}).
-                </span>
+                <div className="p-3 bg-purple-50 border border-purple-200 rounded-lg space-y-2.5">
+                  <div className="flex justify-between text-[11px] font-semibold text-purple-900">
+                    <span>المبلغ الأصلي: {returnConfirmRecord.amount.toFixed(2)} {currencySymbol}</span>
+                    <span>
+                      المتبقي للرد:{' '}
+                      <strong className="font-mono">{getRecordRemaining(returnConfirmRecord).toFixed(2)} {currencySymbol}</strong>
+                    </span>
+                  </div>
+                  <div>
+                    <label className="block font-bold text-purple-950 mb-1">
+                      المبلغ المراد رده الآن ({currencySymbol}) *
+                    </label>
+                    <input
+                      type="number"
+                      step="any"
+                      min="0.01"
+                      max={getRecordRemaining(returnConfirmRecord)}
+                      value={returnAmountInput}
+                      onChange={(e) => setReturnAmountInput(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-white border border-purple-300 rounded font-mono font-bold text-slate-900"
+                    />
+                  </div>
+                  <div>
+                    <label className="block font-bold text-purple-950 mb-1">الصندوق المنصرف منه:</label>
+                    <select
+                      value={returnCashBoxId}
+                      onChange={(e) => setReturnCashBoxId(e.target.value)}
+                      className="w-full px-3 py-1.5 bg-white border border-purple-300 rounded text-slate-900"
+                    >
+                      {cashBoxes.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.nameAr} ({b.balance.toFixed(2)} {currencySymbol})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
               )}
-            </p>
+
+              <div>
+                <label className="block font-semibold text-slate-700 mb-1">ملاحظات التسليم (اختياري)</label>
+                <input
+                  type="text"
+                  value={returnNotes}
+                  onChange={(e) => setReturnNotes(e.target.value)}
+                  placeholder="تفاصيل الدفعة أو هوية المستلم..."
+                  className="w-full px-3 py-1.5 border border-slate-200 rounded text-slate-900"
+                />
+              </div>
+            </div>
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
               <button
                 type="button"
@@ -593,7 +760,64 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
                 className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white rounded-lg transition-colors text-xs font-bold flex items-center gap-1.5"
               >
                 <Check className="w-4 h-4" />
-                <span>{isSubmitting ? 'جارٍ التسليم...' : 'تأكيد التسليم والإبراء'}</span>
+                <span>{isSubmitting ? 'جارٍ التسليم...' : 'اعتماد التسليم'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel Amanat Modal */}
+      {cancelConfirmRecord && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <div className="flex items-center gap-3 text-rose-600">
+              <Ban className="w-6 h-6 shrink-0" />
+              <h3 className="text-base font-bold text-slate-900">إلغاء سند الأمانة</h3>
+            </div>
+            {cancelError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 rounded-lg text-xs flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                <span>{cancelError}</span>
+              </div>
+            )}
+            <p className="text-xs text-slate-600 leading-relaxed">
+              سيتم إلغاء الأمانة رقم{' '}
+              <span className="font-mono font-bold text-slate-900">({cancelConfirmRecord.recordNumber})</span>{' '}
+              {cancelConfirmRecord.type === 'CASH'
+                ? 'وعكس القيد المحاسبي المرتبط بها في حساب (2102) والصندوق.'
+                : 'وتحديث حالتها إلى ملغاة في سجل الأمانات.'}
+            </p>
+            <div>
+              <label className="block font-semibold text-slate-700 mb-1 text-xs">سبب الإلغاء (إلزامي) *</label>
+              <input
+                type="text"
+                required
+                value={cancelReason}
+                onChange={(e) => setCancelReason(e.target.value)}
+                placeholder="مثال: إدخال خاطئ / تراجع المودع قبل الحفظ..."
+                className="w-full px-3 py-2 border border-slate-200 rounded-lg text-xs text-slate-900"
+              />
+            </div>
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => {
+                  setCancelError(null);
+                  setCancelConfirmRecord(null);
+                }}
+                className="px-4 py-2 border border-slate-200 text-slate-600 rounded-lg hover:bg-slate-50 transition-colors text-xs font-semibold"
+              >
+                تراجع
+              </button>
+              <button
+                type="button"
+                disabled={isSubmitting}
+                onClick={confirmCancelAmanat}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-700 disabled:bg-slate-300 text-white rounded-lg transition-colors text-xs font-bold flex items-center gap-1.5"
+              >
+                <Ban className="w-4 h-4" />
+                <span>{isSubmitting ? 'جارٍ الإلغاء...' : 'تأكيد الإلغاء'}</span>
               </button>
             </div>
           </div>

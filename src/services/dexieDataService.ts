@@ -19,6 +19,7 @@ import {
   Product,
   Party,
   Invoice,
+  InvoiceItem,
   JournalEntry,
   JournalEntryLine,
   StockDeductionRecorded,
@@ -29,6 +30,7 @@ import {
   AllocationAudit,
   VoucherManualAllocationInput,
   AmanatRecord,
+  AmanatReturnEvent,
   SystemUser,
   SystemAuditLog,
   CostCenterId,
@@ -61,6 +63,7 @@ import {
 import {
   SPECIAL_ACCOUNTS,
   fromCents,
+  getInvoiceRemainingAmount,
   resolveVoucherAccountingPlan,
   toCents,
 } from '../../electron/sqlite/payment-allocation-engine.mjs';
@@ -494,12 +497,22 @@ export class DexieDataService implements IDataService {
     return created;
   }
 
+  private async resolveBranchDefaultCashBoxTx(branchId: string): Promise<CashBox> {
+    const boxes = await db.cashBoxes.toArray();
+    const branchBoxes = boxes.filter((b) => b.branchId === branchId && !b.isCentral);
+    const chosen = branchBoxes.find((b) => b.isDefault) || branchBoxes[0];
+    if (!chosen) {
+      throw new FinancialValidationError('لا يوجد صندوق نقدي مربوط بالفرع المحدد؛ يرجى إنشاء صندوق للفرع أولاً.');
+    }
+    return chosen;
+  }
+
   /**
    * توليد رقم تسلسلي ذري مضمون التفرد عبر جدول sequences (FIN-01)
    * يجب استدعاؤها من داخل معاملة Dexie تشمل db.sequences
    */
   private async allocateSequenceNumberAtomic(
-    type: 'INV' | 'PUR' | 'RCT' | 'PAY' | 'JV' | 'REV' | 'AMN',
+    type: 'INV' | 'PUR' | 'RS' | 'RP' | 'RCT' | 'PAY' | 'JV' | 'REV' | 'AMN',
     branchCode: string,
     terminalCode: string,
     tenantId: string
@@ -514,28 +527,26 @@ export class DexieDataService implements IDataService {
 
     // التأكد من عدم التصادم مع أرقام قديمة قبل وجود جدول العدادات
     if (!existing) {
+      const fullPrefix = `${type}-${normalizedBranch}-${normalizedTerminal}-${year}-`;
+      const legacyPrefix = `${type}-${year}-`;
       if (type === 'JV' || type === 'REV') {
-        const prefix = `${type}-${year}-`;
         const jvMatches = await db.journalEntries
-          .filter((j) => Boolean(j.entryNumber && j.entryNumber.startsWith(prefix)))
+          .filter((j) => Boolean(j.entryNumber && (j.entryNumber.startsWith(fullPrefix) || j.entryNumber.startsWith(legacyPrefix))))
           .count();
         baseline = Math.max(baseline, jvMatches);
-      } else if (type === 'INV' || type === 'PUR') {
-        const prefix = `${type}-${normalizedBranch}-${normalizedTerminal}-${year}-`;
+      } else if (type === 'INV' || type === 'PUR' || type === 'RS' || type === 'RP') {
         const invMatches = await db.invoices
-          .filter((i) => Boolean(i.invoiceNumber && i.invoiceNumber.startsWith(prefix)))
+          .filter((i) => Boolean(i.invoiceNumber && i.invoiceNumber.startsWith(fullPrefix)))
           .count();
         baseline = Math.max(baseline, invMatches);
       } else if (type === 'RCT' || type === 'PAY') {
-        const prefix = `${type}-${normalizedBranch}-${normalizedTerminal}-${year}-`;
         const vMatches = await db.vouchers
-          .filter((v) => Boolean(v.voucherNumber && v.voucherNumber.startsWith(prefix)))
+          .filter((v) => Boolean(v.voucherNumber && v.voucherNumber.startsWith(fullPrefix)))
           .count();
         baseline = Math.max(baseline, vMatches);
       } else if (type === 'AMN') {
-        const prefix = `AMN-${year}-`;
         const amnMatches = await db.amanatRecords
-          .filter((a) => Boolean(a.recordNumber && a.recordNumber.startsWith(prefix)))
+          .filter((a) => Boolean(a.recordNumber && (a.recordNumber.startsWith(fullPrefix) || a.recordNumber.startsWith(legacyPrefix))))
           .count();
         baseline = Math.max(baseline, amnMatches);
       }
@@ -549,9 +560,6 @@ export class DexieDataService implements IDataService {
     });
 
     const padded = String(nextValue).padStart(5, '0');
-    if (type === 'JV' || type === 'REV' || type === 'AMN') {
-      return `${type}-${year}-${padded}`;
-    }
     return `${type}-${normalizedBranch}-${normalizedTerminal}-${year}-${padded}`;
   }
 
@@ -642,12 +650,19 @@ export class DexieDataService implements IDataService {
   }
 
   public async generateBranchInvoiceNumber(
-    type: 'INV' | 'PUR',
+    type: 'INV' | 'PUR' | 'RS' | 'RP',
     branchCode?: string,
     terminalCode?: string
   ): Promise<string> {
     await this.ensureReady();
-    const permission = type === 'INV' ? 'pos:sale' : 'purchase:create';
+    const permission =
+      type === 'INV'
+        ? 'pos:sale'
+        : type === 'RS'
+        ? 'pos:return'
+        : type === 'RP'
+        ? 'purchase:return'
+        : 'purchase:create';
     const { tenantId, branchId } = this.requireAuthorizedActor(permission);
     const activeBranch = await db.branches.get(branchId);
     if (!activeBranch) throw new FinancialValidationError('الفرع المحدد غير موجود.');
@@ -2321,7 +2336,7 @@ export class DexieDataService implements IDataService {
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('amanat:manage');
 
     const { record, cashBoxId } = params;
-    const effectiveCashBoxId = cashBoxId || record.cashBoxId || 'cb-1';
+    const requestedCashBoxId = cashBoxId || record.cashBoxId;
     const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
     const terminalCode = storage.getTerminalCode();
 
@@ -2339,7 +2354,12 @@ export class DexieDataService implements IDataService {
           return { success: true, record: existing, journalEntry: existingJe };
         }
 
-        const cashBox = record.type === 'CASH' ? await db.cashBoxes.get(effectiveCashBoxId) : undefined;
+        const cashBox =
+          record.type === 'CASH'
+            ? requestedCashBoxId
+              ? await db.cashBoxes.get(requestedCashBoxId)
+              : await this.resolveBranchDefaultCashBoxTx(branchId)
+            : undefined;
         if (record.type === 'CASH') this.assertCashBoxBranchAccess(actor, cashBox, branchId);
         validateAmanatDepositInput({ record, cashBox });
 
@@ -2353,12 +2373,16 @@ export class DexieDataService implements IDataService {
         }
 
         let createdEntry: JournalEntry | undefined;
+        const cashAmt = record.type === 'CASH' ? roundMoney(record.amount) : 0;
         const persistedRecord: AmanatRecord = {
           ...record,
           branchId,
           status: 'HELD',
           cashBoxId: record.type === 'CASH' ? cashBox!.id : undefined,
-          amount: record.type === 'CASH' ? roundMoney(record.amount) : 0,
+          amount: cashAmt,
+          returnedAmount: 0,
+          remainingAmount: cashAmt,
+          returnHistory: [],
         };
 
         if (persistedRecord.type === 'CASH') {
@@ -2410,8 +2434,8 @@ export class DexieDataService implements IDataService {
             isAutoGenerated: true,
           };
 
-          const validCodes = await this.getValidAccountCodesSet();
-          validateJournalEntryInput({ entry: createdEntry, validAccountCodes: validCodes });
+          const accountsByCode = await this.getAccountsByCodeMap();
+          validateJournalEntryInput({ entry: createdEntry, accountsByCode });
 
           cashBox!.balance = roundMoney(cashBox!.balance + amount);
           await db.cashBoxes.put(cashBox!);
@@ -2471,6 +2495,10 @@ export class DexieDataService implements IDataService {
           branchId,
           action: `إيداع أمانة ${persistedRecord.type === 'CASH' ? 'نقدية' : 'عينية'}`,
           details: `سند أمانة ${persistedRecord.recordNumber} للمودع ${persistedRecord.depositorName}`,
+          entityType: 'AMANAT',
+          entityId: persistedRecord.id,
+          newValue: { status: persistedRecord.status, amount: persistedRecord.amount },
+          result: 'SUCCESS',
         });
 
         return { success: true, record: persistedRecord, journalEntry: createdEntry };
@@ -2481,10 +2509,12 @@ export class DexieDataService implements IDataService {
   public async returnAmanatAtomic(params: {
     recordId: string;
     cashBoxId?: string;
+    returnAmount?: number;
     recipientSignatureName?: string;
+    notes?: string;
   }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }> {
     await this.ensureReady();
-    const { actor, tenantId, branchId } = this.requireAuthorizedActor('amanat:manage');
+    const { actor, tenantId } = this.requireAuthorizedActor('amanat:manage');
 
     const terminalCode = storage.getTerminalCode();
 
@@ -2502,22 +2532,40 @@ export class DexieDataService implements IDataService {
         const recordBranch = await db.branches.get(recordBranchId);
         if (!recordBranch) throw new FinancialValidationError('فرع سجل الأمانة غير موجود.');
 
-        const effectiveBoxId = params.cashBoxId || record.cashBoxId || 'cb-1';
-        const cashBox = record.type === 'CASH' ? await db.cashBoxes.get(effectiveBoxId) : undefined;
+        const requestedBoxId = params.cashBoxId || record.cashBoxId;
+        const cashBox =
+          record.type === 'CASH'
+            ? requestedBoxId
+              ? await db.cashBoxes.get(requestedBoxId)
+              : await this.resolveBranchDefaultCashBoxTx(recordBranchId)
+            : undefined;
         if (record.type === 'CASH') this.assertCashBoxBranchAccess(actor, cashBox, recordBranchId);
-        validateAmanatReturnInput({ record, cashBox });
+        validateAmanatReturnInput({ record, cashBox, returnAmount: params.returnAmount });
 
-        const updatedRecord: AmanatRecord = {
-          ...record,
-          branchId: recordBranchId,
-          status: 'RETURNED',
-          returnedDate: new Date().toISOString().split('T')[0],
-          recipientSignatureName: params.recipientSignatureName || record.depositorName,
-        };
+        const todayStr = new Date().toISOString().split('T')[0];
+        const totalAmount = roundMoney(record.amount);
+        const alreadyReturned = roundMoney(record.returnedAmount || 0);
+        const remainingBefore =
+          record.remainingAmount !== undefined
+            ? roundMoney(record.remainingAmount)
+            : roundMoney(Math.max(0, totalAmount - alreadyReturned));
+
+        const effectiveReturn =
+          record.type === 'CASH'
+            ? params.returnAmount !== undefined
+              ? roundMoney(params.returnAmount)
+              : remainingBefore
+            : 0;
+
+        const nextReturned =
+          record.type === 'CASH' ? roundMoney(alreadyReturned + effectiveReturn) : 0;
+        const nextRemaining =
+          record.type === 'CASH' ? roundMoney(Math.max(0, remainingBefore - effectiveReturn)) : 0;
+        const isFullReturn = record.type === 'ITEM' || toCents(nextRemaining) === 0;
 
         let returnEntry: JournalEntry | undefined;
-        if (updatedRecord.type === 'CASH') {
-          const amount = roundMoney(updatedRecord.amount);
+        const eventId = storage.generateUUID();
+        if (record.type === 'CASH') {
           const boxAccCode = cashBox!.accountCode;
           const boxAcc = await db.accounts.get(boxAccCode);
           const amanatAcc = await db.accounts.get('2102');
@@ -2534,8 +2582,8 @@ export class DexieDataService implements IDataService {
           returnEntry = {
             id: storage.generateUUID(),
             entryNumber,
-            date: updatedRecord.returnedDate!,
-            description: `رد وتسليم أمانة نقدية رقم ${updatedRecord.recordNumber} - ${updatedRecord.depositorName}`,
+            date: todayStr,
+            description: `${isFullReturn ? 'رد وتسليم' : 'رد جزئي لأمانة'} أمانة نقدية رقم ${record.recordNumber} - ${record.depositorName}`,
             costCenterId: 'general',
             branchId: recordBranchId,
             lines: [
@@ -2543,40 +2591,64 @@ export class DexieDataService implements IDataService {
                 id: storage.generateUUID(),
                 accountCode: '2102',
                 accountName: amanatAcc.nameAr,
-                debit: amount,
+                debit: effectiveReturn,
                 credit: 0,
                 costCenterId: 'general',
-                memo: `إبراء ذمة ورد أمانة رقم ${updatedRecord.recordNumber}`,
+                memo: `تسوية وإبراء جزء من أمانة رقم ${record.recordNumber}`,
               },
               {
                 id: storage.generateUUID(),
                 accountCode: boxAccCode,
                 accountName: boxAcc?.nameAr || cashBox!.nameAr,
                 debit: 0,
-                credit: amount,
+                credit: effectiveReturn,
                 costCenterId: 'general',
-                memo: `صرف رد أمانة رقم ${updatedRecord.recordNumber}`,
+                memo: `صرف رد أمانة رقم ${record.recordNumber}`,
               },
             ],
             status: 'POSTED',
             referenceType: 'AMANAT',
-            referenceId: updatedRecord.id,
+            referenceId: record.id,
             isAutoGenerated: true,
           };
 
-          const validCodes = await this.getValidAccountCodesSet();
-          validateJournalEntryInput({ entry: returnEntry, validAccountCodes: validCodes });
+          const accountsByCode = await this.getAccountsByCodeMap();
+          validateJournalEntryInput({ entry: returnEntry, accountsByCode });
 
-          cashBox!.balance = roundMoney(cashBox!.balance - amount);
+          cashBox!.balance = roundMoney(cashBox!.balance - effectiveReturn);
           await db.cashBoxes.put(cashBox!);
           if (boxAcc) {
-            boxAcc.balance = roundMoney(boxAcc.balance - amount);
+            boxAcc.balance = roundMoney(boxAcc.balance - effectiveReturn);
             await db.accounts.put(boxAcc);
           }
-          amanatAcc.balance = roundMoney(amanatAcc.balance - amount);
+          amanatAcc.balance = roundMoney(amanatAcc.balance - effectiveReturn);
           await db.accounts.put(amanatAcc);
           await db.journalEntries.put(returnEntry);
         }
+
+        const returnEvent: AmanatReturnEvent = {
+          id: eventId,
+          date: todayStr,
+          amount: effectiveReturn,
+          cashBoxId: cashBox?.id,
+          journalEntryId: returnEntry?.id,
+          recipientSignatureName: params.recipientSignatureName || record.depositorName,
+          notes: params.notes?.trim() || undefined,
+          createdBy: actor.id,
+          createdByName: actor.fullName,
+        };
+
+        const updatedRecord: AmanatRecord = {
+          ...record,
+          branchId: recordBranchId,
+          status: isFullReturn ? 'RETURNED' : 'HELD',
+          returnedAmount: nextReturned,
+          remainingAmount: nextRemaining,
+          returnHistory: [...(record.returnHistory || []), returnEvent],
+          returnedDate: isFullReturn ? todayStr : record.returnedDate,
+          recipientSignatureName: params.recipientSignatureName || record.recipientSignatureName || record.depositorName,
+          returnJournalEntryId: returnEntry?.id || record.returnJournalEntryId,
+        };
 
         await db.amanatRecords.put(updatedRecord);
 
@@ -2592,7 +2664,7 @@ export class DexieDataService implements IDataService {
           retryCount: 0,
           priority: 3,
           createdAt: new Date().toISOString(),
-          idempotencyKey: `${tenantId}_AMANAT_${updatedRecord.id}_RETURN`,
+          idempotencyKey: `${tenantId}_AMANAT_${updatedRecord.id}_RETURN_${eventId}`,
         });
 
         if (returnEntry) {
@@ -2620,11 +2692,196 @@ export class DexieDataService implements IDataService {
           userName: actor.fullName,
           tenantId,
           branchId: recordBranchId,
-          action: 'رد وتسليم أمانة',
-          details: `رد أمانة رقم ${updatedRecord.recordNumber} للمودع ${updatedRecord.depositorName}`,
+          action: isFullReturn ? 'رد وتسليم أمانة' : 'رد جزئي لأمانة',
+          details: `سند أمانة رقم ${updatedRecord.recordNumber} للمودع ${updatedRecord.depositorName} (المبلغ المردود: ${effectiveReturn}، المتبقي: ${nextRemaining})`,
+          entityType: 'AMANAT',
+          entityId: updatedRecord.id,
+          previousValue: { status: record.status, returnedAmount: alreadyReturned, remainingAmount: remainingBefore },
+          newValue: { status: updatedRecord.status, returnedAmount: nextReturned, remainingAmount: nextRemaining },
+          reason: params.notes?.trim() || 'رد أمانة',
+          result: 'SUCCESS',
         });
 
         return { success: true, record: updatedRecord, journalEntry: returnEntry };
+      }
+    );
+  }
+
+  public async cancelAmanatAtomic(params: {
+    recordId: string;
+    reason: string;
+  }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }> {
+    await this.ensureReady();
+    const { actor, tenantId } = this.requireAuthorizedActor('amanat:manage');
+
+    const cleanReason = params.reason?.trim();
+    if (!cleanReason) {
+      throw new FinancialValidationError('سبب إلغاء الأمانة مطلوب لتوثيق سجل التدقيق.');
+    }
+
+    const terminalCode = storage.getTerminalCode();
+
+    return await db.transaction(
+      'rw',
+      [db.amanatRecords, db.journalEntries, db.cashBoxes, db.accounts, db.outbox, db.auditLogs, db.sequences, db.branches],
+      async () => {
+        const record = await db.amanatRecords.get(params.recordId);
+        if (!record) {
+          throw new FinancialValidationError('سجل الأمانة المطلوب غير موجود.');
+        }
+        const recordBranchId = record.branchId?.trim();
+        assertBranchAccess(actor, recordBranchId || '', { requireTarget: true });
+        if (!recordBranchId) throw new FinancialValidationError('سجل الأمانة غير مربوط بفرع.');
+        const recordBranch = await db.branches.get(recordBranchId);
+        if (!recordBranch) throw new FinancialValidationError('فرع سجل الأمانة غير موجود.');
+
+        if (record.status !== 'HELD') {
+          throw new FinancialValidationError('لا يمكن إلغاء أمانة ليست في حالة الحفظ (HELD).');
+        }
+        if (record.type === 'CASH' && roundMoney(record.returnedAmount || 0) > 0) {
+          throw new FinancialValidationError(
+            'لا يمكن إلغاء أمانة تم رد جزء منها مسبقاً؛ يرجى إكمال رد المبلغ المتبقي فقط.'
+          );
+        }
+
+        const todayStr = new Date().toISOString().split('T')[0];
+        let cancelEntry: JournalEntry | undefined;
+
+        if (record.type === 'CASH') {
+          const amount = roundMoney(record.amount);
+          const cashBox = record.cashBoxId
+            ? await db.cashBoxes.get(record.cashBoxId)
+            : await this.resolveBranchDefaultCashBoxTx(recordBranchId);
+          this.assertCashBoxBranchAccess(actor, cashBox, recordBranchId);
+          if (roundMoney(cashBox!.balance) + 0.001 < amount) {
+            throw new FinancialValidationError(
+              `رصيد الصندوق (${cashBox!.nameAr}: ${roundMoney(cashBox!.balance)}) غير كافٍ لعكس وإلغاء الأمانة النقدية (${amount}).`
+            );
+          }
+
+          const boxAccCode = cashBox!.accountCode;
+          const boxAcc = await db.accounts.get(boxAccCode);
+          const amanatAcc = await db.accounts.get('2102');
+          if (!amanatAcc) {
+            throw new FinancialValidationError('حساب الأمانات للغير (2102) غير موجود.');
+          }
+
+          const entryNumber = await this.allocateSequenceNumberAtomic(
+            'JV',
+            recordBranch.code || 'BR01',
+            terminalCode,
+            tenantId
+          );
+          cancelEntry = {
+            id: storage.generateUUID(),
+            entryNumber,
+            date: todayStr,
+            description: `إلغاء وعكس أمانة نقدية رقم ${record.recordNumber} - ${cleanReason}`,
+            costCenterId: 'general',
+            branchId: recordBranchId,
+            lines: [
+              {
+                id: storage.generateUUID(),
+                accountCode: '2102',
+                accountName: amanatAcc.nameAr,
+                debit: amount,
+                credit: 0,
+                costCenterId: 'general',
+                memo: `عكس التزام أمانة ملغاة رقم ${record.recordNumber}`,
+              },
+              {
+                id: storage.generateUUID(),
+                accountCode: boxAccCode,
+                accountName: boxAcc?.nameAr || cashBox!.nameAr,
+                debit: 0,
+                credit: amount,
+                costCenterId: 'general',
+                memo: `عكس إيداع أمانة ملغاة رقم ${record.recordNumber}`,
+              },
+            ],
+            status: 'POSTED',
+            referenceType: 'AMANAT',
+            referenceId: record.id,
+            isAutoGenerated: true,
+          };
+
+          const accountsByCode = await this.getAccountsByCodeMap();
+          validateJournalEntryInput({ entry: cancelEntry, accountsByCode });
+
+          cashBox!.balance = roundMoney(cashBox!.balance - amount);
+          await db.cashBoxes.put(cashBox!);
+          if (boxAcc) {
+            boxAcc.balance = roundMoney(boxAcc.balance - amount);
+            await db.accounts.put(boxAcc);
+          }
+          amanatAcc.balance = roundMoney(amanatAcc.balance - amount);
+          await db.accounts.put(amanatAcc);
+          await db.journalEntries.put(cancelEntry);
+        }
+
+        const updatedRecord: AmanatRecord = {
+          ...record,
+          branchId: recordBranchId,
+          status: 'CANCELLED',
+          remainingAmount: 0,
+          cancelledDate: todayStr,
+          cancelledReason: cleanReason,
+          returnJournalEntryId: cancelEntry?.id || record.returnJournalEntryId,
+        };
+
+        await db.amanatRecords.put(updatedRecord);
+
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId: recordBranchId,
+          entityType: 'AMANAT',
+          entityId: updatedRecord.id,
+          action: 'UPDATE',
+          payload: updatedRecord as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 3,
+          createdAt: new Date().toISOString(),
+          idempotencyKey: `${tenantId}_AMANAT_${updatedRecord.id}_CANCEL`,
+        });
+
+        if (cancelEntry) {
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: recordBranchId,
+            entityType: 'JOURNAL_ENTRY',
+            entityId: cancelEntry.id,
+            action: 'CREATE',
+            payload: cancelEntry as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [updatedRecord.id],
+            createdAt: new Date().toISOString(),
+            idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${cancelEntry.id}_CREATE`,
+          });
+        }
+
+        await db.auditLogs.put({
+          id: storage.generateUUID(),
+          timestamp: new Date().toISOString(),
+          userId: actor.id,
+          userName: actor.fullName,
+          tenantId,
+          branchId: recordBranchId,
+          action: 'إلغاء أمانة',
+          details: `إلغاء أمانة رقم ${updatedRecord.recordNumber} للمودع ${updatedRecord.depositorName} — السبب: ${cleanReason}`,
+          entityType: 'AMANAT',
+          entityId: updatedRecord.id,
+          previousValue: { status: record.status, amount: record.amount },
+          newValue: { status: 'CANCELLED', cancelledDate: todayStr },
+          reason: cleanReason,
+          result: 'SUCCESS',
+        });
+
+        return { success: true, record: updatedRecord, journalEntry: cancelEntry };
       }
     );
   }
@@ -3152,7 +3409,15 @@ export class DexieDataService implements IDataService {
         if (existingInv && existingInv.journalEntryId) {
           const existingJe = await db.journalEntries.get(existingInv.journalEntryId);
           if (existingJe) {
-            return { success: true, invoice: existingInv, journalEntry: existingJe };
+            const existingAdvJe = await db.journalEntries
+              .filter((j) => j.referenceType === 'ADVANCE_SETTLEMENT' && j.referenceId === existingInv.id)
+              .first();
+            return {
+              success: true,
+              invoice: existingInv,
+              journalEntry: existingJe,
+              advanceJournalEntry: existingAdvJe,
+            };
           }
         }
         if (clientRequestId) {
@@ -3165,7 +3430,15 @@ export class DexieDataService implements IDataService {
             if (dupInv && dupInv.journalEntryId) {
               const dupJe = await db.journalEntries.get(dupInv.journalEntryId);
               if (dupJe) {
-                return { success: true, invoice: dupInv, journalEntry: dupJe };
+                const dupAdvJe = await db.journalEntries
+                  .filter((j) => j.referenceType === 'ADVANCE_SETTLEMENT' && j.referenceId === dupInv.id)
+                  .first();
+                return {
+                  success: true,
+                  invoice: dupInv,
+                  journalEntry: dupJe,
+                  advanceJournalEntry: dupAdvJe,
+                };
               }
             }
           }
@@ -3696,14 +3969,22 @@ export class DexieDataService implements IDataService {
       batchNumber?: string;
       expiryDate?: string;
     }>;
+    applyAdvanceAmount?: number;
     clientRequestId?: string;
-  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }> {
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }> {
     await this.ensureReady();
     const { invoice, itemsWithBatches, clientRequestId } = params;
+    const applyAdvance = roundMoney(params.applyAdvanceAmount || 0);
+    if (applyAdvance < 0) {
+      throw new FinancialValidationError('مبلغ التسوية من رصيد سلفة المورد لا يجوز أن يكون سالباً.');
+    }
     const { actor, tenantId, branchId } = this.requireAuthorizedActor(
       'purchase:create',
       invoice.branchId
     );
+    if (applyAdvance > 0) {
+      assertPermission(actor, 'party:advance:use', 'تسوية سلفة مورد على فاتورة المشتريات');
+    }
     const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
     const terminalCode = storage.getTerminalCode();
     const currencySymbol = getActiveCurrencyConfig().symbol;
@@ -3717,6 +3998,8 @@ export class DexieDataService implements IDataService {
         db.cashBoxes,
         db.accounts,
         db.parties,
+        db.paymentAllocations,
+        db.partyAdvanceTransactions,
         db.outbox,
         db.auditLogs,
         db.sequences,
@@ -3729,7 +4012,15 @@ export class DexieDataService implements IDataService {
         if (existingInv && existingInv.journalEntryId) {
           const existingJe = await db.journalEntries.get(existingInv.journalEntryId);
           if (existingJe) {
-            return { success: true, invoice: existingInv, journalEntry: existingJe };
+            const existingAdvJe = await db.journalEntries
+              .filter((j) => j.referenceType === 'ADVANCE_SETTLEMENT' && j.referenceId === existingInv.id)
+              .first();
+            return {
+              success: true,
+              invoice: existingInv,
+              journalEntry: existingJe,
+              advanceJournalEntry: existingAdvJe,
+            };
           }
         }
         if (clientRequestId) {
@@ -3742,7 +4033,15 @@ export class DexieDataService implements IDataService {
             if (dupInv && dupInv.journalEntryId) {
               const dupJe = await db.journalEntries.get(dupInv.journalEntryId);
               if (dupJe) {
-                return { success: true, invoice: dupInv, journalEntry: dupJe };
+                const dupAdvJe = await db.journalEntries
+                  .filter((j) => j.referenceType === 'ADVANCE_SETTLEMENT' && j.referenceId === dupInv.id)
+                  .first();
+                return {
+                  success: true,
+                  invoice: dupInv,
+                  journalEntry: dupJe,
+                  advanceJournalEntry: dupAdvJe,
+                };
               }
             }
           }
@@ -3755,7 +4054,26 @@ export class DexieDataService implements IDataService {
           invoice,
           itemsWithBatches,
           cashBox: targetCashBox,
+          applyAdvanceAmount: applyAdvance,
         });
+
+        let supplier: Party | undefined;
+        if (invoice.partyId) {
+          supplier = await db.parties.get(invoice.partyId);
+          if (!supplier) {
+            throw new FinancialValidationError('المورد المحدد غير موجود في قاعدة البيانات.');
+          }
+        }
+        if (applyAdvance > 0) {
+          if (!supplier || supplier.type !== 'SUPPLIER') {
+            throw new FinancialValidationError('تسوية سلف الموردين متاحة للموردين المسجلين فقط.');
+          }
+          if (toCents(supplier.advanceBalance ?? 0) < toCents(applyAdvance)) {
+            throw new FinancialValidationError(
+              `رصيد سلفة المورد المتاح (${roundMoney(supplier.advanceBalance || 0)}) غير كافٍ لخصم ${applyAdvance}.`
+            );
+          }
+        }
 
         const todayStr = new Date().toISOString().split('T')[0];
         // تُوزع تعديلات الفاتورة (الخصم والضريبة) نسبياً على تكلفة التوريد حتى تطابق قيمة المخزون القيد المحاسبي.
@@ -3868,7 +4186,7 @@ export class DexieDataService implements IDataService {
         const invAccount = await db.accounts.get(inventoryAccountCode);
 
         const normalizedTotal = roundMoney(invoice.total);
-        const normalizedPaid = roundMoney(invoice.paidAmount);
+        const cashPaid = roundMoney(invoice.paidAmount);
 
         const journalLines: JournalEntryLine[] = [
           {
@@ -3886,7 +4204,7 @@ export class DexieDataService implements IDataService {
           await db.accounts.put(invAccount);
         }
 
-        if (normalizedPaid > 0 && targetCashBox) {
+        if (cashPaid > 0 && targetCashBox) {
           const boxAccount = targetCashBox.accountCode;
           const acc = await db.accounts.get(boxAccount);
           journalLines.push({
@@ -3894,41 +4212,38 @@ export class DexieDataService implements IDataService {
             accountCode: boxAccount,
             accountName: acc?.nameAr || targetCashBox.nameAr,
             debit: 0,
-            credit: normalizedPaid,
+            credit: cashPaid,
             costCenterId: invoice.activityId,
             memo: `سداد نقدي فاتورة مشتريات ${invoice.invoiceNumber}`,
           });
 
-          targetCashBox.balance = roundMoney(targetCashBox.balance - normalizedPaid);
+          targetCashBox.balance = roundMoney(targetCashBox.balance - cashPaid);
           await db.cashBoxes.put(targetCashBox);
           if (acc) {
-            acc.balance = roundMoney(acc.balance - normalizedPaid);
+            acc.balance = roundMoney(acc.balance - cashPaid);
             await db.accounts.put(acc);
           }
         }
 
-        const unpaid = roundMoney(normalizedTotal - normalizedPaid);
-        if (unpaid > 0) {
+        const grossCredit = roundMoney(normalizedTotal - cashPaid);
+        if (grossCredit > 0) {
           const apAcc = await db.accounts.get('2101');
           journalLines.push({
             id: storage.generateUUID(),
             accountCode: '2101',
             accountName: `${apAcc?.nameAr || 'الموردون والدائنون'} - ${invoice.partyName}`,
             debit: 0,
-            credit: unpaid,
+            credit: grossCredit,
             costCenterId: invoice.activityId,
             memo: `مستحق آجل فاتورة مشتريات ${invoice.invoiceNumber}`,
           });
 
-          if (invoice.partyId) {
-            const supplier = await db.parties.get(invoice.partyId);
-            if (supplier) {
-              supplier.balance = roundMoney(supplier.balance - unpaid);
-              await db.parties.put(supplier);
-            }
+          if (supplier) {
+            supplier.balance = roundMoney(supplier.balance - grossCredit);
+            await db.parties.put(supplier);
           }
           if (apAcc) {
-            apAcc.balance = roundMoney(apAcc.balance + unpaid);
+            apAcc.balance = roundMoney(apAcc.balance + grossCredit);
             await db.accounts.put(apAcc);
           }
         }
@@ -3955,12 +4270,160 @@ export class DexieDataService implements IDataService {
           isAutoGenerated: true,
         };
 
-        const validCodes = await this.getValidAccountCodesSet();
-        validateJournalEntryInput({ entry: journalEntry, validAccountCodes: validCodes });
+        const accountsByCode = await this.getAccountsByCodeMap();
+        validateJournalEntryInput({ entry: journalEntry, accountsByCode });
+
+        // ج. تسوية سلفة المورد المستقلة إن وُجدت (Dr 2101 / Cr 1105)
+        let advanceJournalEntry: JournalEntry | undefined;
+        const nowIso = new Date().toISOString();
+        if (applyAdvance > 0 && supplier) {
+          const supAdvAcc = await this.ensureCanonicalAccountTx(SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES);
+          const apAcc = await db.accounts.get(SPECIAL_ACCOUNTS.SUPPLIERS_AP);
+          if (!supAdvAcc || !apAcc) {
+            throw new FinancialValidationError('حساب سلف الموردين (1105) أو الموردون (2101) غير معرف.');
+          }
+
+          const advEntryNumber = await this.allocateSequenceNumberAtomic(
+            'JV',
+            activeBranch.code || 'BR01',
+            terminalCode,
+            tenantId
+          );
+          const advEntryId = storage.generateUUID();
+          advanceJournalEntry = {
+            id: advEntryId,
+            entryNumber: advEntryNumber,
+            date: invoice.date,
+            description: `تسوية سلفة مورد للمورد ${supplier.nameAr} على فاتورة ${invoice.invoiceNumber}`,
+            costCenterId: invoice.activityId,
+            branchId,
+            lines: [
+              {
+                id: storage.generateUUID(),
+                accountCode: SPECIAL_ACCOUNTS.SUPPLIERS_AP,
+                accountName: apAcc.nameAr,
+                debit: applyAdvance,
+                credit: 0,
+                costCenterId: invoice.activityId,
+                memo: `تخفيض ذمة المورد ${supplier.nameAr} لفاتورة ${invoice.invoiceNumber}`,
+              },
+              {
+                id: storage.generateUUID(),
+                accountCode: SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES,
+                accountName: supAdvAcc.nameAr,
+                debit: 0,
+                credit: applyAdvance,
+                costCenterId: invoice.activityId,
+                memo: `استخدام سلفة مورد لفاتورة ${invoice.invoiceNumber}`,
+              },
+            ],
+            status: 'POSTED',
+            referenceType: 'ADVANCE_SETTLEMENT',
+            referenceId: invoice.id,
+            isAutoGenerated: true,
+          };
+
+          const advAccountsMap = await this.getAccountsByCodeMap();
+          validateJournalEntryInput({ entry: advanceJournalEntry, accountsByCode: advAccountsMap });
+
+          apAcc.balance = roundMoney(apAcc.balance + accountBalanceDeltaByType(apAcc.type, applyAdvance, 0));
+          await db.accounts.put(apAcc);
+          supAdvAcc.balance = roundMoney(supAdvAcc.balance + accountBalanceDeltaByType(supAdvAcc.type, 0, applyAdvance));
+          await db.accounts.put(supAdvAcc);
+
+          const nextAdvBal = roundMoney((supplier.advanceBalance || 0) - applyAdvance);
+          supplier.advanceBalance = nextAdvBal;
+          supplier.balance = roundMoney(supplier.balance + applyAdvance);
+          await db.parties.put(supplier);
+
+          const advTx: PartyAdvanceTransaction = {
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            partyId: supplier.id,
+            partyType: 'SUPPLIER',
+            type: 'APPLY_TO_INVOICE',
+            amount: -applyAdvance,
+            balanceAfter: nextAdvBal,
+            invoiceId: invoice.id,
+            journalEntryId: advanceJournalEntry.id,
+            date: invoice.date,
+            description: `تسوية سلفة مورد على الفاتورة ${invoice.invoiceNumber}`,
+            createdBy: actor.id,
+            createdAt: nowIso,
+          };
+          await db.partyAdvanceTransactions.put(advTx);
+
+          const advAlloc: PaymentAllocation = {
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            advanceTransactionId: advTx.id,
+            partyId: supplier.id,
+            invoiceId: invoice.id,
+            invoiceNumber: invoice.invoiceNumber,
+            invoiceDate: invoice.date,
+            allocatedAmount: applyAdvance,
+            allocationMethod: 'ADVANCE_SETTLEMENT',
+            status: 'ACTIVE',
+            createdAt: nowIso,
+            createdBy: actor.id,
+          };
+          await db.paymentAllocations.put(advAlloc);
+          await db.journalEntries.put(advanceJournalEntry);
+
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            entityType: 'PARTY_ADVANCE',
+            entityId: advTx.id,
+            action: 'CREATE',
+            payload: advTx as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [invoice.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_PARTY_ADVANCE_${advTx.id}_CREATE`,
+          });
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            entityType: 'PAYMENT_ALLOCATION',
+            entityId: advAlloc.id,
+            action: 'CREATE',
+            payload: advAlloc as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [invoice.id, advTx.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${advAlloc.id}_CREATE`,
+          });
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            entityType: 'JOURNAL_ENTRY',
+            entityId: advanceJournalEntry.id,
+            action: 'CREATE',
+            payload: advanceJournalEntry as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [invoice.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${advanceJournalEntry.id}_CREATE`,
+          });
+        }
 
         invoice.branchId = branchId;
         invoice.journalEntryId = journalEntryId;
         invoice.isPosted = true;
+        invoice.advanceAppliedAmount = applyAdvance;
+        invoice.paidAmount = roundMoney(cashPaid + applyAdvance);
 
         await db.journalEntries.put(journalEntry);
         await db.invoices.put(invoice);
@@ -3991,7 +4454,7 @@ export class DexieDataService implements IDataService {
           retryCount: 0,
           priority: 3,
           dependsOn: purchaseDependencies.length > 0 ? purchaseDependencies : undefined,
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
           idempotencyKey: idemPurchaseKey,
         });
 
@@ -4007,22 +4470,1151 @@ export class DexieDataService implements IDataService {
           retryCount: 0,
           priority: 4,
           dependsOn: [invoice.id],
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
           idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
         });
 
         await db.auditLogs.put({
           id: storage.generateUUID(),
-          timestamp: new Date().toISOString(),
+          timestamp: nowIso,
           userId: actor.id,
           userName: actor.fullName,
           tenantId,
           branchId,
           action: 'إصدار فاتورة مشتريات ذرية',
-          details: `فاتورة ${invoice.invoiceNumber} بقيمة ${invoice.total} ${currencySymbol} وقيد ${journalEntry.entryNumber}`,
+          details: `فاتورة ${invoice.invoiceNumber} بقيمة ${invoice.total} ${currencySymbol} وقيد ${journalEntry.entryNumber}${applyAdvance > 0 ? ` (تسوية سلفة مورد: ${applyAdvance})` : ''}`,
+          entityType: 'INVOICE',
+          entityId: invoice.id,
+          newValue: { total: invoice.total, paidAmount: invoice.paidAmount, advanceAppliedAmount: applyAdvance },
+          result: 'SUCCESS',
         });
 
-        return { success: true, invoice, journalEntry };
+        return { success: true, invoice, journalEntry, advanceJournalEntry };
+      }
+    );
+  }
+
+  public async createSalesReturnAtomic(params: {
+    originalInvoiceId: string;
+    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    returnReason: string;
+    refundMethod: 'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE';
+    cashBoxId?: string;
+    date?: string;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }> {
+    await this.ensureReady();
+    const { actor, tenantId } = this.requireAuthorizedActor('pos:return');
+    const cleanReason = params.returnReason?.trim();
+    if (!cleanReason) {
+      throw new FinancialValidationError('سبب مرتجع المبيعات مطلوب لتوثيق القيد وسجل التدقيق.');
+    }
+    if (!params.items || params.items.length === 0) {
+      throw new FinancialValidationError('يجب تحديد صنف واحد على الأقل لإتمام مرتجع المبيعات.');
+    }
+
+    const terminalCode = storage.getTerminalCode();
+    const currencySymbol = getActiveCurrencyConfig().symbol;
+
+    return await db.transaction(
+      'rw',
+      [
+        db.invoices,
+        db.journalEntries,
+        db.products,
+        db.cashBoxes,
+        db.accounts,
+        db.parties,
+        db.partyAdvanceTransactions,
+        db.outbox,
+        db.auditLogs,
+        db.sequences,
+        db.branches,
+      ],
+      async () => {
+        if (params.clientRequestId) {
+          const dupOutbox = await db.outbox
+            .where('idempotencyKey')
+            .equals(`REQ_${tenantId}_${params.clientRequestId}`)
+            .first();
+          if (dupOutbox) {
+            const dupInv = await db.invoices.get(dupOutbox.entityId);
+            if (dupInv && dupInv.journalEntryId) {
+              const dupJe = await db.journalEntries.get(dupInv.journalEntryId);
+              if (dupJe) {
+                return { success: true, invoice: dupInv, journalEntry: dupJe };
+              }
+            }
+          }
+        }
+
+        const orig = await db.invoices.get(params.originalInvoiceId);
+        if (!orig) {
+          throw new FinancialValidationError('فاتورة المبيعات الأصلية غير موجودة.');
+        }
+        if (orig.type !== 'SALE') {
+          throw new FinancialValidationError('يمكن إصدار مرتجع مبيعات لفواتير المبيعات (SALE) فقط.');
+        }
+        if (orig.status === 'REVERSED') {
+          throw new FinancialValidationError('لا يمكن عمل مرتجع على فاتورة مبيعات معكوسة.');
+        }
+
+        const targetBranchId = orig.branchId?.trim() || '';
+        assertBranchAccess(actor, targetBranchId, { requireTarget: true });
+        const branch = await db.branches.get(targetBranchId);
+        if (!branch) throw new FinancialValidationError('فرع الفاتورة الأصلية غير موجود.');
+
+        const priorReturns = await db.invoices
+          .filter(
+            (i) =>
+              i.type === 'RETURN_SALE' &&
+              i.originalInvoiceId === orig.id &&
+              i.status !== 'REVERSED'
+          )
+          .toArray();
+
+        const returnedByProduct = new Map<string, number>();
+        const returnedByDeductionKey = new Map<string, number>();
+        for (const r of priorReturns) {
+          for (const it of r.items || []) {
+            returnedByProduct.set(
+              it.productId,
+              roundMoney((returnedByProduct.get(it.productId) || 0) + it.quantity, 4)
+            );
+          }
+          for (const ded of r.stockDeductionsRecorded || []) {
+            const dk = `${ded.productId}::${ded.batchNumber || ''}`;
+            returnedByDeductionKey.set(
+              dk,
+              roundMoney((returnedByDeductionKey.get(dk) || 0) + ded.quantity, 4)
+            );
+          }
+        }
+
+        const netFactor = orig.subtotal > 0 ? orig.total / orig.subtotal : 1;
+        const returnItems: InvoiceItem[] = [];
+        const restoredDeductions: StockDeductionRecorded[] = [];
+        let returnSubtotal = 0;
+        let returnTotal = 0;
+        let restoredCogs = 0;
+
+        for (const reqItem of params.items) {
+          if (!reqItem.productId || !Number.isFinite(reqItem.quantity) || reqItem.quantity <= 0) {
+            throw new FinancialValidationError('كمية الصنف المرتجع يجب أن تكون أكبر من الصفر.');
+          }
+          const reqQty = roundMoney(reqItem.quantity, 4);
+          const matchingOrigLines = (orig.items || []).filter(
+            (it) =>
+              it.productId === reqItem.productId &&
+              (!reqItem.batchNumber || !it.batchNumber || it.batchNumber === reqItem.batchNumber)
+          );
+          if (matchingOrigLines.length === 0) {
+            throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود ضمن بنود الفاتورة الأصلية.`);
+          }
+          const soldQty = roundMoney(matchingOrigLines.reduce((s, l) => s + l.quantity, 0), 4);
+          const alreadyRet = returnedByProduct.get(reqItem.productId) || 0;
+          const remainingReturnable = roundMoney(soldQty - alreadyRet, 4);
+          if (reqQty > remainingReturnable + 0.0001) {
+            throw new FinancialValidationError(
+              `الكمية المطلوب إرجاعها للصنف (${matchingOrigLines[0].productName}) تتجاوز الكمية المتاحة للإرجاع (${remainingReturnable}).`
+            );
+          }
+          returnedByProduct.set(reqItem.productId, roundMoney(alreadyRet + reqQty, 4));
+
+          const avgLineNetUnit =
+            matchingOrigLines.reduce((s, l) => s + l.total, 0) / soldQty;
+          const lineNetTotal = roundMoney(reqQty * avgLineNetUnit * netFactor);
+          returnSubtotal = roundMoney(returnSubtotal + roundMoney(reqQty * avgLineNetUnit));
+          returnTotal = roundMoney(returnTotal + lineNetTotal);
+
+          const product = await db.products.get(reqItem.productId);
+          if (!product) {
+            throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود في المستودع.`);
+          }
+
+          // استرداد الكمية والتكلفة من سجل خصم المخزون الأصلي (Perpetual Inventory Restoration)
+          const matchingDeductions = (orig.stockDeductionsRecorded || []).filter(
+            (d) =>
+              d.productId === reqItem.productId &&
+              (!reqItem.batchNumber || !d.batchNumber || d.batchNumber === reqItem.batchNumber)
+          );
+
+          let qtyLeftToRestore = reqQty;
+          if (matchingDeductions.length > 0) {
+            for (const ded of matchingDeductions) {
+              if (qtyLeftToRestore <= 0) break;
+              const dk = `${ded.productId}::${ded.batchNumber || ''}`;
+              const usedBefore = returnedByDeductionKey.get(dk) || 0;
+              const availFromSlice = roundMoney(Math.max(0, ded.quantity - usedBefore), 4);
+              if (availFromSlice <= 0) continue;
+              const sliceQty = Math.min(qtyLeftToRestore, availFromSlice);
+              returnedByDeductionKey.set(dk, roundMoney(usedBefore + sliceQty, 4));
+              qtyLeftToRestore = roundMoney(qtyLeftToRestore - sliceQty, 4);
+
+              const sliceUnitCost = Number.isFinite(ded.unitCost) ? ded.unitCost : product.purchasePrice;
+              restoredCogs = roundMoney(restoredCogs + sliceQty * sliceUnitCost);
+              restoredDeductions.push({
+                productId: product.id,
+                batchNumber: ded.batchNumber,
+                expiryDate: ded.expiryDate,
+                quantity: sliceQty,
+                unitCost: sliceUnitCost,
+              });
+
+              if (ded.batchNumber) {
+                if (!product.batches) product.batches = [];
+                const targetBatch = product.batches.find((b) => b.batchNumber === ded.batchNumber);
+                if (targetBatch) {
+                  const prevQ = targetBatch.quantity;
+                  const nextQ = roundMoney(prevQ + sliceQty, 4);
+                  targetBatch.costPrice =
+                    nextQ > 0
+                      ? roundMoney((prevQ * targetBatch.costPrice + sliceQty * sliceUnitCost) / nextQ, 4)
+                      : sliceUnitCost;
+                  targetBatch.quantity = nextQ;
+                } else {
+                  product.batches.push({
+                    id: storage.generateUUID(),
+                    productId: product.id,
+                    batchNumber: ded.batchNumber,
+                    expiryDate: ded.expiryDate || new Date().toISOString().split('T')[0],
+                    quantity: sliceQty,
+                    costPrice: sliceUnitCost,
+                  });
+                }
+                product.currentStock = roundMoney(
+                  product.batches.reduce((s, b) => s + b.quantity, 0),
+                  4
+                );
+                const val = product.batches.reduce((s, b) => s + b.quantity * b.costPrice, 0);
+                product.purchasePrice =
+                  product.currentStock > 0 ? roundMoney(val / product.currentStock, 4) : sliceUnitCost;
+              } else {
+                const prevQ = product.currentStock;
+                const nextQ = roundMoney(prevQ + sliceQty, 4);
+                product.purchasePrice =
+                  nextQ > 0
+                    ? roundMoney((prevQ * product.purchasePrice + sliceQty * sliceUnitCost) / nextQ, 4)
+                    : sliceUnitCost;
+                product.currentStock = nextQ;
+              }
+            }
+          }
+
+          if (qtyLeftToRestore > 0.0001) {
+            const fallbackCost = product.purchasePrice;
+            restoredCogs = roundMoney(restoredCogs + qtyLeftToRestore * fallbackCost);
+            restoredDeductions.push({
+              productId: product.id,
+              quantity: qtyLeftToRestore,
+              unitCost: fallbackCost,
+            });
+            product.currentStock = roundMoney(product.currentStock + qtyLeftToRestore, 4);
+          }
+
+          validateProductStockConsistency(product);
+          await db.products.put(product);
+
+          returnItems.push({
+            id: storage.generateUUID(),
+            productId: product.id,
+            productName: matchingOrigLines[0].productName || product.nameAr,
+            productCode: matchingOrigLines[0].productCode || product.code,
+            batchNumber: reqItem.batchNumber || matchingOrigLines[0].batchNumber,
+            unit: matchingOrigLines[0].unit || product.unit,
+            quantity: reqQty,
+            unitPrice: roundMoney(avgLineNetUnit * netFactor, 4),
+            discount: 0,
+            total: lineNetTotal,
+          });
+        }
+
+        const returnDate = params.date || new Date().toISOString().split('T')[0];
+        const customer = orig.partyId ? await db.parties.get(orig.partyId) : undefined;
+        const origOpenRemaining = getInvoiceRemainingAmount(orig);
+
+        let arCredited = 0;
+        let cashRefund = 0;
+        let advanceCredited = 0;
+
+        if (params.refundMethod === 'AR_OFFSET') {
+          if (!customer || customer.type !== 'CUSTOMER') {
+            throw new FinancialValidationError('تخفيض ذمة العميل متاح للعملاء المسجلين فقط.');
+          }
+          if (toCents(returnTotal) > toCents(origOpenRemaining) + 1) {
+            throw new FinancialValidationError(
+              `مبلغ المرتجع (${returnTotal}) يتجاوز المتبقي المفتوح من الفاتورة (${origOpenRemaining})؛ استخدم التسوية التلقائية أو الرد النقدي/الرصيد المقدم.`
+            );
+          }
+          arCredited = Math.min(returnTotal, origOpenRemaining);
+        } else if (params.refundMethod === 'CASH') {
+          if (toCents(origOpenRemaining) > 0 && toCents(returnTotal) > toCents(roundMoney(orig.total - origOpenRemaining)) + 1) {
+            throw new FinancialValidationError(
+              'الفاتورة تحتوي على ذمة آجلة غير مسددة؛ استخدم التسوية التلقائية لتخفيض الذمة أولاً قبل رد النقد.'
+            );
+          }
+          cashRefund = returnTotal;
+        } else if (params.refundMethod === 'ADVANCE') {
+          if (!customer || customer.type !== 'CUSTOMER') {
+            throw new FinancialValidationError('ترحيل قيمة المرتجع كرصيد مقدم متاح للعملاء المسجلين فقط.');
+          }
+          if (toCents(origOpenRemaining) > 0 && toCents(returnTotal) > toCents(roundMoney(orig.total - origOpenRemaining)) + 1) {
+            throw new FinancialValidationError(
+              'الفاتورة تحتوي على ذمة آجلة غير مسددة؛ استخدم التسوية التلقائية لتخفيض الذمة أولاً.'
+            );
+          }
+          advanceCredited = returnTotal;
+        } else {
+          // AUTO
+          arCredited = customer ? Math.min(returnTotal, origOpenRemaining) : 0;
+          const excess = roundMoney(returnTotal - arCredited);
+          if (excess > 0) {
+            if (params.cashBoxId || !customer) {
+              cashRefund = excess;
+            } else {
+              // تحقق من وجود دفع نقدي سابق إذا كانت الفاتورة مسددة
+              cashRefund = orig.cashBoxId ? excess : 0;
+              advanceCredited = cashRefund > 0 ? 0 : excess;
+            }
+          }
+        }
+
+        let targetCashBox: CashBox | undefined;
+        if (cashRefund > 0) {
+          const reqBoxId = params.cashBoxId || orig.cashBoxId;
+          targetCashBox = reqBoxId
+            ? await db.cashBoxes.get(reqBoxId)
+            : await this.resolveBranchDefaultCashBoxTx(targetBranchId);
+          this.assertCashBoxBranchAccess(actor, targetCashBox, targetBranchId);
+          if (roundMoney(targetCashBox!.balance) + 0.001 < cashRefund) {
+            throw new FinancialValidationError(
+              `رصيد الصندوق (${targetCashBox!.nameAr}: ${roundMoney(targetCashBox!.balance)}) غير كافٍ لرد مبلغ ${cashRefund}.`
+            );
+          }
+        }
+
+        const returnNumber = await this.allocateSequenceNumberAtomic(
+          'RS',
+          branch.code || 'BR01',
+          terminalCode,
+          tenantId
+        );
+        const returnInvoiceId = storage.generateUUID();
+
+        const salesReturnAccounts: Record<CommercialActivityId, string> = {
+          pharmacy: '4201',
+          grocery: '4202',
+          bike_parts: '4203',
+          equipment_parts: '4204',
+        };
+        const activityInventoryAccounts: Record<CommercialActivityId, string> = {
+          pharmacy: '11041',
+          grocery: '11042',
+          bike_parts: '11043',
+          equipment_parts: '11044',
+        };
+        const activityCogsAccounts: Record<CommercialActivityId, string> = {
+          pharmacy: '5101',
+          grocery: '5102',
+          bike_parts: '5103',
+          equipment_parts: '5104',
+        };
+
+        const contraRevCode = salesReturnAccounts[orig.activityId] || '4201';
+        const invCode = activityInventoryAccounts[orig.activityId] || '11041';
+        const cogsCode = activityCogsAccounts[orig.activityId] || '5101';
+
+        const contraRevAcc = await this.ensureCanonicalAccountTx(contraRevCode);
+        const invAcc = await db.accounts.get(invCode);
+        const cogsAcc = await db.accounts.get(cogsCode);
+        if (!contraRevAcc) {
+          throw new FinancialValidationError(`حساب مردودات المبيعات (${contraRevCode}) غير معرف في الدليل.`);
+        }
+
+        const journalLines: JournalEntryLine[] = [
+          {
+            id: storage.generateUUID(),
+            accountCode: contraRevCode,
+            accountName: contraRevAcc.nameAr,
+            debit: returnTotal,
+            credit: 0,
+            costCenterId: orig.activityId,
+            memo: `مردودات مبيعات فاتورة ${returnNumber} (أصل ${orig.invoiceNumber})`,
+          },
+        ];
+        contraRevAcc.balance = roundMoney(
+          contraRevAcc.balance + accountBalanceDeltaByType(contraRevAcc.type, returnTotal, 0)
+        );
+        await db.accounts.put(contraRevAcc);
+
+        if (arCredited > 0) {
+          const arAcc = await db.accounts.get(SPECIAL_ACCOUNTS.CUSTOMERS_AR);
+          if (!arAcc) throw new FinancialValidationError('حساب العملاء (1103) غير معرف.');
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: SPECIAL_ACCOUNTS.CUSTOMERS_AR,
+            accountName: `${arAcc.nameAr} - ${orig.partyName}`,
+            debit: 0,
+            credit: arCredited,
+            costCenterId: orig.activityId,
+            memo: `تخفيض ذمة العميل عن مرتجع ${returnNumber}`,
+          });
+          arAcc.balance = roundMoney(arAcc.balance + accountBalanceDeltaByType(arAcc.type, 0, arCredited));
+          await db.accounts.put(arAcc);
+          if (customer) {
+            customer.balance = roundMoney(customer.balance - arCredited);
+          }
+          orig.returnedAmount = roundMoney((orig.returnedAmount || 0) + arCredited);
+          await db.invoices.put(orig);
+        }
+
+        if (cashRefund > 0 && targetCashBox) {
+          const boxAcc = await db.accounts.get(targetCashBox.accountCode);
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: targetCashBox.accountCode,
+            accountName: boxAcc?.nameAr || targetCashBox.nameAr,
+            debit: 0,
+            credit: cashRefund,
+            costCenterId: orig.activityId,
+            memo: `رد نقدي لمرتجع مبيعات ${returnNumber}`,
+          });
+          targetCashBox.balance = roundMoney(targetCashBox.balance - cashRefund);
+          await db.cashBoxes.put(targetCashBox);
+          if (boxAcc) {
+            boxAcc.balance = roundMoney(boxAcc.balance + accountBalanceDeltaByType(boxAcc.type, 0, cashRefund));
+            await db.accounts.put(boxAcc);
+          }
+        }
+
+        let advTx: PartyAdvanceTransaction | undefined;
+        const nowIso = new Date().toISOString();
+        if (advanceCredited > 0 && customer) {
+          const advAcc = await this.ensureCanonicalAccountTx(SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES);
+          if (!advAcc) throw new FinancialValidationError('حساب دفعات العملاء المقدمة (2103) غير معرف.');
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES,
+            accountName: advAcc.nameAr,
+            debit: 0,
+            credit: advanceCredited,
+            costCenterId: orig.activityId,
+            memo: `إيداع رصيد مقدم للعميل عن مرتجع مبيعات ${returnNumber}`,
+          });
+          advAcc.balance = roundMoney(advAcc.balance + accountBalanceDeltaByType(advAcc.type, 0, advanceCredited));
+          await db.accounts.put(advAcc);
+          const nextAdvBal = roundMoney((customer.advanceBalance || 0) + advanceCredited);
+          customer.advanceBalance = nextAdvBal;
+          advTx = {
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: targetBranchId,
+            partyId: customer.id,
+            partyType: 'CUSTOMER',
+            type: 'OVERPAYMENT_DEPOSIT',
+            amount: advanceCredited,
+            balanceAfter: nextAdvBal,
+            invoiceId: returnInvoiceId,
+            date: returnDate,
+            description: `رصيد مقدم ناتج عن مرتجع مبيعات ${returnNumber} (أصل ${orig.invoiceNumber})`,
+            createdBy: actor.id,
+            createdAt: nowIso,
+          };
+        }
+
+        if (customer && (arCredited > 0 || advanceCredited > 0)) {
+          await db.parties.put(customer);
+        }
+
+        if (restoredCogs > 0) {
+          if (!invAcc || !cogsAcc) {
+            throw new FinancialValidationError('حساب المخزون أو تكلفة المبيعات غير معرف.');
+          }
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: invCode,
+            accountName: invAcc.nameAr,
+            debit: restoredCogs,
+            credit: 0,
+            costCenterId: orig.activityId,
+            memo: `إعادة بضاعة مرتجعة للمخزون ${returnNumber}`,
+          });
+          invAcc.balance = roundMoney(invAcc.balance + accountBalanceDeltaByType(invAcc.type, restoredCogs, 0));
+          await db.accounts.put(invAcc);
+
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: cogsCode,
+            accountName: cogsAcc.nameAr,
+            debit: 0,
+            credit: restoredCogs,
+            costCenterId: orig.activityId,
+            memo: `تخفيض تكلفة البضاعة المباعة لمرتجع ${returnNumber}`,
+          });
+          cogsAcc.balance = roundMoney(cogsAcc.balance + accountBalanceDeltaByType(cogsAcc.type, 0, restoredCogs));
+          await db.accounts.put(cogsAcc);
+        }
+
+        const entryNumber = await this.allocateSequenceNumberAtomic(
+          'JV',
+          branch.code || 'BR01',
+          terminalCode,
+          tenantId
+        );
+        const journalEntry: JournalEntry = {
+          id: storage.generateUUID(),
+          entryNumber,
+          date: returnDate,
+          description: `قيد مرتجع مبيعات ${returnNumber} (أصل ${orig.invoiceNumber}) - ${orig.partyName}`,
+          costCenterId: orig.activityId,
+          branchId: targetBranchId,
+          lines: journalLines,
+          status: 'POSTED',
+          referenceType: 'INVOICE',
+          referenceId: returnInvoiceId,
+          isAutoGenerated: true,
+        };
+
+        const accountsByCode = await this.getAccountsByCodeMap();
+        validateJournalEntryInput({ entry: journalEntry, accountsByCode });
+
+        if (advTx) {
+          advTx.journalEntryId = journalEntry.id;
+          await db.partyAdvanceTransactions.put(advTx);
+        }
+
+        const returnInvoice: Invoice = {
+          id: returnInvoiceId,
+          invoiceNumber: returnNumber,
+          type: 'RETURN_SALE',
+          activityId: orig.activityId,
+          branchId: targetBranchId,
+          partyId: orig.partyId,
+          partyName: orig.partyName,
+          date: returnDate,
+          items: returnItems,
+          subtotal: returnTotal,
+          discount: 0,
+          tax: 0,
+          total: returnTotal,
+          paidAmount: cashRefund,
+          advanceAppliedAmount: advanceCredited,
+          paymentMethod: cashRefund > 0 ? 'CASH' : 'CREDIT',
+          cashBoxId: targetCashBox?.id || orig.cashBoxId || '',
+          notes: `مرتجع للفاتورة ${orig.invoiceNumber} — ${cleanReason}`,
+          originalInvoiceId: orig.id,
+          originalInvoiceNumber: orig.invoiceNumber,
+          returnReason: cleanReason,
+          journalEntryId: journalEntry.id,
+          isPosted: true,
+          status: 'POSTED',
+          totalCogs: restoredCogs,
+          stockDeductionsRecorded: restoredDeductions,
+        };
+
+        await db.journalEntries.put(journalEntry);
+        await db.invoices.put(returnInvoice);
+
+        const idemKey = params.clientRequestId
+          ? `REQ_${tenantId}_${params.clientRequestId}`
+          : `${tenantId}_INVOICE_${returnInvoice.id}_CREATE`;
+
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId: targetBranchId,
+          entityType: 'INVOICE',
+          entityId: returnInvoice.id,
+          action: 'CREATE',
+          payload: returnInvoice as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 3,
+          dependsOn: [orig.id],
+          createdAt: nowIso,
+          idempotencyKey: idemKey,
+        });
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId: targetBranchId,
+          entityType: 'JOURNAL_ENTRY',
+          entityId: journalEntry.id,
+          action: 'CREATE',
+          payload: journalEntry as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 4,
+          dependsOn: [returnInvoice.id],
+          createdAt: nowIso,
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
+        });
+        if (advTx) {
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: targetBranchId,
+            entityType: 'PARTY_ADVANCE',
+            entityId: advTx.id,
+            action: 'CREATE',
+            payload: advTx as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [returnInvoice.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_PARTY_ADVANCE_${advTx.id}_CREATE`,
+          });
+        }
+
+        await db.auditLogs.put({
+          id: storage.generateUUID(),
+          timestamp: nowIso,
+          userId: actor.id,
+          userName: actor.fullName,
+          tenantId,
+          branchId: targetBranchId,
+          action: 'إصدار مرتجع مبيعات ذري',
+          details: `مرتجع ${returnNumber} على الفاتورة ${orig.invoiceNumber} بقيمة ${returnTotal} ${currencySymbol} (تخفيض ذمة: ${arCredited}، رد نقدي: ${cashRefund}، رصيد مقدم: ${advanceCredited})`,
+          entityType: 'INVOICE',
+          entityId: returnInvoice.id,
+          previousValue: { originalInvoiceId: orig.id, originalInvoiceNumber: orig.invoiceNumber },
+          newValue: { total: returnTotal, arCredited, cashRefund, advanceCredited, restoredCogs },
+          reason: cleanReason,
+          result: 'SUCCESS',
+        });
+
+        return { success: true, invoice: returnInvoice, journalEntry };
+      }
+    );
+  }
+
+  public async createPurchaseReturnAtomic(params: {
+    originalInvoiceId: string;
+    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    returnReason: string;
+    refundMethod: 'AUTO' | 'AP_OFFSET' | 'CASH' | 'ADVANCE';
+    cashBoxId?: string;
+    date?: string;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }> {
+    await this.ensureReady();
+    const { actor, tenantId } = this.requireAuthorizedActor('purchase:return');
+    const cleanReason = params.returnReason?.trim();
+    if (!cleanReason) {
+      throw new FinancialValidationError('سبب مرتجع المشتريات مطلوب لتوثيق القيد وسجل التدقيق.');
+    }
+    if (!params.items || params.items.length === 0) {
+      throw new FinancialValidationError('يجب تحديد صنف واحد على الأقل لإتمام مرتجع المشتريات.');
+    }
+
+    const terminalCode = storage.getTerminalCode();
+    const currencySymbol = getActiveCurrencyConfig().symbol;
+
+    return await db.transaction(
+      'rw',
+      [
+        db.invoices,
+        db.journalEntries,
+        db.products,
+        db.cashBoxes,
+        db.accounts,
+        db.parties,
+        db.partyAdvanceTransactions,
+        db.outbox,
+        db.auditLogs,
+        db.sequences,
+        db.branches,
+      ],
+      async () => {
+        if (params.clientRequestId) {
+          const dupOutbox = await db.outbox
+            .where('idempotencyKey')
+            .equals(`REQ_${tenantId}_${params.clientRequestId}`)
+            .first();
+          if (dupOutbox) {
+            const dupInv = await db.invoices.get(dupOutbox.entityId);
+            if (dupInv && dupInv.journalEntryId) {
+              const dupJe = await db.journalEntries.get(dupInv.journalEntryId);
+              if (dupJe) {
+                return { success: true, invoice: dupInv, journalEntry: dupJe };
+              }
+            }
+          }
+        }
+
+        const orig = await db.invoices.get(params.originalInvoiceId);
+        if (!orig) {
+          throw new FinancialValidationError('فاتورة المشتريات الأصلية غير موجودة.');
+        }
+        if (orig.type !== 'PURCHASE') {
+          throw new FinancialValidationError('يمكن إصدار مرتجع مشتريات لفواتير المشتريات (PURCHASE) فقط.');
+        }
+        if (orig.status === 'REVERSED') {
+          throw new FinancialValidationError('لا يمكن عمل مرتجع على فاتورة مشتريات معكوسة.');
+        }
+
+        const targetBranchId = orig.branchId?.trim() || '';
+        assertBranchAccess(actor, targetBranchId, { requireTarget: true });
+        const branch = await db.branches.get(targetBranchId);
+        if (!branch) throw new FinancialValidationError('فرع الفاتورة الأصلية غير موجود.');
+
+        const priorReturns = await db.invoices
+          .filter(
+            (i) =>
+              i.type === 'RETURN_PURCHASE' &&
+              i.originalInvoiceId === orig.id &&
+              i.status !== 'REVERSED'
+          )
+          .toArray();
+
+        const returnedByProductBatch = new Map<string, number>();
+        for (const r of priorReturns) {
+          for (const it of r.items || []) {
+            const key = `${it.productId}::${it.batchNumber || ''}`;
+            returnedByProductBatch.set(
+              key,
+              roundMoney((returnedByProductBatch.get(key) || 0) + it.quantity, 4)
+            );
+          }
+        }
+
+        const costFactor = orig.subtotal > 0 ? orig.total / orig.subtotal : 1;
+        const returnItems: InvoiceItem[] = [];
+        let returnTotal = 0;
+        let inventoryCostDeducted = 0;
+
+        for (const reqItem of params.items) {
+          if (!reqItem.productId || !Number.isFinite(reqItem.quantity) || reqItem.quantity <= 0) {
+            throw new FinancialValidationError('كمية الصنف المرتجع يجب أن تكون أكبر من الصفر.');
+          }
+          const reqQty = roundMoney(reqItem.quantity, 4);
+          const matchingOrigLines = (orig.items || []).filter(
+            (it) =>
+              it.productId === reqItem.productId &&
+              (!reqItem.batchNumber || it.batchNumber === reqItem.batchNumber)
+          );
+          if (matchingOrigLines.length === 0) {
+            throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود ضمن بنود فاتورة الشراء الأصلية.`);
+          }
+          const batchKey = `${reqItem.productId}::${reqItem.batchNumber || matchingOrigLines[0].batchNumber || ''}`;
+          const purchasedQty = roundMoney(matchingOrigLines.reduce((s, l) => s + l.quantity, 0), 4);
+          const alreadyRet = returnedByProductBatch.get(batchKey) || 0;
+          const remainingReturnable = roundMoney(purchasedQty - alreadyRet, 4);
+          if (reqQty > remainingReturnable + 0.0001) {
+            throw new FinancialValidationError(
+              `الكمية المطلوب إرجاعها للمورد من (${matchingOrigLines[0].productName}) تتجاوز الكمية المتاحة (${remainingReturnable}).`
+            );
+          }
+          returnedByProductBatch.set(batchKey, roundMoney(alreadyRet + reqQty, 4));
+
+          const product = await db.products.get(reqItem.productId);
+          if (!product) {
+            throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود في المستودع.`);
+          }
+          if (product.batches && product.batches.length > 0) {
+            validateProductStockConsistency(product);
+          }
+          if (product.currentStock + 0.0001 < reqQty) {
+            throw new FinancialValidationError(
+              `الرصيد المتاح بالمستودع من (${product.nameAr}) هو ${product.currentStock} فقط، ولا يكفي لإرجاع ${reqQty} للمورد.`
+            );
+          }
+
+          const targetBatchNum = reqItem.batchNumber || matchingOrigLines[0].batchNumber;
+          if (targetBatchNum && product.batches && product.batches.length > 0) {
+            const batch = product.batches.find((b) => b.batchNumber === targetBatchNum);
+            if (!batch) {
+              throw new FinancialValidationError(`التشغيلة (${targetBatchNum}) للصنف (${product.nameAr}) غير موجودة.`);
+            }
+            if (batch.quantity + 0.0001 < reqQty) {
+              throw new FinancialValidationError(
+                `الكمية المتاحة في التشغيلة (${targetBatchNum}) هي ${batch.quantity} فقط.`
+              );
+            }
+            inventoryCostDeducted = roundMoney(inventoryCostDeducted + reqQty * batch.costPrice);
+            batch.quantity = roundMoney(batch.quantity - reqQty, 4);
+            product.currentStock = roundMoney(
+              product.batches.reduce((s, b) => s + b.quantity, 0),
+              4
+            );
+            const totalVal = product.batches.reduce((s, b) => s + b.quantity * b.costPrice, 0);
+            product.purchasePrice =
+              product.currentStock > 0
+                ? roundMoney(totalVal / product.currentStock, 4)
+                : batch.costPrice;
+          } else {
+            inventoryCostDeducted = roundMoney(inventoryCostDeducted + reqQty * product.purchasePrice);
+            product.currentStock = roundMoney(product.currentStock - reqQty, 4);
+          }
+
+          validateProductStockConsistency(product);
+          await db.products.put(product);
+
+          const avgPurchaseUnit = matchingOrigLines.reduce((s, l) => s + l.total, 0) / purchasedQty;
+          const lineReturnVal = roundMoney(reqQty * avgPurchaseUnit * costFactor);
+          returnTotal = roundMoney(returnTotal + lineReturnVal);
+
+          returnItems.push({
+            id: storage.generateUUID(),
+            productId: product.id,
+            productName: matchingOrigLines[0].productName || product.nameAr,
+            productCode: matchingOrigLines[0].productCode || product.code,
+            batchNumber: targetBatchNum,
+            unit: matchingOrigLines[0].unit || product.unit,
+            quantity: reqQty,
+            unitPrice: roundMoney(avgPurchaseUnit * costFactor, 4),
+            discount: 0,
+            total: lineReturnVal,
+          });
+        }
+
+        const returnDate = params.date || new Date().toISOString().split('T')[0];
+        const supplier = orig.partyId ? await db.parties.get(orig.partyId) : undefined;
+        const origOpenRemaining = getInvoiceRemainingAmount(orig);
+
+        let apDebited = 0;
+        let cashReceived = 0;
+        let advanceCredited = 0;
+
+        if (params.refundMethod === 'AP_OFFSET') {
+          if (!supplier || supplier.type !== 'SUPPLIER') {
+            throw new FinancialValidationError('تخفيض ذمة المورد متاح للموردين المسجلين فقط.');
+          }
+          if (toCents(returnTotal) > toCents(origOpenRemaining) + 1) {
+            throw new FinancialValidationError(
+              `قيمة المرتجع (${returnTotal}) تتجاوز المتبقي المستحق من الفاتورة (${origOpenRemaining})؛ استخدم التسوية التلقائية.`
+            );
+          }
+          apDebited = Math.min(returnTotal, origOpenRemaining);
+        } else if (params.refundMethod === 'CASH') {
+          if (toCents(origOpenRemaining) > 0 && toCents(returnTotal) > toCents(roundMoney(orig.total - origOpenRemaining)) + 1) {
+            throw new FinancialValidationError(
+              'الفاتورة تحتوي على مستحقات آجلة للمورد؛ استخدم التسوية التلقائية لتخفيض ذمة المورد أولاً.'
+            );
+          }
+          cashReceived = returnTotal;
+        } else if (params.refundMethod === 'ADVANCE') {
+          if (!supplier || supplier.type !== 'SUPPLIER') {
+            throw new FinancialValidationError('تحويل المرتجع إلى سلفة مورد متاح للموردين المسجلين فقط.');
+          }
+          if (toCents(origOpenRemaining) > 0 && toCents(returnTotal) > toCents(roundMoney(orig.total - origOpenRemaining)) + 1) {
+            throw new FinancialValidationError(
+              'الفاتورة تحتوي على مستحقات آجلة للمورد؛ استخدم التسوية التلقائية لتخفيض ذمة المورد أولاً.'
+            );
+          }
+          advanceCredited = returnTotal;
+        } else {
+          apDebited = supplier ? Math.min(returnTotal, origOpenRemaining) : 0;
+          const excess = roundMoney(returnTotal - apDebited);
+          if (excess > 0) {
+            if (params.cashBoxId || !supplier) {
+              cashReceived = excess;
+            } else {
+              cashReceived = orig.cashBoxId ? excess : 0;
+              advanceCredited = cashReceived > 0 ? 0 : excess;
+            }
+          }
+        }
+
+        let targetCashBox: CashBox | undefined;
+        if (cashReceived > 0) {
+          const reqBoxId = params.cashBoxId || orig.cashBoxId;
+          targetCashBox = reqBoxId
+            ? await db.cashBoxes.get(reqBoxId)
+            : await this.resolveBranchDefaultCashBoxTx(targetBranchId);
+          this.assertCashBoxBranchAccess(actor, targetCashBox, targetBranchId);
+        }
+
+        const returnNumber = await this.allocateSequenceNumberAtomic(
+          'RP',
+          branch.code || 'BR01',
+          terminalCode,
+          tenantId
+        );
+        const returnInvoiceId = storage.generateUUID();
+
+        const activityInventoryAccounts: Record<CommercialActivityId, string> = {
+          pharmacy: '11041',
+          grocery: '11042',
+          bike_parts: '11043',
+          equipment_parts: '11044',
+        };
+        const activityCogsAccounts: Record<CommercialActivityId, string> = {
+          pharmacy: '5101',
+          grocery: '5102',
+          bike_parts: '5103',
+          equipment_parts: '5104',
+        };
+
+        const invCode = activityInventoryAccounts[orig.activityId] || '11041';
+        const cogsCode = activityCogsAccounts[orig.activityId] || '5101';
+        const invAcc = await db.accounts.get(invCode);
+        if (!invAcc) throw new FinancialValidationError(`حساب المخزون (${invCode}) غير معرف.`);
+
+        const journalLines: JournalEntryLine[] = [];
+
+        if (apDebited > 0) {
+          const apAcc = await db.accounts.get(SPECIAL_ACCOUNTS.SUPPLIERS_AP);
+          if (!apAcc) throw new FinancialValidationError('حساب الموردين (2101) غير معرف.');
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: SPECIAL_ACCOUNTS.SUPPLIERS_AP,
+            accountName: `${apAcc.nameAr} - ${orig.partyName}`,
+            debit: apDebited,
+            credit: 0,
+            costCenterId: orig.activityId,
+            memo: `تخفيض ذمة المورد عن مرتجع مشتريات ${returnNumber}`,
+          });
+          apAcc.balance = roundMoney(apAcc.balance + accountBalanceDeltaByType(apAcc.type, apDebited, 0));
+          await db.accounts.put(apAcc);
+          if (supplier) {
+            supplier.balance = roundMoney(supplier.balance + apDebited);
+          }
+          orig.returnedAmount = roundMoney((orig.returnedAmount || 0) + apDebited);
+          await db.invoices.put(orig);
+        }
+
+        if (cashReceived > 0 && targetCashBox) {
+          const boxAcc = await db.accounts.get(targetCashBox.accountCode);
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: targetCashBox.accountCode,
+            accountName: boxAcc?.nameAr || targetCashBox.nameAr,
+            debit: cashReceived,
+            credit: 0,
+            costCenterId: orig.activityId,
+            memo: `استرداد نقدي من المورد عن مرتجع مشتريات ${returnNumber}`,
+          });
+          targetCashBox.balance = roundMoney(targetCashBox.balance + cashReceived);
+          await db.cashBoxes.put(targetCashBox);
+          if (boxAcc) {
+            boxAcc.balance = roundMoney(boxAcc.balance + accountBalanceDeltaByType(boxAcc.type, cashReceived, 0));
+            await db.accounts.put(boxAcc);
+          }
+        }
+
+        let advTx: PartyAdvanceTransaction | undefined;
+        const nowIso = new Date().toISOString();
+        if (advanceCredited > 0 && supplier) {
+          const supAdvAcc = await this.ensureCanonicalAccountTx(SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES);
+          if (!supAdvAcc) throw new FinancialValidationError('حساب سلف الموردين (1105) غير معرف.');
+          journalLines.push({
+            id: storage.generateUUID(),
+            accountCode: SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES,
+            accountName: supAdvAcc.nameAr,
+            debit: advanceCredited,
+            credit: 0,
+            costCenterId: orig.activityId,
+            memo: `إثبات رصيد سلفة لدى المورد عن مرتجع مشتريات ${returnNumber}`,
+          });
+          supAdvAcc.balance = roundMoney(
+            supAdvAcc.balance + accountBalanceDeltaByType(supAdvAcc.type, advanceCredited, 0)
+          );
+          await db.accounts.put(supAdvAcc);
+          const nextAdvBal = roundMoney((supplier.advanceBalance || 0) + advanceCredited);
+          supplier.advanceBalance = nextAdvBal;
+          advTx = {
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: targetBranchId,
+            partyId: supplier.id,
+            partyType: 'SUPPLIER',
+            type: 'PREPAYMENT_DEPOSIT',
+            amount: advanceCredited,
+            balanceAfter: nextAdvBal,
+            invoiceId: returnInvoiceId,
+            date: returnDate,
+            description: `سلفة مورد ناتجة عن مرتجع مشتريات ${returnNumber} (أصل ${orig.invoiceNumber})`,
+            createdBy: actor.id,
+            createdAt: nowIso,
+          };
+        }
+
+        if (supplier && (apDebited > 0 || advanceCredited > 0)) {
+          await db.parties.put(supplier);
+        }
+
+        // دائن: المخزون بقيمة التكلفة المخزنية المخصومة (Perpetual Inventory)
+        journalLines.push({
+          id: storage.generateUUID(),
+          accountCode: invCode,
+          accountName: invAcc.nameAr,
+          debit: 0,
+          credit: inventoryCostDeducted,
+          costCenterId: orig.activityId,
+          memo: `صرف مرتجع مشتريات من المخزون ${returnNumber}`,
+        });
+        invAcc.balance = roundMoney(
+          invAcc.balance + accountBalanceDeltaByType(invAcc.type, 0, inventoryCostDeducted)
+        );
+        await db.accounts.put(invAcc);
+
+        // تسوية أي فرق طفيف بين متوسط تكلفة المخزون وسعر فاتورة الشراء الأصلية على حساب تكلفة المبيعات
+        const costVariance = roundMoney(returnTotal - inventoryCostDeducted);
+        if (Math.abs(costVariance) > 0.009) {
+          const cogsAcc = await db.accounts.get(cogsCode);
+          if (!cogsAcc) throw new FinancialValidationError(`حساب تكلفة المبيعات (${cogsCode}) غير معرف.`);
+          if (costVariance > 0) {
+            journalLines.push({
+              id: storage.generateUUID(),
+              accountCode: cogsCode,
+              accountName: cogsAcc.nameAr,
+              debit: 0,
+              credit: costVariance,
+              costCenterId: orig.activityId,
+              memo: `تسوية فرق تكلفة مرتجع مشتريات ${returnNumber}`,
+            });
+            cogsAcc.balance = roundMoney(
+              cogsAcc.balance + accountBalanceDeltaByType(cogsAcc.type, 0, costVariance)
+            );
+          } else {
+            const absVar = Math.abs(costVariance);
+            journalLines.push({
+              id: storage.generateUUID(),
+              accountCode: cogsCode,
+              accountName: cogsAcc.nameAr,
+              debit: absVar,
+              credit: 0,
+              costCenterId: orig.activityId,
+              memo: `تسوية فرق تكلفة مرتجع مشتريات ${returnNumber}`,
+            });
+            cogsAcc.balance = roundMoney(
+              cogsAcc.balance + accountBalanceDeltaByType(cogsAcc.type, absVar, 0)
+            );
+          }
+          await db.accounts.put(cogsAcc);
+        }
+
+        const entryNumber = await this.allocateSequenceNumberAtomic(
+          'JV',
+          branch.code || 'BR01',
+          terminalCode,
+          tenantId
+        );
+        const journalEntry: JournalEntry = {
+          id: storage.generateUUID(),
+          entryNumber,
+          date: returnDate,
+          description: `قيد مرتجع مشتريات ${returnNumber} (أصل ${orig.invoiceNumber}) - ${orig.partyName}`,
+          costCenterId: orig.activityId,
+          branchId: targetBranchId,
+          lines: journalLines,
+          status: 'POSTED',
+          referenceType: 'INVOICE',
+          referenceId: returnInvoiceId,
+          isAutoGenerated: true,
+        };
+
+        const accountsByCode = await this.getAccountsByCodeMap();
+        validateJournalEntryInput({ entry: journalEntry, accountsByCode });
+
+        if (advTx) {
+          advTx.journalEntryId = journalEntry.id;
+          await db.partyAdvanceTransactions.put(advTx);
+        }
+
+        const returnInvoice: Invoice = {
+          id: returnInvoiceId,
+          invoiceNumber: returnNumber,
+          type: 'RETURN_PURCHASE',
+          activityId: orig.activityId,
+          branchId: targetBranchId,
+          partyId: orig.partyId,
+          partyName: orig.partyName,
+          date: returnDate,
+          items: returnItems,
+          subtotal: returnTotal,
+          discount: 0,
+          tax: 0,
+          total: returnTotal,
+          paidAmount: cashReceived,
+          advanceAppliedAmount: advanceCredited,
+          paymentMethod: cashReceived > 0 ? 'CASH' : 'CREDIT',
+          cashBoxId: targetCashBox?.id || orig.cashBoxId || '',
+          notes: `مرتجع مشتريات للفاتورة ${orig.invoiceNumber} — ${cleanReason}`,
+          originalInvoiceId: orig.id,
+          originalInvoiceNumber: orig.invoiceNumber,
+          returnReason: cleanReason,
+          journalEntryId: journalEntry.id,
+          isPosted: true,
+          status: 'POSTED',
+          totalCogs: inventoryCostDeducted,
+        };
+
+        await db.journalEntries.put(journalEntry);
+        await db.invoices.put(returnInvoice);
+
+        const idemKey = params.clientRequestId
+          ? `REQ_${tenantId}_${params.clientRequestId}`
+          : `${tenantId}_INVOICE_${returnInvoice.id}_CREATE`;
+
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId: targetBranchId,
+          entityType: 'INVOICE',
+          entityId: returnInvoice.id,
+          action: 'CREATE',
+          payload: returnInvoice as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 3,
+          dependsOn: [orig.id],
+          createdAt: nowIso,
+          idempotencyKey: idemKey,
+        });
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId: targetBranchId,
+          entityType: 'JOURNAL_ENTRY',
+          entityId: journalEntry.id,
+          action: 'CREATE',
+          payload: journalEntry as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 4,
+          dependsOn: [returnInvoice.id],
+          createdAt: nowIso,
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
+        });
+        if (advTx) {
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: targetBranchId,
+            entityType: 'PARTY_ADVANCE',
+            entityId: advTx.id,
+            action: 'CREATE',
+            payload: advTx as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [returnInvoice.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_PARTY_ADVANCE_${advTx.id}_CREATE`,
+          });
+        }
+
+        await db.auditLogs.put({
+          id: storage.generateUUID(),
+          timestamp: nowIso,
+          userId: actor.id,
+          userName: actor.fullName,
+          tenantId,
+          branchId: targetBranchId,
+          action: 'إصدار مرتجع مشتريات ذري',
+          details: `مرتجع ${returnNumber} على الفاتورة ${orig.invoiceNumber} بقيمة ${returnTotal} ${currencySymbol} (تخفيض ذمة: ${apDebited}، استرداد نقدي: ${cashReceived}، سلفة مورد: ${advanceCredited})`,
+          entityType: 'INVOICE',
+          entityId: returnInvoice.id,
+          previousValue: { originalInvoiceId: orig.id, originalInvoiceNumber: orig.invoiceNumber },
+          newValue: { total: returnTotal, apDebited, cashReceived, advanceCredited, inventoryCostDeducted },
+          reason: cleanReason,
+          result: 'SUCCESS',
+        });
+
+        return { success: true, invoice: returnInvoice, journalEntry };
       }
     );
   }

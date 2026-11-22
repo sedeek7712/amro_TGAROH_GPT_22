@@ -63,10 +63,12 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({ record, 
             <p className="text-xs text-slate-600 mt-1">قسم إدارة الأمانات وحفظ ممتلكات وأموال الغير</p>
             <div className="inline-block mt-3 px-4 py-1 border border-slate-800 text-slate-900 font-bold rounded text-xs bg-slate-50">
               {record.status === 'HELD'
-                ? 'سند استلام وإيداع أمانة'
+                ? (record.returnedAmount || 0) > 0
+                  ? 'سند أمانة (تم رد جزء والباقي محفوظ)'
+                  : 'سند استلام وإيداع أمانة'
                 : record.status === 'RETURNED'
                 ? 'سند تسليم وإبراء ذمة أمانة'
-                : 'سند تصفية أمانة'}
+                : 'سند أمانة ملغاة'}
             </div>
           </div>
 
@@ -100,6 +102,12 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({ record, 
                 <span className="font-mono font-semibold text-emerald-700">{record.returnedDate}</span>
               </div>
             )}
+            {record.cancelledDate && (
+              <div className="col-span-2 text-rose-700 bg-rose-50 p-2 rounded border border-rose-200">
+                <div>تاريخ الإلغاء: <span className="font-mono font-bold">{record.cancelledDate}</span></div>
+                {record.cancelledReason && <div>سبب الإلغاء: {record.cancelledReason}</div>}
+              </div>
+            )}
           </div>
 
           {/* Details */}
@@ -112,9 +120,31 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({ record, 
             </div>
 
             {record.type === 'CASH' ? (
-              <div className="flex justify-between items-center py-2 bg-purple-50 px-3 rounded text-purple-950 font-bold">
-                <span>المبلغ المودع بأمانة:</span>
-                <span className="text-base font-mono tabular-nums">{record.amount.toFixed(2)} {currencySymbol}</span>
+              <div className="space-y-2">
+                <div className="flex justify-between items-center py-2 bg-purple-50 px-3 rounded text-purple-950 font-bold">
+                  <span>المبلغ الأصلي المودع بأمانة:</span>
+                  <span className="text-base font-mono tabular-nums">{record.amount.toFixed(2)} {currencySymbol}</span>
+                </div>
+                {((record.returnedAmount || 0) > 0 || record.remainingAmount !== undefined) && (
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    <div className="bg-emerald-50 px-3 py-1.5 rounded border border-emerald-200 flex justify-between">
+                      <span className="text-emerald-800">المبلغ المردود:</span>
+                      <span className="font-mono font-bold text-emerald-900">
+                        {Number(record.returnedAmount || 0).toFixed(2)} {currencySymbol}
+                      </span>
+                    </div>
+                    <div className="bg-amber-50 px-3 py-1.5 rounded border border-amber-200 flex justify-between">
+                      <span className="text-amber-800">الرصيد المتبقي:</span>
+                      <span className="font-mono font-bold text-amber-900">
+                        {Number(
+                          record.status === 'CANCELLED'
+                            ? 0
+                            : record.remainingAmount ?? Math.max(0, record.amount - (record.returnedAmount || 0))
+                        ).toFixed(2)} {currencySymbol}
+                      </span>
+                    </div>
+                  </div>
+                )}
               </div>
             ) : (
               <div>
@@ -127,6 +157,35 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({ record, 
                     الرقم التسلسلي: <span className="font-mono font-bold">{record.itemSerial}</span>
                   </div>
                 )}
+              </div>
+            )}
+
+            {record.returnHistory && record.returnHistory.length > 0 && (
+              <div className="pt-2 border-t border-slate-100">
+                <div className="text-xs font-bold text-slate-700 mb-1.5">سجل دفعات الرد والتسليم:</div>
+                <table className="w-full text-right text-[11px] border border-slate-200 rounded">
+                  <thead className="bg-slate-50 text-slate-600 border-b border-slate-200">
+                    <tr>
+                      <th className="py-1 px-2">التاريخ</th>
+                      <th className="py-1 px-2 text-center">المبلغ المردود</th>
+                      <th className="py-1 px-2">المستلم / ملاحظات</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100">
+                    {record.returnHistory.map((ev) => (
+                      <tr key={ev.id}>
+                        <td className="py-1 px-2 font-mono">{ev.date}</td>
+                        <td className="py-1 px-2 text-center font-mono font-bold">
+                          {ev.amount > 0 ? `${ev.amount.toFixed(2)} ${currencySymbol}` : 'عيني'}
+                        </td>
+                        <td className="py-1 px-2 text-slate-600">
+                          {ev.recipientSignatureName || '-'}
+                          {ev.notes ? ` — ${ev.notes}` : ''}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
               </div>
             )}
 

@@ -178,10 +178,70 @@ export class SqliteDataService implements IDataService {
       batchNumber?: string;
       expiryDate?: string;
     }>;
+    applyAdvanceAmount?: number;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }> {
+    const res = await bridge().createPurchaseInvoiceAtomic({ token: token(), params });
+    desktopSession.notifyChanged([
+      'invoices',
+      'products',
+      'parties',
+      'cashBoxes',
+      'accounts',
+      'journalEntries',
+      'paymentAllocations',
+      'partyAdvances',
+      'outbox',
+      'auditLogs',
+    ]);
+    return res;
+  }
+  public async createSalesReturnAtomic(params: {
+    originalInvoiceId: string;
+    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    returnReason: string;
+    refundMethod: 'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE';
+    cashBoxId?: string;
+    date?: string;
     clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }> {
-    const res = await bridge().createPurchaseInvoiceAtomic({ token: token(), params });
-    desktopSession.notifyChanged(['invoices', 'products', 'parties', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
+    const res = await bridge().createSalesReturnAtomic({ token: token(), params });
+    desktopSession.notifyChanged([
+      'invoices',
+      'products',
+      'parties',
+      'cashBoxes',
+      'accounts',
+      'journalEntries',
+      'paymentAllocations',
+      'partyAdvances',
+      'outbox',
+      'auditLogs',
+    ]);
+    return res;
+  }
+  public async createPurchaseReturnAtomic(params: {
+    originalInvoiceId: string;
+    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    returnReason: string;
+    refundMethod: 'AUTO' | 'AP_OFFSET' | 'CASH' | 'ADVANCE';
+    cashBoxId?: string;
+    date?: string;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }> {
+    const res = await bridge().createPurchaseReturnAtomic({ token: token(), params });
+    desktopSession.notifyChanged([
+      'invoices',
+      'products',
+      'parties',
+      'cashBoxes',
+      'accounts',
+      'journalEntries',
+      'paymentAllocations',
+      'partyAdvances',
+      'outbox',
+      'auditLogs',
+    ]);
     return res;
   }
   public async createJournalEntryAtomic(entry: JournalEntry): Promise<JournalEntry> {
@@ -335,9 +395,19 @@ export class SqliteDataService implements IDataService {
   public async returnAmanatAtomic(params: {
     recordId: string;
     cashBoxId?: string;
+    returnAmount?: number;
     recipientSignatureName?: string;
+    notes?: string;
   }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }> {
     const res = await bridge().returnAmanatAtomic({ token: token(), params });
+    desktopSession.notifyChanged(['amanat', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
+    return res;
+  }
+  public async cancelAmanatAtomic(params: {
+    recordId: string;
+    reason: string;
+  }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }> {
+    const res = await bridge().cancelAmanatAtomic({ token: token(), params });
     desktopSession.notifyChanged(['amanat', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
     return res;
   }
@@ -428,7 +498,7 @@ export class SqliteDataService implements IDataService {
   }
 
   public async generateBranchInvoiceNumber(
-    type: 'INV' | 'PUR',
+    type: 'INV' | 'PUR' | 'RS' | 'RP',
     branchCode?: string,
     terminalCode?: string
   ): Promise<string> {

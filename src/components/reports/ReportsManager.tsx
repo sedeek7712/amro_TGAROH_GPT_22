@@ -199,31 +199,71 @@ export const ReportsManager: React.FC = () => {
     for (const inv of partyInvoices) {
       const cashPaid = Math.max(0, roundMoney(inv.paidAmount - (inv.advanceAppliedAmount || 0)));
       if (party.type === 'CUSTOMER') {
-        rawRows.push({
-          id: inv.id,
-          date: inv.date,
-          sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-          type: inv.type === 'SALE' ? 'فاتورة مبيعات' : 'مرتجع مبيعات',
-          docNumber: inv.invoiceNumber,
-          debit: inv.type === 'SALE' ? inv.total : 0,
-          credit: cashPaid,
-          memo: `فاتورة ${inv.type === 'SALE' ? 'مبيعات' : 'مرتجع'} (${inv.paymentMethod})`,
-          extraBadge:
-            (inv.advanceAppliedAmount || 0) > 0
-              ? `خصم من الرصيد المقدم: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
-              : undefined,
-        });
+        if (inv.type === 'RETURN_SALE') {
+          const advCredited = inv.advanceAppliedAmount || 0;
+          rawRows.push({
+            id: inv.id,
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            type: 'مرتجع مبيعات',
+            docNumber: inv.invoiceNumber,
+            debit: roundMoney(inv.paidAmount + advCredited),
+            credit: inv.total,
+            memo: `مرتجع مبيعات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
+            extraBadge:
+              advCredited > 0
+                ? `تحويل للرصيد المقدم: ${Number(advCredited).toFixed(2)}`
+                : undefined,
+          });
+        } else {
+          rawRows.push({
+            id: inv.id,
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            type: 'فاتورة مبيعات',
+            docNumber: inv.invoiceNumber,
+            debit: inv.total,
+            credit: cashPaid,
+            memo: `فاتورة مبيعات (${inv.paymentMethod})`,
+            extraBadge:
+              (inv.advanceAppliedAmount || 0) > 0
+                ? `خصم من الرصيد المقدم: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
+                : undefined,
+          });
+        }
       } else {
-        rawRows.push({
-          id: inv.id,
-          date: inv.date,
-          sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-          type: inv.type === 'PURCHASE' ? 'فاتورة مشتريات' : 'مرتجع مشتريات',
-          docNumber: inv.invoiceNumber,
-          debit: cashPaid,
-          credit: inv.type === 'PURCHASE' ? inv.total : 0,
-          memo: `فاتورة مشتريات (${inv.paymentMethod})`,
-        });
+        if (inv.type === 'RETURN_PURCHASE') {
+          const advCredited = inv.advanceAppliedAmount || 0;
+          rawRows.push({
+            id: inv.id,
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            type: 'مرتجع مشتريات',
+            docNumber: inv.invoiceNumber,
+            debit: inv.total,
+            credit: roundMoney(inv.paidAmount + advCredited),
+            memo: `مرتجع مشتريات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
+            extraBadge:
+              advCredited > 0
+                ? `إثبات سلفة مورد: ${Number(advCredited).toFixed(2)}`
+                : undefined,
+          });
+        } else {
+          rawRows.push({
+            id: inv.id,
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            type: 'فاتورة مشتريات',
+            docNumber: inv.invoiceNumber,
+            debit: cashPaid,
+            credit: inv.total,
+            memo: `فاتورة مشتريات (${inv.paymentMethod})`,
+            extraBadge:
+              (inv.advanceAppliedAmount || 0) > 0
+                ? `خصم من سلفة المورد: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
+                : undefined,
+          });
+        }
       }
     }
 
@@ -484,7 +524,7 @@ export const ReportsManager: React.FC = () => {
         </div>
 
         {/* Print Buttons Strip */}
-        <div className="flex items-center gap-2 w-full md:w-auto overflow-x-auto">
+        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
           <button
             onClick={() => handlePrint('A4')}
             className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm shrink-0"
@@ -1376,7 +1416,10 @@ export const ReportsManager: React.FC = () => {
                 ) : (
                   liveInvoices.map((inv) => {
                     const actName = activities.find((a) => a.id === inv.activityId)?.nameAr || inv.activityId;
-                    const remaining = inv.total - inv.paidAmount;
+                    const isReturn = inv.type === 'RETURN_SALE' || inv.type === 'RETURN_PURCHASE';
+                    const remaining = isReturn
+                      ? 0
+                      : Math.max(0, roundMoney(inv.total - inv.paidAmount - (inv.returnedAmount || 0)));
 
                     return (
                       <tr key={inv.id} className="hover:bg-slate-50">
@@ -1386,8 +1429,10 @@ export const ReportsManager: React.FC = () => {
                             <span className="text-emerald-700">مبيعات</span>
                           ) : inv.type === 'PURCHASE' ? (
                             <span className="text-blue-700">مشتريات</span>
+                          ) : inv.type === 'RETURN_SALE' ? (
+                            <span className="text-amber-700">مرتجع مبيعات</span>
                           ) : (
-                            <span className="text-amber-700">مرتجع</span>
+                            <span className="text-amber-700">مرتجع مشتريات</span>
                           )}
                         </td>
                         <td className="py-2.5 px-3 text-slate-600">{actName}</td>
@@ -1400,7 +1445,7 @@ export const ReportsManager: React.FC = () => {
                           {inv.paidAmount.toFixed(2)} {currencySymbol}
                         </td>
                         <td className="py-2.5 px-3 text-center font-mono tabular-nums text-rose-800">
-                          {remaining > 0 ? `${remaining.toFixed(2)} {currencySymbol}` : '-'}
+                          {remaining > 0 ? `${remaining.toFixed(2)} ${currencySymbol}` : '-'}
                         </td>
                         <td className="py-2.5 px-3 text-center no-print">
                           <button
@@ -1479,13 +1524,28 @@ export const ReportsManager: React.FC = () => {
                       {r.type === 'CASH' ? 'أمانة نقدية' : 'أمانة عينية'}
                     </td>
                     <td className="py-2.5 px-3 font-bold text-slate-900">
-                      {r.type === 'CASH' ? `${r.amount.toFixed(2)} {currencySymbol}` : r.itemDescription}
+                      {r.type === 'CASH' ? (
+                        <div>
+                          <span>{`${r.amount.toFixed(2)} ${currencySymbol}`}</span>
+                          {(r.returnedAmount || 0) > 0 && r.status === 'HELD' && (
+                            <span className="block text-[10px] text-amber-700 font-semibold">
+                              متبقي: {Math.max(0, roundMoney(r.amount - (r.returnedAmount || 0))).toFixed(2)} {currencySymbol}
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        r.itemDescription
+                      )}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono">{r.receivedDate}</td>
                     <td className="py-2.5 px-3 text-center font-bold">
                       {r.status === 'HELD' ? (
                         <span className="px-2 py-0.5 bg-amber-100 text-amber-900 rounded-full text-[10px]">
-                          محفوظة في الحرز
+                          {(r.returnedAmount || 0) > 0 ? 'مرتجع جزئياً' : 'محفوظة في الحرز'}
+                        </span>
+                      ) : r.status === 'CANCELLED' ? (
+                        <span className="px-2 py-0.5 bg-rose-100 text-rose-900 rounded-full text-[10px]">
+                          ملغاة
                         </span>
                       ) : (
                         <span className="px-2 py-0.5 bg-emerald-100 text-emerald-900 rounded-full text-[10px]">
@@ -1605,7 +1665,9 @@ export const ReportsManager: React.FC = () => {
                     liveAllocationAudits.map((a) => (
                       <tr key={a.id}>
                         <td className="py-2 px-3 font-mono text-[11px]">{a.timestamp.replace('T', ' ').slice(0, 19)}</td>
-                        <td className="py-2 px-3 font-mono font-bold">{a.voucherId}</td>
+                        <td className="py-2 px-3 font-mono font-bold">
+                          {liveVouchers.find((v) => v.id === a.voucherId)?.voucherNumber || a.voucherId}
+                        </td>
                         <td className="py-2 px-3 font-semibold">{a.userName}</td>
                         <td className="py-2 px-3 text-slate-700">{a.reason}</td>
                         <td className="py-2 px-3 font-mono text-[11px]">

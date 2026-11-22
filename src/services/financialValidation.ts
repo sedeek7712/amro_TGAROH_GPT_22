@@ -149,8 +149,9 @@ export function validatePurchaseInvoiceInput(params: {
     expiryDate?: string;
   }>;
   cashBox?: CashBox | null;
+  applyAdvanceAmount?: number;
 }): void {
-  const { invoice, itemsWithBatches, cashBox } = params;
+  const { invoice, itemsWithBatches, cashBox, applyAdvanceAmount = 0 } = params;
 
   if (!itemsWithBatches || itemsWithBatches.length === 0) {
     throw new FinancialValidationError('فاتورة المشتريات يجب أن تحتوي على صنف واحد على الأقل.');
@@ -194,10 +195,19 @@ export function validatePurchaseInvoiceInput(params: {
     );
   }
 
-  if (invoice.paidAmount > invoice.total + 0.01) {
+  if (!isFiniteNonNegative(applyAdvanceAmount)) {
+    throw new FinancialValidationError('مبلغ التسوية من رصيد سلفة المورد لا يجوز أن يكون سالباً.');
+  }
+
+  const totalSettled = roundMoney(invoice.paidAmount + applyAdvanceAmount);
+  if (totalSettled > invoice.total + 0.01) {
     throw new FinancialValidationError(
-      `المبلغ المدفوع (${invoice.paidAmount}) لا يمكن أن يتجاوز إجمالي فاتورة المشتريات (${invoice.total}).`
+      `مجموع المدفوع نقداً والمخصوم من سلفة المورد (${totalSettled}) لا يمكن أن يتجاوز إجمالي فاتورة المشتريات (${invoice.total}).`
     );
+  }
+
+  if (applyAdvanceAmount > 0 && !invoice.partyId) {
+    throw new FinancialValidationError('تسوية سلف الموردين تتطلب اختيار مورد مسجل.');
   }
 
   if (invoice.paidAmount > 0) {
@@ -324,21 +334,39 @@ export function validateAmanatDepositInput(params: {
 export function validateAmanatReturnInput(params: {
   record: AmanatRecord;
   cashBox?: CashBox | null;
+  returnAmount?: number;
 }): void {
-  const { record, cashBox } = params;
+  const { record, cashBox, returnAmount } = params;
   if (record.status !== 'HELD') {
     throw new FinancialValidationError('لا يمكن رد أمانة ليست في حالة الحفظ (HELD).');
   }
   if (record.type === 'CASH') {
-    if (!isFinitePositive(record.amount)) {
-      throw new FinancialValidationError('مبلغ الأمانة النقدية غير صالح للرد.');
+    const totalAmount = roundMoney(record.amount);
+    const alreadyReturned = roundMoney(record.returnedAmount || 0);
+    const remaining =
+      record.remainingAmount !== undefined
+        ? roundMoney(record.remainingAmount)
+        : roundMoney(Math.max(0, totalAmount - alreadyReturned));
+
+    if (!isFinitePositive(remaining)) {
+      throw new FinancialValidationError('المبلغ المتبقي من الأمانة النقدية غير صالح للرد.');
+    }
+    const effectiveReturn =
+      returnAmount !== undefined ? roundMoney(returnAmount) : remaining;
+    if (!isFinitePositive(effectiveReturn)) {
+      throw new FinancialValidationError('مبلغ رد الأمانة يجب أن يكون أكبر من الصفر.');
+    }
+    if (effectiveReturn > remaining + 0.001) {
+      throw new FinancialValidationError(
+        `مبلغ الرد المطلوب (${effectiveReturn}) يتجاوز المتبقي من الأمانة (${remaining}).`
+      );
     }
     if (!cashBox) {
       throw new FinancialValidationError('الصندوق النقدي المحدد لرد الأمانة غير موجود.');
     }
-    if (roundMoney(cashBox.balance) + 0.001 < roundMoney(record.amount)) {
+    if (roundMoney(cashBox.balance) + 0.001 < effectiveReturn) {
       throw new FinancialValidationError(
-        `رصيد الصندوق (${cashBox.nameAr}: ${roundMoney(cashBox.balance)}) غير كافٍ لرد الأمانة النقدية (${roundMoney(record.amount)}).`
+        `رصيد الصندوق (${cashBox.nameAr}: ${roundMoney(cashBox.balance)}) غير كافٍ لرد الأمانة النقدية (${effectiveReturn}).`
       );
     }
   }

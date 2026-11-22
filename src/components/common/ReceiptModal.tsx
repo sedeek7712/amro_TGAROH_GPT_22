@@ -34,6 +34,15 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, activity, o
     ? invoice.items.map((i) => `${i.productName} (${i.quantity} ${i.unit})`).join('، ')
     : '';
 
+  const isReturnSale = invoice.type === 'RETURN_SALE';
+  const advAmount = Number(invoice.advanceAppliedAmount || 0);
+  const cashPortion = isReturnSale
+    ? invoice.paidAmount
+    : Math.max(0, Number((invoice.paidAmount - advAmount).toFixed(2)));
+  const remainingCredit = isReturnSale
+    ? Math.max(0, Number((invoice.total - invoice.paidAmount - advAmount).toFixed(2)))
+    : Math.max(0, Number((invoice.total - invoice.paidAmount - (invoice.returnedAmount || 0)).toFixed(2)));
+
   return (
     <>
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto no-print">
@@ -42,7 +51,9 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, activity, o
           <div className="flex items-center justify-between px-5 py-4 bg-slate-900 text-white no-print">
             <div className="flex items-center gap-2">
               <CheckCircle className="w-5 h-5 text-emerald-400" />
-              <span className="font-bold text-sm">تم حفظ الفاتورة بنجاح</span>
+              <span className="font-bold text-sm">
+                {isReturnSale ? 'تم تسجيل مرتجع المبيعات بنجاح' : 'تم حفظ الفاتورة بنجاح'}
+              </span>
             </div>
             <div className="flex items-center gap-2">
               <button
@@ -80,13 +91,15 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, activity, o
             <div className="text-xs font-semibold text-emerald-700 mt-1">
               قسم: {activity?.nameAr || 'المبيعات العامة'}
             </div>
-            <p className="text-xs text-slate-500 mt-1">فاتورة مبيعات ضريبية مبسطة</p>
+            <p className={`text-xs mt-1 font-bold ${isReturnSale ? 'text-amber-700' : 'text-slate-500'}`}>
+              {isReturnSale ? 'سند إشعار دائن / مرتجع مبيعات' : 'فاتورة مبيعات ضريبية مبسطة'}
+            </p>
           </div>
 
           {/* Invoice Meta */}
           <div className="grid grid-cols-2 gap-2 text-xs border-b border-slate-100 pb-3 mb-3">
             <div>
-              <span className="text-slate-500">رقم الفاتورة: </span>
+              <span className="text-slate-500">{isReturnSale ? 'رقم المرتجع: ' : 'رقم الفاتورة: '}</span>
               <span className="font-mono font-bold text-slate-900">{invoice.invoiceNumber}</span>
             </div>
             <div className="text-left">
@@ -103,6 +116,14 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, activity, o
                 {paymentMethodLabels[invoice.paymentMethod] || invoice.paymentMethod}
               </span>
             </div>
+            {isReturnSale && invoice.originalInvoiceNumber && (
+              <div className="col-span-2 pt-1 text-[11px] text-amber-800 bg-amber-50 px-2 py-1 rounded">
+                <div>
+                  مرجع الفاتورة الأصلية: <strong className="font-mono">{invoice.originalInvoiceNumber}</strong>
+                </div>
+                {invoice.returnReason && <div>سبب الإرجاع: {invoice.returnReason}</div>}
+              </div>
+            )}
           </div>
 
           {/* Items Table */}
@@ -156,18 +177,32 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({ invoice, activity, o
               </div>
             )}
             <div className="flex justify-between text-base font-extrabold text-slate-900 border-t border-slate-200 pt-2">
-              <span>الإجمالي النهائي:</span>
-              <span className="font-mono tabular-nums text-emerald-700">{invoice.total.toFixed(2)} {currencySymbol}</span>
+              <span>{isReturnSale ? 'إجمالي قيمة المرتجع:' : 'الإجمالي النهائي:'}</span>
+              <span className={`font-mono tabular-nums ${isReturnSale ? 'text-amber-700' : 'text-emerald-700'}`}>
+                {invoice.total.toFixed(2)} {currencySymbol}
+              </span>
             </div>
             <div className="flex justify-between text-xs text-slate-600 pt-1">
-              <span>المبلغ المسدد:</span>
-              <span className="font-mono tabular-nums font-semibold">{invoice.paidAmount.toFixed(2)} {currencySymbol}</span>
+              <span>{isReturnSale ? 'المبلغ المردود نقداً:' : 'المسدد نقداً / بنكاً:'}</span>
+              <span className="font-mono tabular-nums font-semibold">
+                {cashPortion.toFixed(2)} {currencySymbol}
+              </span>
             </div>
-            {invoice.total - invoice.paidAmount > 0 && (
-              <div className="flex justify-between text-xs text-rose-700 font-semibold">
-                <span>المتبقي آجل على العميل:</span>
+            {advAmount > 0 && (
+              <div className="flex justify-between text-xs text-indigo-700 font-semibold">
+                <span>
+                  {isReturnSale ? 'مرحّل للرصيد المقدم (2103):' : 'تسوية من الرصيد المقدم (2103):'}
+                </span>
                 <span className="font-mono tabular-nums">
-                  {(invoice.total - invoice.paidAmount).toFixed(2)} {currencySymbol}
+                  {advAmount.toFixed(2)} {currencySymbol}
+                </span>
+              </div>
+            )}
+            {remainingCredit > 0 && (
+              <div className="flex justify-between text-xs text-rose-700 font-semibold">
+                <span>{isReturnSale ? 'تخفيض من ذمة العميل (1103):' : 'المتبقي آجل على العميل:'}</span>
+                <span className="font-mono tabular-nums">
+                  {remainingCredit.toFixed(2)} {currencySymbol}
                 </span>
               </div>
             )}

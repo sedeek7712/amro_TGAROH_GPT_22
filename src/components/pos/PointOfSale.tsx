@@ -20,6 +20,7 @@ import {
   Check,
   Building2,
   X,
+  RotateCcw,
 } from 'lucide-react';
 import { storage, OFFICIAL_ACTIVITIES } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
@@ -28,7 +29,7 @@ import { desktopSession } from '../../services/desktopSession';
 import { authService } from '../../services/authService';
 import { hasPermission } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
-import { useLiveProducts, useLiveParties, useLiveCashBoxes } from '../../hooks/useLiveDexie';
+import { useLiveProducts, useLiveParties, useLiveCashBoxes, useLiveInvoices } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
 
@@ -79,23 +80,45 @@ export const PointOfSale: React.FC<POSProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [clientRequestId, setClientRequestId] = useState<string>(() => storage.generateUUID());
 
+  // حالة نافذة مرتجع المبيعات
+  const [isReturnModalOpen, setIsReturnModalOpen] = useState(false);
+  const [returnSearchQuery, setReturnSearchQuery] = useState('');
+  const [selectedReturnInvoiceId, setSelectedReturnInvoiceId] = useState('');
+  const [returnQuantities, setReturnQuantities] = useState<Record<string, string>>({});
+  const [returnRefundMethod, setReturnRefundMethod] = useState<'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE'>('AUTO');
+  const [returnCashBoxId, setReturnCashBoxId] = useState('');
+  const [returnReason, setReturnReason] = useState('');
+  const [returnError, setReturnError] = useState<string | null>(null);
+  const [returnRequestId, setReturnRequestId] = useState<string>(() => storage.generateUUID());
+
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const actor =
     authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const canUseAdvance = hasPermission(actor, 'party:advance:use');
+  const canReturnSale = hasPermission(actor, 'pos:return');
 
   const products = useLiveProducts(currentActivity);
   const customers = useLiveParties('CUSTOMER');
   const cashBoxes = useLiveCashBoxes();
+  const allInvoices = useLiveInvoices('all');
   const currencySymbol = getActiveCurrencyConfig().symbol;
 
+  const defaultCashBoxId =
+    cashBoxes.find((b) => !b.isCentral && b.isDefault)?.id ||
+    cashBoxes.find((b) => !b.isCentral)?.id ||
+    cashBoxes[0]?.id ||
+    '';
+
   useEffect(() => {
-    if (!selectedCashBoxId && cashBoxes.length > 0) {
-      setSelectedCashBoxId((cashBoxes.find((b) => b.isDefault) || cashBoxes[0]).id);
+    if (!selectedCashBoxId && defaultCashBoxId) {
+      setSelectedCashBoxId(defaultCashBoxId);
     }
-  }, [cashBoxes, selectedCashBoxId]);
+    if (!returnCashBoxId && defaultCashBoxId) {
+      setReturnCashBoxId(defaultCashBoxId);
+    }
+  }, [defaultCashBoxId, selectedCashBoxId, returnCashBoxId]);
 
   // تصفية المنتجات حسب البحث
   const filteredProducts = products.filter((p) => {
@@ -287,7 +310,7 @@ export const PointOfSale: React.FC<POSProps> = ({
       total,
       paidAmount: actualPaidAmount,
       paymentMethod,
-      cashBoxId: selectedCashBoxId || cashBoxes[0]?.id || 'cb-1',
+      cashBoxId: selectedCashBoxId || defaultCashBoxId,
       notes: invoiceNotes,
     };
 
@@ -323,6 +346,166 @@ export const PointOfSale: React.FC<POSProps> = ({
     }
   };
 
+  // تجهيز فواتير المبيعات القابلة للإرجاع والبنود المتبقية
+  const saleInvoicesForReturn = allInvoices
+    .filter((inv) => inv.type === 'SALE' && inv.status !== 'REVERSED')
+    .filter((inv) => {
+      if (!returnSearchQuery.trim()) return true;
+      const q = returnSearchQuery.toLowerCase();
+      return (
+        inv.invoiceNumber.toLowerCase().includes(q) ||
+        inv.partyName.toLowerCase().includes(q) ||
+        inv.date.includes(q)
+      );
+    });
+
+  const selectedOriginalSale = allInvoices.find((inv) => inv.id === selectedReturnInvoiceId);
+
+  const returnableLines = React.useMemo(() => {
+    if (!selectedOriginalSale) return [];
+    const priorReturns = allInvoices.filter(
+      (i) =>
+        i.type === 'RETURN_SALE' &&
+        i.originalInvoiceId === selectedOriginalSale.id &&
+        i.status !== 'REVERSED'
+    );
+    const returnedByKey = new Map<string, number>();
+    const returnedByProduct = new Map<string, number>();
+    for (const r of priorReturns) {
+      for (const it of r.items || []) {
+        const key = `${it.productId}::${it.batchNumber || ''}`;
+        returnedByKey.set(key, roundMoney((returnedByKey.get(key) || 0) + it.quantity, 4));
+        returnedByProduct.set(
+          it.productId,
+          roundMoney((returnedByProduct.get(it.productId) || 0) + it.quantity, 4)
+        );
+      }
+    }
+
+    const grouped = new Map<
+      string,
+      {
+        key: string;
+        productId: string;
+        productName: string;
+        batchNumber?: string;
+        unit: string;
+        soldQty: number;
+        unitPrice: number;
+        remainingQty: number;
+      }
+    >();
+
+    for (const it of selectedOriginalSale.items || []) {
+      const key = `${it.productId}::${it.batchNumber || ''}`;
+      const prev = grouped.get(key);
+      if (prev) {
+        prev.soldQty = roundMoney(prev.soldQty + it.quantity, 4);
+      } else {
+        grouped.set(key, {
+          key,
+          productId: it.productId,
+          productName: it.productName,
+          batchNumber: it.batchNumber,
+          unit: it.unit,
+          soldQty: it.quantity,
+          unitPrice: it.unitPrice,
+          remainingQty: it.quantity,
+        });
+      }
+    }
+
+    return Array.from(grouped.values()).map((line) => {
+      const usedKey = returnedByKey.get(line.key) || 0;
+      const usedProd = returnedByProduct.get(line.productId) || 0;
+      const alreadyReturned = Math.max(usedKey, line.batchNumber ? usedKey : usedProd);
+      return {
+        ...line,
+        alreadyReturned,
+        remainingQty: Math.max(0, roundMoney(line.soldQty - alreadyReturned, 4)),
+      };
+    });
+  }, [selectedOriginalSale, allInvoices]);
+
+  const openSalesReturnModal = () => {
+    setReturnSearchQuery('');
+    setSelectedReturnInvoiceId('');
+    setReturnQuantities({});
+    setReturnRefundMethod('AUTO');
+    setReturnCashBoxId(defaultCashBoxId);
+    setReturnReason('');
+    setReturnError(null);
+    setReturnRequestId(storage.generateUUID());
+    setIsReturnModalOpen(true);
+  };
+
+  const handleSubmitSalesReturn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+    setReturnError(null);
+
+    if (!selectedOriginalSale) {
+      setReturnError('يرجى اختيار فاتورة المبيعات الأصلية أولاً.');
+      return;
+    }
+
+    if (!returnReason.trim()) {
+      setReturnError('يرجى إدخال سبب مرتجع المبيعات لتوثيقه في القيد وسجل التدقيق.');
+      return;
+    }
+
+    const returnItemsPayload = returnableLines
+      .map((line) => ({
+        productId: line.productId,
+        quantity: roundMoney(Number(returnQuantities[line.key]) || 0, 4),
+        batchNumber: line.batchNumber,
+        maxQty: line.remainingQty,
+        productName: line.productName,
+      }))
+      .filter((x) => x.quantity > 0);
+
+    if (returnItemsPayload.length === 0) {
+      setReturnError('يرجى تحديد كمية أكبر من الصفر لصنف واحد على الأقل.');
+      return;
+    }
+
+    for (const item of returnItemsPayload) {
+      if (item.quantity > item.maxQty + 0.0001) {
+        setReturnError(`الكمية المدخلة للصنف (${item.productName}) تتجاوز الكمية المتاحة للإرجاع (${item.maxQty}).`);
+        return;
+      }
+    }
+
+    setIsSubmitting(true);
+    try {
+      const res = await dataService.createSalesReturnAtomic({
+        originalInvoiceId: selectedOriginalSale.id,
+        items: returnItemsPayload.map(({ productId, quantity, batchNumber }) => ({
+          productId,
+          quantity,
+          batchNumber,
+        })),
+        returnReason: returnReason.trim(),
+        refundMethod: returnRefundMethod,
+        cashBoxId: returnRefundMethod === 'AR_OFFSET' || returnRefundMethod === 'ADVANCE'
+          ? undefined
+          : returnCashBoxId || defaultCashBoxId || undefined,
+        clientRequestId: returnRequestId,
+      });
+
+      setIsReturnModalOpen(false);
+      setCompletedInvoice(res.invoice);
+      setReturnQuantities({});
+      setReturnReason('');
+      setReturnRequestId(storage.generateUUID());
+      onRefresh();
+    } catch (err: unknown) {
+      setReturnError(err instanceof Error ? err.message : 'تعذر تسجيل مرتجع المبيعات.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const activities = [
     { id: 'pharmacy' as ActivityId, name: 'الصيدلية' },
     { id: 'grocery' as ActivityId, name: 'البقالة والأغذية' },
@@ -352,8 +535,20 @@ export const PointOfSale: React.FC<POSProps> = ({
             </button>
           ))}
         </div>
-        <div className="text-xs text-slate-500 font-medium hidden sm:block shrink-0">
-          أصناف المستودع: <span className="font-bold text-slate-800">{products.length}</span>
+        <div className="flex items-center gap-3 shrink-0">
+          {canReturnSale && (
+            <button
+              type="button"
+              onClick={openSalesReturnModal}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-xs font-bold transition-colors whitespace-nowrap"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-amber-700" />
+              <span>مرتجع مبيعات</span>
+            </button>
+          )}
+          <div className="text-xs text-slate-500 font-medium hidden sm:block shrink-0">
+            أصناف المستودع: <span className="font-bold text-slate-800">{products.length}</span>
+          </div>
         </div>
       </div>
 
@@ -861,6 +1056,207 @@ export const PointOfSale: React.FC<POSProps> = ({
                 );
               })}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Sales Return Modal */}
+      {isReturnModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto">
+          <div className="relative w-full max-w-2xl bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-200 my-6">
+            <div className="flex items-center justify-between px-6 py-4 bg-amber-900 text-white">
+              <div className="flex items-center gap-2">
+                <RotateCcw className="w-4 h-4 text-amber-300" />
+                <h3 className="text-sm font-bold">إصدار إشعار دائن / مرتجع مبيعات</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsReturnModalOpen(false)}
+                className="text-amber-200 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSubmitSalesReturn} className="p-6 space-y-4 text-xs max-h-[82vh] overflow-y-auto">
+              {returnError && (
+                <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-center gap-2">
+                  <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                  <span className="font-semibold">{returnError}</span>
+                </div>
+              )}
+
+              <div className="space-y-2">
+                <label className="block font-bold text-slate-800">1. البحث واختيار فاتورة المبيعات الأصلية *</label>
+                <input
+                  type="text"
+                  value={returnSearchQuery}
+                  onChange={(e) => setReturnSearchQuery(e.target.value)}
+                  placeholder="ابحث برقم الفاتورة أو اسم العميل أو التاريخ..."
+                  className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-slate-50 text-slate-900 focus:outline-none focus:ring-1 focus:ring-amber-500"
+                />
+                <select
+                  value={selectedReturnInvoiceId}
+                  onChange={(e) => {
+                    setSelectedReturnInvoiceId(e.target.value);
+                    setReturnQuantities({});
+                    setReturnError(null);
+                  }}
+                  className="w-full px-3 py-2 border border-slate-300 rounded-lg bg-white text-slate-900 font-semibold focus:outline-none"
+                >
+                  <option value="">-- اختر فاتورة المبيعات --</option>
+                  {saleInvoicesForReturn.map((inv) => (
+                    <option key={inv.id} value={inv.id}>
+                      {inv.invoiceNumber} | {inv.partyName} | {inv.date} | الإجمالي: {inv.total.toFixed(2)} {currencySymbol}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {selectedOriginalSale && (
+                <>
+                  <div className="grid grid-cols-3 gap-2 bg-slate-50 p-3 rounded-lg border border-slate-200">
+                    <div>
+                      <div className="text-[10px] text-slate-500">العميل</div>
+                      <div className="font-bold text-slate-900">{selectedOriginalSale.partyName}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-slate-500">إجمالي الفاتورة / المسدد</div>
+                      <div className="font-mono font-bold text-slate-900">
+                        {selectedOriginalSale.total.toFixed(2)} / {selectedOriginalSale.paidAmount.toFixed(2)} {currencySymbol}
+                      </div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-slate-500">المتبقي المفتوح</div>
+                      <div className="font-mono font-bold text-amber-800">
+                        {Math.max(0, roundMoney(selectedOriginalSale.total - selectedOriginalSale.paidAmount - (selectedOriginalSale.returnedAmount || 0))).toFixed(2)} {currencySymbol}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <div className="bg-slate-100 px-3 py-2 font-bold text-slate-800">
+                      2. تحديد الكميات المرتجعة من الفاتورة
+                    </div>
+                    <table className="w-full text-right text-xs">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-600">
+                        <tr>
+                          <th className="py-2 px-3">الصنف</th>
+                          <th className="py-2 px-3 text-center">المباع</th>
+                          <th className="py-2 px-3 text-center">مرتجع سابق</th>
+                          <th className="py-2 px-3 text-center">المتاح للإرجاع</th>
+                          <th className="py-2 px-3 text-center">الكمية المرتجعة</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {returnableLines.map((line) => (
+                          <tr key={line.key}>
+                            <td className="py-2 px-3">
+                              <div className="font-bold text-slate-900">{line.productName}</div>
+                              {line.batchNumber && (
+                                <div className="text-[10px] font-mono text-slate-500">تشغيلة: {line.batchNumber}</div>
+                              )}
+                            </td>
+                            <td className="py-2 px-3 text-center font-mono">
+                              {line.soldQty} {line.unit}
+                            </td>
+                            <td className="py-2 px-3 text-center font-mono text-slate-500">
+                              {line.alreadyReturned}
+                            </td>
+                            <td className="py-2 px-3 text-center font-mono font-bold text-emerald-700">
+                              {line.remainingQty}
+                            </td>
+                            <td className="py-2 px-3 text-center">
+                              <input
+                                type="number"
+                                min="0"
+                                max={line.remainingQty}
+                                step="any"
+                                disabled={line.remainingQty <= 0}
+                                value={returnQuantities[line.key] ?? ''}
+                                onChange={(e) =>
+                                  setReturnQuantities((prev) => ({
+                                    ...prev,
+                                    [line.key]: e.target.value,
+                                  }))
+                                }
+                                placeholder="0"
+                                className="w-20 px-2 py-1 border border-slate-300 rounded font-mono text-center bg-white"
+                              />
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div>
+                      <label className="block font-semibold text-slate-700 mb-1">طريقة تسوية قيمة المرتجع *</label>
+                      <select
+                        value={returnRefundMethod}
+                        onChange={(e) =>
+                          setReturnRefundMethod(e.target.value as 'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE')
+                        }
+                        className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-900"
+                      >
+                        <option value="AUTO">تلقائي (تخفيض الذمة المفتوحة ثم رد الباقي)</option>
+                        <option value="AR_OFFSET">تخفيض ذمة العميل الآجلة فقط (1103)</option>
+                        <option value="CASH">رد نقدي من الصندوق</option>
+                        <option value="ADVANCE">ترحيل كرصيد مقدم للعميل (2103)</option>
+                      </select>
+                    </div>
+
+                    {(returnRefundMethod === 'AUTO' || returnRefundMethod === 'CASH') && (
+                      <div>
+                        <label className="block font-semibold text-slate-700 mb-1">الصندوق المنصرف منه</label>
+                        <select
+                          value={returnCashBoxId}
+                          onChange={(e) => setReturnCashBoxId(e.target.value)}
+                          className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white text-slate-900"
+                        >
+                          {cashBoxes.map((b) => (
+                            <option key={b.id} value={b.id}>
+                              {b.nameAr} ({b.balance.toFixed(2)} {currencySymbol})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">سبب المرتجع (إلزامي لسجل التدقيق) *</label>
+                    <input
+                      type="text"
+                      required
+                      value={returnReason}
+                      onChange={(e) => setReturnReason(e.target.value)}
+                      placeholder="مثال: تلف التغليف / خطأ في الصنف / عدم حاجة العميل..."
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-slate-900"
+                    />
+                  </div>
+                </>
+              )}
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setIsReturnModalOpen(false)}
+                  className="px-4 py-2 border border-slate-200 rounded-lg hover:bg-slate-50"
+                >
+                  إلغاء
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting || !selectedOriginalSale}
+                  className="px-5 py-2 bg-amber-600 hover:bg-amber-700 disabled:bg-slate-300 text-white font-bold rounded-lg flex items-center gap-1.5"
+                >
+                  <Check className="w-4 h-4" />
+                  <span>{isSubmitting ? 'جارٍ اعتماد المرتجع...' : 'اعتماد وترحيل مرتجع المبيعات'}</span>
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

@@ -139,6 +139,11 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
   const [boxName, setBoxName] = useState('');
 
   const cashBoxes = useLiveCashBoxes();
+  const defaultCashBoxId =
+    cashBoxes.find((b) => !b.isCentral && b.isDefault)?.id ||
+    cashBoxes.find((b) => !b.isCentral)?.id ||
+    cashBoxes[0]?.id ||
+    '';
   const vouchers = useLiveVouchers();
   const accounts = useLiveAccounts();
   const customers = useLiveParties('CUSTOMER');
@@ -277,7 +282,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
       setVoucherMode('SUPPLIER_PAYMENT');
       setVoucherAccountCode(SPECIAL_ACCOUNTS.SUPPLIERS_AP);
     }
-    setVoucherCashBoxId(presetCashBoxId || voucherCashBoxId || cashBoxes[0]?.id || 'cb-1');
+    setVoucherCashBoxId(presetCashBoxId || voucherCashBoxId || defaultCashBoxId);
     setIsVoucherModalOpen(true);
   };
 
@@ -380,7 +385,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
       voucherMode,
       date: voucherDate,
       amount: roundMoney(amt),
-      cashBoxId: voucherCashBoxId || cashBoxes[0]?.id || 'cb-1',
+      cashBoxId: voucherCashBoxId || defaultCashBoxId,
       branchId: activeBranch.id,
       partyId: voucherMode === 'GENERAL' ? undefined : voucherPartyId,
       partyType: selectedParty?.type,

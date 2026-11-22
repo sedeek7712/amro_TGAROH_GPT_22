@@ -90,6 +90,11 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
   const allInvoices = useLiveInvoices();
   const allVouchers = useLiveVouchers();
   const cashBoxes = useLiveCashBoxes();
+  const defaultCashBoxId =
+    cashBoxes.find((b) => !b.isCentral && b.isDefault)?.id ||
+    cashBoxes.find((b) => !b.isCentral)?.id ||
+    cashBoxes[0]?.id ||
+    '';
   const statementAllocations = useLivePaymentAllocations(selectedPartyForStatement?.id);
   const statementAdvances = useLivePartyAdvances(selectedPartyForStatement?.id);
   const currencySymbol = getActiveCurrencyConfig().symbol;
@@ -181,7 +186,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
     setSettlementParty(party);
     setSettleAmount(suggested > 0 ? String(roundMoney(suggested)) : '');
     setSettleDate(new Date().toISOString().split('T')[0]);
-    setSettleCashBoxId(cashBoxes[0]?.id || 'cb-1');
+    setSettleCashBoxId(defaultCashBoxId);
     setSettlePaymentMethod('CASH');
     setSettleExternalRef('');
     setSettleDescription(
@@ -265,7 +270,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
         voucherMode,
         date: settleDate,
         amount: roundMoney(amt),
-        cashBoxId: settleCashBoxId || cashBoxes[0]?.id || 'cb-1',
+        cashBoxId: settleCashBoxId || defaultCashBoxId,
         branchId: activeBranch.id,
         partyId: settlementParty.id,
         partyType: settlementParty.type,
@@ -364,27 +369,63 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
     relevantInvoices.forEach((inv) => {
       const cashPaid = Math.max(0, roundMoney(inv.paidAmount - (inv.advanceAppliedAmount || 0)));
       if (party.type === 'CUSTOMER') {
-        items.push({
-          date: inv.date,
-          sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-          docNumber: inv.invoiceNumber,
-          description: `فاتورة مبيعات (${inv.paymentMethod === 'CASH' ? 'نقدي' : 'آجل'})`,
-          debit: inv.total,
-          credit: cashPaid,
-          extraBadge:
-            (inv.advanceAppliedAmount || 0) > 0
-              ? `خصم من رصيد مقدم: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
-              : undefined,
-        });
+        if (inv.type === 'RETURN_SALE') {
+          const advCredited = inv.advanceAppliedAmount || 0;
+          items.push({
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            docNumber: inv.invoiceNumber,
+            description: `مرتجع مبيعات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
+            debit: roundMoney(inv.paidAmount + advCredited),
+            credit: inv.total,
+            extraBadge:
+              advCredited > 0
+                ? `تحويل للرصيد المقدم: ${Number(advCredited).toFixed(2)}`
+                : undefined,
+          });
+        } else {
+          items.push({
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            docNumber: inv.invoiceNumber,
+            description: `فاتورة مبيعات (${inv.paymentMethod === 'CASH' ? 'نقدي' : 'آجل'})`,
+            debit: inv.total,
+            credit: cashPaid,
+            extraBadge:
+              (inv.advanceAppliedAmount || 0) > 0
+                ? `خصم من رصيد مقدم: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
+                : undefined,
+          });
+        }
       } else {
-        items.push({
-          date: inv.date,
-          sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-          docNumber: inv.invoiceNumber,
-          description: `فاتورة مشتريات (${inv.paymentMethod === 'CASH' ? 'نقدي' : 'آجل'})`,
-          debit: inv.paidAmount,
-          credit: inv.total,
-        });
+        if (inv.type === 'RETURN_PURCHASE') {
+          const advCredited = inv.advanceAppliedAmount || 0;
+          items.push({
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            docNumber: inv.invoiceNumber,
+            description: `مرتجع مشتريات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
+            debit: inv.total,
+            credit: roundMoney(inv.paidAmount + advCredited),
+            extraBadge:
+              advCredited > 0
+                ? `إثبات سلفة مورد: ${Number(advCredited).toFixed(2)}`
+                : undefined,
+          });
+        } else {
+          items.push({
+            date: inv.date,
+            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+            docNumber: inv.invoiceNumber,
+            description: `فاتورة مشتريات (${inv.paymentMethod === 'CASH' ? 'نقدي' : 'آجل'})`,
+            debit: cashPaid,
+            credit: inv.total,
+            extraBadge:
+              (inv.advanceAppliedAmount || 0) > 0
+                ? `خصم من سلفة مورد: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
+                : undefined,
+          });
+        }
       }
     });
 

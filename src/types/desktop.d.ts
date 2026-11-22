@@ -151,7 +151,7 @@ declare global {
       logAction(input: { token: string; action: string; details: string }): Promise<SystemAuditLog>;
       generateBranchInvoiceNumber(input: {
         token: string;
-        type: 'INV' | 'PUR';
+        type: 'INV' | 'PUR' | 'RS' | 'RP';
         branchCode?: string;
         terminalCode?: string;
       }): Promise<string>;
@@ -208,6 +208,31 @@ declare global {
             batchNumber?: string;
             expiryDate?: string;
           }>;
+          applyAdvanceAmount?: number;
+          clientRequestId?: string;
+        };
+      }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }>;
+      createSalesReturnAtomic(input: {
+        token: string;
+        params: {
+          originalInvoiceId: string;
+          items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+          returnReason: string;
+          refundMethod: 'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE';
+          cashBoxId?: string;
+          date?: string;
+          clientRequestId?: string;
+        };
+      }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
+      createPurchaseReturnAtomic(input: {
+        token: string;
+        params: {
+          originalInvoiceId: string;
+          items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+          returnReason: string;
+          refundMethod: 'AUTO' | 'AP_OFFSET' | 'CASH' | 'ADVANCE';
+          cashBoxId?: string;
+          date?: string;
           clientRequestId?: string;
         };
       }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
@@ -275,7 +300,17 @@ declare global {
       }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
       returnAmanatAtomic(input: {
         token: string;
-        params: { recordId: string; cashBoxId?: string; recipientSignatureName?: string };
+        params: {
+          recordId: string;
+          cashBoxId?: string;
+          returnAmount?: number;
+          recipientSignatureName?: string;
+          notes?: string;
+        };
+      }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
+      cancelAmanatAtomic(input: {
+        token: string;
+        params: { recordId: string; reason: string };
       }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
       updateAmanatRecord(input: { token: string; record: AmanatRecord }): Promise<void>;
       getJournalEntries(input: { token: string; costCenterId?: CostCenterId | 'all' }): Promise<JournalEntry[]>;

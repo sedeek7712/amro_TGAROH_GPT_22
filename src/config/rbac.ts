@@ -30,8 +30,10 @@ export type Permission =
   | 'view:accounting'
   | 'view:audit_logs'
   | 'pos:sale'
+  | 'pos:return'
   | 'invoices:view'
   | 'purchase:create'
+  | 'purchase:return'
   | 'inventory:view'
   | 'inventory:write'
   | 'inventory:adjust'
@@ -124,8 +126,10 @@ const ALL_PERMISSIONS: Permission[] = [
   'view:accounting',
   'view:audit_logs',
   'pos:sale',
+  'pos:return',
   'invoices:view',
   'purchase:create',
+  'purchase:return',
   'inventory:view',
   'inventory:write',
   'inventory:adjust',
@@ -170,8 +174,10 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'view:accounting',
     'view:audit_logs',
     'pos:sale',
+    'pos:return',
     'invoices:view',
     'purchase:create',
+    'purchase:return',
     'inventory:view',
     'inventory:write',
     'inventory:adjust',
@@ -202,6 +208,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'inventory:write',
     'inventory:adjust',
     'purchase:create',
+    'purchase:return',
     'invoices:view',
     'party:view',
     'cashbox:view',
@@ -210,6 +217,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
   CASHIER: new Set<Permission>([
     'view:dashboard',
     'pos:sale',
+    'pos:return',
     'invoices:view',
     'inventory:view',
     'party:view',

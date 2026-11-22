@@ -30,7 +30,11 @@ export function roundMoney2(val) {
 
 export function getInvoiceRemainingAmount(invoice) {
   if (!invoice || invoice.status === 'REVERSED') return 0;
-  const remainingCents = Math.max(0, toCents(invoice.total) - toCents(invoice.paidAmount));
+  if (invoice.type === 'RETURN_SALE' || invoice.type === 'RETURN_PURCHASE') return 0;
+  const remainingCents = Math.max(
+    0,
+    toCents(invoice.total) - toCents(invoice.paidAmount) - toCents(invoice.returnedAmount || 0)
+  );
   return fromCents(remainingCents);
 }
 
@@ -46,7 +50,7 @@ export function getInvoiceRemainingAmount(invoice) {
 export function sortOpenInvoicesFIFO(invoices) {
   if (!Array.isArray(invoices)) return [];
   return invoices
-    .filter((inv) => inv && inv.status !== 'REVERSED' && toCents(inv.total) - toCents(inv.paidAmount) > 0)
+    .filter((inv) => inv && toCents(getInvoiceRemainingAmount(inv)) > 0)
     .slice()
     .sort((a, b) => {
       const dateA = String(a.date || '').trim();
@@ -84,7 +88,7 @@ export function computeFifoAllocations(openInvoices, paymentAmount) {
     if (remainingPaymentCents <= 0) break;
     const totalCentsVal = toCents(inv.total);
     const paidBeforeCents = toCents(inv.paidAmount);
-    const remainingBeforeCents = Math.max(0, totalCentsVal - paidBeforeCents);
+    const remainingBeforeCents = toCents(getInvoiceRemainingAmount(inv));
     if (remainingBeforeCents <= 0) continue;
 
     const allocCents = Math.min(remainingPaymentCents, remainingBeforeCents);

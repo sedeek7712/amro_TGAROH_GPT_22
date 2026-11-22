@@ -88,6 +88,27 @@ export interface IDataService {
       batchNumber?: string;
       expiryDate?: string;
     }>;
+    applyAdvanceAmount?: number;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }>;
+
+  createSalesReturnAtomic(params: {
+    originalInvoiceId: string;
+    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    returnReason: string;
+    refundMethod: 'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE';
+    cashBoxId?: string;
+    date?: string;
+    clientRequestId?: string;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
+
+  createPurchaseReturnAtomic(params: {
+    originalInvoiceId: string;
+    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    returnReason: string;
+    refundMethod: 'AUTO' | 'AP_OFFSET' | 'CASH' | 'ADVANCE';
+    cashBoxId?: string;
+    date?: string;
     clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
 
@@ -121,7 +142,7 @@ export interface IDataService {
   setActiveBranchId(branchId: string): Promise<void>;
   addBranch(branch: Branch): Promise<void>;
   updateBranch(branch: Branch): Promise<void>;
-  generateBranchInvoiceNumber(type: 'INV' | 'PUR', branchCode?: string, terminalCode?: string): Promise<string>;
+  generateBranchInvoiceNumber(type: 'INV' | 'PUR' | 'RS' | 'RP', branchCode?: string, terminalCode?: string): Promise<string>;
   generateBranchVoucherNumber(type: 'RCT' | 'PAY', branchCode?: string, terminalCode?: string): Promise<string>;
 
   // طابور الإرسال للمزامنة مع Django
@@ -189,7 +210,13 @@ export interface IDataService {
   returnAmanatAtomic(params: {
     recordId: string;
     cashBoxId?: string;
+    returnAmount?: number;
     recipientSignatureName?: string;
+    notes?: string;
+  }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
+  cancelAmanatAtomic(params: {
+    recordId: string;
+    reason: string;
   }): Promise<{ success: boolean; record: AmanatRecord; journalEntry?: JournalEntry }>;
   savePartyAtomic(party: Party, isUpdate?: boolean): Promise<Party>;
   saveUserAtomic(user: SystemUser): Promise<SystemUser>;

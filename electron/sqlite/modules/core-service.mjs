@@ -16,7 +16,7 @@ export function parseRowJson(row, fallback = {}) {
   return JSON.parse(row.data_json);
 }
 
-export function writeAuditLogTx(database, actor, action, details, nowIso = new Date().toISOString()) {
+export function writeAuditLogTx(database, actor, action, details, nowIso = new Date().toISOString(), meta = {}) {
   const id = randomUUID();
   const tenantId = actor?.tenantId || 'tenant_main';
   const branchId = actor?.branchId || 'branch_main';
@@ -29,6 +29,12 @@ export function writeAuditLogTx(database, actor, action, details, nowIso = new D
     userName: actor?.fullName || actor?.username || 'النظام',
     action: String(action || ''),
     details: String(details || ''),
+    ...(meta && meta.entityType ? { entityType: meta.entityType } : {}),
+    ...(meta && meta.entityId ? { entityId: meta.entityId } : {}),
+    ...(meta && meta.previousValue !== undefined ? { previousValue: meta.previousValue } : {}),
+    ...(meta && meta.newValue !== undefined ? { newValue: meta.newValue } : {}),
+    ...(meta && meta.reason ? { reason: meta.reason } : {}),
+    ...(meta && meta.result ? { result: meta.result } : {}),
   };
   database.prepare(
     'INSERT INTO audit_logs (tenant_id,id,branch_id,timestamp,user_id,action,details,data_json) VALUES (?,?,?,?,?,?,?,?)'
@@ -534,7 +540,14 @@ export function createCoreService(database) {
 
     // --- العدادات التلقائية وأرقام المستندات ---
     generateBranchInvoiceNumber(actor, type, branchCode, terminalCode) {
-      const permission = type === 'INV' ? 'pos:sale' : 'purchase:create';
+      const permission =
+        type === 'INV'
+          ? 'pos:sale'
+          : type === 'RS'
+          ? 'pos:return'
+          : type === 'RP'
+          ? 'purchase:return'
+          : 'purchase:create';
       assertPermission(actor, permission, 'توليد رقم فاتورة');
       const activeBranchId = this.getActiveBranchId(actor);
       assertBranchAccess(actor, activeBranchId);

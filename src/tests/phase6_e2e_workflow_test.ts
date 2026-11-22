@@ -97,6 +97,14 @@ async function runE2ETestSuite() {
       batches: [],
     };
     await db.products.put(pharmaProd);
+    await db.parties.put({
+      id: 'supp_pharma_01',
+      type: 'SUPPLIER',
+      nameAr: 'شركة الأدوية المتحدة',
+      phone: '0500001111',
+      balance: 0,
+      advanceBalance: 0,
+    });
 
     // شراء تشغيلتين مختلفتي تاريخ الصلاحية
     const dateToday = new Date().toISOString().split('T')[0];

@@ -3,6 +3,7 @@ import {
   assertBranchAccess,
   assertPermission,
   filterRecordsByBranchScope,
+  hasPermission,
 } from '../rbac.mjs';
 import {
   MONEY_SCALE,
@@ -14,6 +15,11 @@ import {
   parseScaledInt,
   unitsToNumber,
 } from '../money.mjs';
+import { INITIAL_CHART_OF_ACCOUNTS } from '../seed-data.mjs';
+import {
+  SPECIAL_ACCOUNTS,
+  resolveVoucherAccountingPlan,
+} from '../payment-allocation-engine.mjs';
 import {
   allocateSequenceTx,
   enqueueOutboxTx,
@@ -25,6 +31,9 @@ import {
   loadProductWithBatches,
   syncProductAndBatchesTx,
 } from './inventory-parties-service.mjs';
+
+const INVOICE_SELECT_COLUMNS =
+  'tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,due_date,payment_method,total_decimal,paid_amount_decimal,advance_applied_decimal,status,data_json';
 
 const CURRENCY_SYMBOLS = {
   YER: 'ر.ي',
@@ -136,6 +145,66 @@ function assertCashBoxBranchAccessTx(actor, cashBox, targetBranchId) {
   }
 }
 
+function accountBalanceDeltaUnitsByType(accountType, debitUnits, creditUnits) {
+  if (accountType === 'LIABILITY' || accountType === 'EQUITY' || accountType === 'REVENUE') {
+    return creditUnits - debitUnits;
+  }
+  return debitUnits - creditUnits;
+}
+
+function ensureCanonicalAccountTx(database, tenantId, accountCode) {
+  const existing = database.prepare(
+    'SELECT code, account_type, is_leaf, balance_decimal, data_json FROM accounts WHERE tenant_id = ? AND code = ?'
+  ).get(tenantId, accountCode);
+  if (existing) {
+    const parsed = parseRowJson(existing);
+    return {
+      ...parsed,
+      code: existing.code,
+      type: existing.account_type || parsed.type,
+      isLeaf: existing.is_leaf === 1 && parsed.isLeaf !== false,
+    };
+  }
+  const template = INITIAL_CHART_OF_ACCOUNTS.find((a) => a.code === accountCode);
+  if (!template) return null;
+  if (template.parentCode) {
+    ensureCanonicalAccountTx(database, tenantId, template.parentCode);
+  }
+  const accObj = { ...template, balance: 0, tenantId };
+  database.prepare(
+    'INSERT OR IGNORE INTO accounts (tenant_id,code,account_type,parent_code,is_leaf,balance_decimal,data_json) VALUES (?,?,?,?,?,?,?)'
+  ).run(
+    tenantId,
+    accObj.code,
+    accObj.type,
+    accObj.parentCode ?? null,
+    accObj.isLeaf ? 1 : 0,
+    '0.00',
+    JSON.stringify(accObj)
+  );
+  return accObj;
+}
+
+function updateAccountBalanceByLineTx(database, tenantId, accountCode, debitUnits, creditUnits) {
+  const row = database.prepare(
+    'SELECT code, account_type, balance_decimal, data_json FROM accounts WHERE tenant_id = ? AND code = ?'
+  ).get(tenantId, accountCode);
+  if (!row) return null;
+  const parsed = parseRowJson(row);
+  const accType = row.account_type || parsed.type || 'ASSET';
+  const deltaUnits = accountBalanceDeltaUnitsByType(accType, debitUnits, creditUnits);
+  const currentUnits = parseScaledInt(row.balance_decimal, MONEY_SCALE, `accountBalance(${accountCode})`);
+  const nextUnits = currentUnits + deltaUnits;
+  const nextNum = unitsToNumber(nextUnits, MONEY_SCALE);
+  const nextDec = formatScaledInt(nextUnits, MONEY_SCALE);
+  parsed.code = row.code;
+  parsed.balance = nextNum;
+  database.prepare(
+    'UPDATE accounts SET balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND code = ?'
+  ).run(nextDec, JSON.stringify(parsed), tenantId, accountCode);
+  return { ...parsed, balance: nextNum };
+}
+
 function updateAccountBalanceTx(database, tenantId, accountCode, deltaUnits) {
   const row = database.prepare(
     'SELECT code, balance_decimal, data_json FROM accounts WHERE tenant_id = ? AND code = ?'
@@ -154,23 +223,39 @@ function updateAccountBalanceTx(database, tenantId, accountCode, deltaUnits) {
   return { ...parsed, balance: nextNum };
 }
 
-function updatePartyBalanceTx(database, tenantId, partyId, deltaUnits) {
+function updatePartyBalancesTx(database, tenantId, partyId, debtDeltaUnits, advanceDeltaUnits = 0n) {
   if (!partyId) return null;
   const row = database.prepare(
-    'SELECT id, balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?'
+    'SELECT id, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?'
   ).get(tenantId, partyId);
   if (!row) return null;
-  const currentUnits = parseScaledInt(row.balance_decimal, MONEY_SCALE, `partyBalance(${partyId})`);
-  const nextUnits = currentUnits + deltaUnits;
-  const nextNum = unitsToNumber(nextUnits, MONEY_SCALE);
-  const nextDec = formatScaledInt(nextUnits, MONEY_SCALE);
+  const currentBalUnits = parseScaledInt(row.balance_decimal, MONEY_SCALE, `partyBalance(${partyId})`);
+  const currentAdvUnits = parseScaledInt(row.advance_balance_decimal ?? 0, MONEY_SCALE, `partyAdvance(${partyId})`);
+  const nextBalUnits = currentBalUnits + debtDeltaUnits;
+  const nextAdvUnits = currentAdvUnits + advanceDeltaUnits;
+  if (nextAdvUnits < 0n) {
+    throw new FinancialValidationError('لا يجوز أن يصبح الرصيد المقدم للطرف سالباً.');
+  }
+  const nextBalNum = unitsToNumber(nextBalUnits, MONEY_SCALE);
+  const nextAdvNum = unitsToNumber(nextAdvUnits, MONEY_SCALE);
   const parsed = parseRowJson(row);
   parsed.id = row.id;
-  parsed.balance = nextNum;
+  parsed.balance = nextBalNum;
+  parsed.advanceBalance = nextAdvNum;
   database.prepare(
-    'UPDATE parties SET balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?'
-  ).run(nextDec, JSON.stringify(parsed), tenantId, partyId);
-  return { ...parsed, balance: nextNum };
+    'UPDATE parties SET balance_decimal = ?, advance_balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?'
+  ).run(
+    formatScaledInt(nextBalUnits, MONEY_SCALE),
+    formatScaledInt(nextAdvUnits, MONEY_SCALE),
+    JSON.stringify(parsed),
+    tenantId,
+    partyId
+  );
+  return { ...parsed, balance: nextBalNum, advanceBalance: nextAdvNum };
+}
+
+function updatePartyBalanceTx(database, tenantId, partyId, deltaUnits) {
+  return updatePartyBalancesTx(database, tenantId, partyId, deltaUnits, 0n);
 }
 
 function updateCashBoxBalanceTx(database, tenantId, cashBoxId, deltaUnits, requireNonNegative = false) {
@@ -203,8 +288,13 @@ function validateAndBuildJournalLines(database, tenantId, lines) {
   if (!Array.isArray(lines) || lines.length < 2) {
     throw new FinancialValidationError('يجب أن يحتوي القيد على طرفين على الأقل (طرف مدين وطرف دائن).');
   }
-  const accountRows = database.prepare('SELECT code, data_json FROM accounts WHERE tenant_id = ?').all(tenantId);
-  const validMap = new Map(accountRows.map((r) => [r.code, parseRowJson(r)]));
+  const accountRows = database.prepare('SELECT code, is_leaf, data_json FROM accounts WHERE tenant_id = ?').all(tenantId);
+  const validMap = new Map(
+    accountRows.map((r) => {
+      const parsed = parseRowJson(r);
+      return [r.code, { ...parsed, _isLeaf: r.is_leaf === 1 && parsed.isLeaf !== false }];
+    })
+  );
 
   let totalDebitUnits = 0n;
   let totalCreditUnits = 0n;
@@ -218,6 +308,9 @@ function validateAndBuildJournalLines(database, tenantId, lines) {
     const accountObj = validMap.get(accountCode);
     if (!accountObj) {
       throw new FinancialValidationError(`الحساب المحاسبي (${accountCode}) غير معرف في الدليل المحاسبي.`);
+    }
+    if (!accountObj._isLeaf) {
+      throw new FinancialValidationError(`لا يجوز القيد على الحساب التجميعي غير الفرعي (${accountCode}).`);
     }
 
     const debitUnits = parseScaledInt(rawLine.debit ?? 0, MONEY_SCALE, `debit(${accountCode})`);
@@ -379,6 +472,7 @@ function hydrateInvoiceRow(database, tenantId, row) {
       }))
     : parsed.stockDeductionsRecorded;
 
+  const advAppliedUnits = parseScaledInt(row.advance_applied_decimal ?? parsed.advanceAppliedAmount ?? 0, MONEY_SCALE, 'dbInvAdvApplied');
   return {
     ...parsed,
     id: row.id,
@@ -389,9 +483,11 @@ function hydrateInvoiceRow(database, tenantId, row) {
     activityId: row.activity_id,
     partyId: row.party_id ?? parsed.partyId,
     date: row.invoice_date,
+    dueDate: row.due_date ?? parsed.dueDate,
     paymentMethod: row.payment_method,
     total: unitsToNumber(parseScaledInt(row.total_decimal, MONEY_SCALE, 'dbInvTotal'), MONEY_SCALE),
     paidAmount: unitsToNumber(parseScaledInt(row.paid_amount_decimal, MONEY_SCALE, 'dbInvPaid'), MONEY_SCALE),
+    advanceAppliedAmount: unitsToNumber(advAppliedUnits, MONEY_SCALE),
     status: row.status,
     items,
     ...(stockDeductionsRecorded ? { stockDeductionsRecorded } : {}),
@@ -401,19 +497,22 @@ function hydrateInvoiceRow(database, tenantId, row) {
 function insertInvoiceTx(database, tenantId, invoice) {
   const totalUnits = parseScaledInt(invoice.total, MONEY_SCALE, 'invoice.total');
   const paidUnits = parseScaledInt(invoice.paidAmount ?? 0, MONEY_SCALE, 'invoice.paidAmount');
+  const advAppliedUnits = parseScaledInt(invoice.advanceAppliedAmount ?? 0, MONEY_SCALE, 'invoice.advanceAppliedAmount');
 
   const persisted = {
     ...invoice,
     tenantId,
     total: unitsToNumber(totalUnits, MONEY_SCALE),
     paidAmount: unitsToNumber(paidUnits, MONEY_SCALE),
+    advanceAppliedAmount: unitsToNumber(advAppliedUnits, MONEY_SCALE),
+    dueDate: invoice.dueDate ? String(invoice.dueDate).trim() : undefined,
     status: invoice.status || (invoice.isPosted === false ? 'DRAFT' : 'POSTED'),
   };
 
   database.prepare(
     `INSERT INTO invoices
-      (tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json)
-     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+      (tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,due_date,payment_method,total_decimal,paid_amount_decimal,advance_applied_decimal,status,data_json)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).run(
     tenantId,
     persisted.id,
@@ -423,9 +522,11 @@ function insertInvoiceTx(database, tenantId, invoice) {
     persisted.activityId,
     persisted.partyId || null,
     persisted.date,
+    persisted.dueDate || null,
     persisted.paymentMethod,
     formatScaledInt(totalUnits, MONEY_SCALE),
     formatScaledInt(paidUnits, MONEY_SCALE),
+    formatScaledInt(advAppliedUnits, MONEY_SCALE),
     persisted.status,
     JSON.stringify(persisted)
   );
@@ -499,10 +600,10 @@ export function createFinancialService(database, core) {
       assertPermission(actor, 'invoices:view', 'عرض الفواتير');
       const rows = activityId && activityId !== 'all'
         ? database.prepare(
-            'SELECT tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json FROM invoices WHERE tenant_id = ? AND activity_id = ? ORDER BY invoice_date DESC, rowid DESC'
+            `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND activity_id = ? ORDER BY invoice_date DESC, rowid DESC`
           ).all(actor.tenantId, String(activityId))
         : database.prepare(
-            'SELECT tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json FROM invoices WHERE tenant_id = ? ORDER BY invoice_date DESC, rowid DESC'
+            `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? ORDER BY invoice_date DESC, rowid DESC`
           ).all(actor.tenantId);
 
       const hydrated = rows.map((r) => hydrateInvoiceRow(database, actor.tenantId, r));
@@ -513,7 +614,7 @@ export function createFinancialService(database, core) {
       assertPermission(actor, 'invoices:view', 'عرض تفاصيل الفاتورة');
       if (!id) return undefined;
       const row = database.prepare(
-        'SELECT tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json FROM invoices WHERE tenant_id = ? AND id = ?'
+        `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`
       ).get(actor.tenantId, String(id));
       if (!row) return undefined;
       const hydrated = hydrateInvoiceRow(database, actor.tenantId, row);
@@ -528,6 +629,13 @@ export function createFinancialService(database, core) {
       const rawInvoice = params.invoice;
       const stockDeductions = Array.isArray(params.stockDeductions) ? params.stockDeductions : [];
       const clientRequestId = params.clientRequestId ? String(params.clientRequestId).trim() : '';
+      const applyAdvanceUnits = parseScaledInt(params.applyAdvanceAmount ?? 0, MONEY_SCALE, 'applyAdvanceAmount');
+      if (applyAdvanceUnits < 0n) {
+        throw new FinancialValidationError('مبلغ التسوية من الرصيد المقدم لا يجوز أن يكون سالباً.');
+      }
+      if (applyAdvanceUnits > 0n) {
+        assertPermission(actor, 'party:advance:use', 'تسوية الرصيد المقدم على فاتورة المبيعات');
+      }
 
       const tenantId = actor.tenantId;
       const activeBranch = resolveBranchTx(database, core, actor, rawInvoice.branchId);
@@ -550,7 +658,7 @@ export function createFinancialService(database, core) {
 
         // 1. Idempotency check by invoice.id or clientRequestId
         const existingInvRow = database.prepare(
-          'SELECT tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json FROM invoices WHERE tenant_id = ? AND id = ?'
+          `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`
         ).get(tenantId, invoice.id);
         if (existingInvRow) {
           const existingInv = hydrateInvoiceRow(database, tenantId, existingInvRow);
@@ -558,10 +666,14 @@ export function createFinancialService(database, core) {
             const existingJeRow = database.prepare(
               'SELECT tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json FROM journal_entries WHERE tenant_id = ? AND id = ?'
             ).get(tenantId, existingInv.journalEntryId);
+            const advJeRow = database.prepare(
+              "SELECT tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json FROM journal_entries WHERE tenant_id = ? AND reference_type = 'ADVANCE_SETTLEMENT' AND reference_id = ?"
+            ).get(tenantId, existingInv.id);
             if (existingJeRow) {
               const existingJe = hydrateJournalEntryRow(database, tenantId, existingJeRow);
+              const advanceJournalEntry = advJeRow ? hydrateJournalEntryRow(database, tenantId, advJeRow) : undefined;
               database.exec('COMMIT');
-              return { success: true, invoice: existingInv, journalEntry: existingJe };
+              return { success: true, invoice: existingInv, journalEntry: existingJe, advanceJournalEntry };
             }
           }
         }
@@ -571,7 +683,7 @@ export function createFinancialService(database, core) {
           ).get(tenantId, `REQ_${tenantId}_${clientRequestId}`);
           if (dupOutbox) {
             const dupInvRow = database.prepare(
-              'SELECT tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json FROM invoices WHERE tenant_id = ? AND id = ?'
+              `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`
             ).get(tenantId, dupOutbox.entity_id);
             if (dupInvRow) {
               const dupInv = hydrateInvoiceRow(database, tenantId, dupInvRow);
@@ -579,10 +691,14 @@ export function createFinancialService(database, core) {
                 const dupJeRow = database.prepare(
                   'SELECT tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json FROM journal_entries WHERE tenant_id = ? AND id = ?'
                 ).get(tenantId, dupInv.journalEntryId);
+                const advJeRow = database.prepare(
+                  "SELECT tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json FROM journal_entries WHERE tenant_id = ? AND reference_type = 'ADVANCE_SETTLEMENT' AND reference_id = ?"
+                ).get(tenantId, dupInv.id);
                 if (dupJeRow) {
                   const dupJe = hydrateJournalEntryRow(database, tenantId, dupJeRow);
+                  const advanceJournalEntry = advJeRow ? hydrateJournalEntryRow(database, tenantId, advJeRow) : undefined;
                   database.exec('COMMIT');
-                  return { success: true, invoice: dupInv, journalEntry: dupJe };
+                  return { success: true, invoice: dupInv, journalEntry: dupJe, advanceJournalEntry };
                 }
               }
             }
@@ -642,9 +758,9 @@ export function createFinancialService(database, core) {
         const discountUnits = parseScaledInt(invoice.discount ?? 0, MONEY_SCALE, 'invoice.discount');
         const taxUnits = parseScaledInt(invoice.tax ?? 0, MONEY_SCALE, 'invoice.tax');
         const totalUnits = parseScaledInt(invoice.total ?? 0, MONEY_SCALE, 'invoice.total');
-        const paidUnits = parseScaledInt(invoice.paidAmount ?? 0, MONEY_SCALE, 'invoice.paidAmount');
+        const cashPaidUnits = parseScaledInt(invoice.paidAmount ?? 0, MONEY_SCALE, 'invoice.paidAmount');
 
-        if (subtotalUnits < 0n || discountUnits < 0n || taxUnits < 0n || totalUnits < 0n || paidUnits < 0n) {
+        if (subtotalUnits < 0n || discountUnits < 0n || taxUnits < 0n || totalUnits < 0n || cashPaidUnits < 0n) {
           throw new FinancialValidationError('مبالغ الفاتورة والتكلفة لا يجوز أن تكون سالبة أو غير صالحة.');
         }
         if (discountUnits > subtotalUnits + 1n) {
@@ -657,14 +773,15 @@ export function createFinancialService(database, core) {
             `إجمالي الفاتورة (${unitsToNumber(totalUnits, MONEY_SCALE)}) لا يطابق الصافي المحسوب (${unitsToNumber(expectedTotalUnits, MONEY_SCALE)}).`
           );
         }
-        if (paidUnits > totalUnits + 1n) {
+        const totalSettledUnits = cashPaidUnits + applyAdvanceUnits;
+        if (totalSettledUnits > totalUnits + 1n) {
           throw new FinancialValidationError(
-            `المبلغ المدفوع (${unitsToNumber(paidUnits, MONEY_SCALE)}) لا يمكن أن يتجاوز إجمالي الفاتورة (${unitsToNumber(totalUnits, MONEY_SCALE)}).`
+            `مجموع المدفوع نقداً والمخصوم من الرصيد المقدم (${unitsToNumber(totalSettledUnits, MONEY_SCALE)}) لا يمكن أن يتجاوز إجمالي الفاتورة (${unitsToNumber(totalUnits, MONEY_SCALE)}).`
           );
         }
 
         let targetCashBox;
-        if (paidUnits > 0n) {
+        if (cashPaidUnits > 0n) {
           if (!invoice.cashBoxId || !String(invoice.cashBoxId).trim()) {
             throw new FinancialValidationError('يجب تحديد صندوق نقدي/بنكي صالح لتحصيل المبلغ المدفوع.');
           }
@@ -672,14 +789,32 @@ export function createFinancialService(database, core) {
           assertCashBoxBranchAccessTx(actor, targetCashBox, branchId);
         }
 
-        const unpaidUnits = totalUnits - paidUnits;
-        if (invoice.paymentMethod === 'CREDIT' && unpaidUnits > 0n && !invoice.partyId) {
+        if (applyAdvanceUnits > 0n && !invoice.partyId) {
+          throw new FinancialValidationError('استخدام الرصيد المقدم يتطلب اختيار عميل مسجل.');
+        }
+
+        const netUnpaidUnits = totalUnits - totalSettledUnits;
+        if (invoice.paymentMethod === 'CREDIT' && netUnpaidUnits > 0n && !invoice.partyId) {
           throw new FinancialValidationError('يجب تحديد عميل مسجل عند البيع الآجل لتسجيل الذمة المدينة.');
         }
+        let customerRow = null;
         if (invoice.partyId) {
-          const partyExists = database.prepare('SELECT 1 FROM parties WHERE tenant_id = ? AND id = ?').get(tenantId, invoice.partyId);
-          if (!partyExists) {
+          customerRow = database.prepare(
+            'SELECT id, party_type, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?'
+          ).get(tenantId, invoice.partyId);
+          if (!customerRow) {
             throw new FinancialValidationError('العميل المحدد غير موجود في قاعدة البيانات.');
+          }
+        }
+        if (applyAdvanceUnits > 0n) {
+          if (!customerRow || customerRow.party_type !== 'CUSTOMER') {
+            throw new FinancialValidationError('تسوية الرصيد المقدم متاحة للعملاء المسجلين فقط.');
+          }
+          const availAdvUnits = parseScaledInt(customerRow.advance_balance_decimal ?? 0, MONEY_SCALE, 'customer.advanceBalance');
+          if (availAdvUnits < applyAdvanceUnits) {
+            throw new FinancialValidationError(
+              `الرصيد المقدم المتاح للعميل (${unitsToNumber(availAdvUnits, MONEY_SCALE)}) غير كافٍ لخصم ${unitsToNumber(applyAdvanceUnits, MONEY_SCALE)}.`
+            );
           }
         }
 
@@ -822,37 +957,38 @@ export function createFinancialService(database, core) {
         const cogsCode = ACTIVITY_COGS_ACCOUNTS[invoice.activityId] || '5101';
         const journalLines = [];
 
-        if (paidUnits > 0n && targetCashBox) {
-          const updatedBox = updateCashBoxBalanceTx(database, tenantId, targetCashBox.id, paidUnits, false);
-          const boxAcc = updateAccountBalanceTx(database, tenantId, targetCashBox.accountCode, paidUnits);
+        if (cashPaidUnits > 0n && targetCashBox) {
+          const updatedBox = updateCashBoxBalanceTx(database, tenantId, targetCashBox.id, cashPaidUnits, false);
+          const boxAcc = updateAccountBalanceByLineTx(database, tenantId, targetCashBox.accountCode, cashPaidUnits, 0n);
           journalLines.push({
             id: randomUUID(),
             accountCode: targetCashBox.accountCode,
             accountName: boxAcc?.nameAr || updatedBox.nameAr,
-            debit: unitsToNumber(paidUnits, MONEY_SCALE),
+            debit: unitsToNumber(cashPaidUnits, MONEY_SCALE),
             credit: 0,
             costCenterId: invoice.activityId,
             memo: `تحصيل نقدي فاتورة مبيعات ${invoice.invoiceNumber}`,
           });
         }
 
-        if (unpaidUnits > 0n) {
-          const arAcc = updateAccountBalanceTx(database, tenantId, '1103', unpaidUnits);
+        const grossCreditUnits = totalUnits - cashPaidUnits;
+        if (grossCreditUnits > 0n) {
+          const arAcc = updateAccountBalanceByLineTx(database, tenantId, '1103', grossCreditUnits, 0n);
           if (invoice.partyId) {
-            updatePartyBalanceTx(database, tenantId, invoice.partyId, unpaidUnits);
+            updatePartyBalancesTx(database, tenantId, invoice.partyId, grossCreditUnits, 0n);
           }
           journalLines.push({
             id: randomUUID(),
             accountCode: '1103',
             accountName: `${arAcc?.nameAr || 'العملاء والمدينون'} - ${invoice.partyName || ''}`.trim(),
-            debit: unitsToNumber(unpaidUnits, MONEY_SCALE),
+            debit: unitsToNumber(grossCreditUnits, MONEY_SCALE),
             credit: 0,
             costCenterId: invoice.activityId,
-            memo: `مبيعات آجلة فاتورة ${invoice.invoiceNumber}`,
+            memo: `ذمة فاتورة مبيعات ${invoice.invoiceNumber}`,
           });
         }
 
-        const revAcc = updateAccountBalanceTx(database, tenantId, revenueCode, totalUnits);
+        const revAcc = updateAccountBalanceByLineTx(database, tenantId, revenueCode, 0n, totalUnits);
         journalLines.push({
           id: randomUUID(),
           accountCode: revenueCode,
@@ -864,8 +1000,8 @@ export function createFinancialService(database, core) {
         });
 
         if (cogsUnits > 0n) {
-          const cogsAcc = updateAccountBalanceTx(database, tenantId, cogsCode, cogsUnits);
-          const invAcc = updateAccountBalanceTx(database, tenantId, inventoryCode, -cogsUnits);
+          const cogsAcc = updateAccountBalanceByLineTx(database, tenantId, cogsCode, cogsUnits, 0n);
+          const invAcc = updateAccountBalanceByLineTx(database, tenantId, inventoryCode, 0n, cogsUnits);
           journalLines.push({
             id: randomUUID(),
             accountCode: cogsCode,
@@ -902,12 +1038,171 @@ export function createFinancialService(database, core) {
           isAutoGenerated: true,
         });
 
+        // 5b. Standalone Advance Settlement Entry (Dr 2103 / Cr 1103) if applying customer advance
+        let advanceJournalEntry;
+        const invoiceDate = invoice.date || todayStr;
+        if (applyAdvanceUnits > 0n && customerRow) {
+          const advNum = unitsToNumber(applyAdvanceUnits, MONEY_SCALE);
+          const advAcc = ensureCanonicalAccountTx(database, tenantId, SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES);
+          const arAcc = ensureCanonicalAccountTx(database, tenantId, SPECIAL_ACCOUNTS.CUSTOMERS_AR);
+          if (!advAcc || !arAcc) {
+            throw new FinancialValidationError('حساب دفعات العملاء المقدمة (2103) أو العملاء (1103) غير معرف.');
+          }
+
+          const advEntryNumber = allocateSequenceTx(database, tenantId, 'JV', activeBranch.code, terminalCode, nowIso);
+          const advJeRes = insertJournalEntryTx(database, tenantId, {
+            id: randomUUID(),
+            entryNumber: advEntryNumber,
+            date: invoiceDate,
+            description: `تسوية رصيد مقدم للعميل ${parseRowJson(customerRow).nameAr || invoice.partyName || ''} على فاتورة ${invoice.invoiceNumber}`,
+            costCenterId: invoice.activityId,
+            branchId,
+            lines: [
+              {
+                id: randomUUID(),
+                accountCode: SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES,
+                accountName: advAcc.nameAr,
+                debit: advNum,
+                credit: 0,
+                costCenterId: invoice.activityId,
+                memo: `استخدام رصيد مقدم لفاتورة ${invoice.invoiceNumber}`,
+              },
+              {
+                id: randomUUID(),
+                accountCode: SPECIAL_ACCOUNTS.CUSTOMERS_AR,
+                accountName: arAcc.nameAr,
+                debit: 0,
+                credit: advNum,
+                costCenterId: invoice.activityId,
+                memo: `تخفيض ذمة العميل لفاتورة ${invoice.invoiceNumber}`,
+              },
+            ],
+            status: 'POSTED',
+            referenceType: 'ADVANCE_SETTLEMENT',
+            referenceId: invoice.id,
+            isAutoGenerated: true,
+          });
+          advanceJournalEntry = advJeRes.persisted;
+
+          updateAccountBalanceByLineTx(database, tenantId, SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES, applyAdvanceUnits, 0n);
+          updateAccountBalanceByLineTx(database, tenantId, SPECIAL_ACCOUNTS.CUSTOMERS_AR, 0n, applyAdvanceUnits);
+          const updatedParty = updatePartyBalancesTx(database, tenantId, customerRow.id, -applyAdvanceUnits, -applyAdvanceUnits);
+
+          const advTx = {
+            id: randomUUID(),
+            tenantId,
+            branchId,
+            partyId: customerRow.id,
+            partyType: 'CUSTOMER',
+            type: 'APPLY_TO_INVOICE',
+            amount: -advNum,
+            balanceAfter: updatedParty.advanceBalance,
+            invoiceId: invoice.id,
+            journalEntryId: advanceJournalEntry.id,
+            date: invoiceDate,
+            description: `تسوية رصيد مقدم على الفاتورة ${invoice.invoiceNumber}`,
+            createdBy: actor.id,
+            createdAt: nowIso,
+          };
+          database.prepare(
+            `INSERT INTO party_advance_transactions
+              (tenant_id,id,branch_id,party_id,party_type,tx_type,amount_decimal,balance_after_decimal,voucher_id,invoice_id,journal_entry_id,tx_date,created_at,data_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          ).run(
+            tenantId,
+            advTx.id,
+            branchId,
+            advTx.partyId,
+            advTx.partyType,
+            advTx.type,
+            formatScaledInt(-applyAdvanceUnits, MONEY_SCALE),
+            formatScaledInt(parseScaledInt(advTx.balanceAfter, MONEY_SCALE, 'advBalAfter'), MONEY_SCALE),
+            null,
+            advTx.invoiceId,
+            advTx.journalEntryId,
+            advTx.date,
+            advTx.createdAt,
+            JSON.stringify(advTx)
+          );
+
+          const advAlloc = {
+            id: randomUUID(),
+            tenantId,
+            branchId,
+            advanceTransactionId: advTx.id,
+            partyId: customerRow.id,
+            invoiceId: invoice.id,
+            invoiceNumber: invoice.invoiceNumber,
+            invoiceDate,
+            allocatedAmount: advNum,
+            allocationMethod: 'ADVANCE_SETTLEMENT',
+            status: 'ACTIVE',
+            createdAt: nowIso,
+            createdBy: actor.id,
+          };
+          database.prepare(
+            `INSERT INTO payment_allocations
+              (tenant_id,id,branch_id,voucher_id,advance_transaction_id,party_id,invoice_id,allocated_decimal,allocation_method,status,created_at,created_by,data_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          ).run(
+            tenantId,
+            advAlloc.id,
+            branchId,
+            null,
+            advTx.id,
+            advAlloc.partyId,
+            advAlloc.invoiceId,
+            formatScaledInt(applyAdvanceUnits, MONEY_SCALE),
+            advAlloc.allocationMethod,
+            advAlloc.status,
+            advAlloc.createdAt,
+            advAlloc.createdBy,
+            JSON.stringify(advAlloc)
+          );
+
+          enqueueOutboxTx(database, actor, {
+            entityType: 'PARTY_ADVANCE',
+            entityId: advTx.id,
+            action: 'CREATE',
+            payload: advTx,
+            priority: 4,
+            dependsOn: [invoice.id],
+            idempotencyKey: `${tenantId}_PARTY_ADVANCE_${advTx.id}_CREATE`,
+            branchId,
+            nowIso,
+          });
+          enqueueOutboxTx(database, actor, {
+            entityType: 'PAYMENT_ALLOCATION',
+            entityId: advAlloc.id,
+            action: 'CREATE',
+            payload: advAlloc,
+            priority: 4,
+            dependsOn: [invoice.id, advTx.id],
+            idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${advAlloc.id}_CREATE`,
+            branchId,
+            nowIso,
+          });
+          enqueueOutboxTx(database, actor, {
+            entityType: 'JOURNAL_ENTRY',
+            entityId: advanceJournalEntry.id,
+            action: 'CREATE',
+            payload: advanceJournalEntry,
+            priority: 4,
+            dependsOn: [invoice.id],
+            idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${advanceJournalEntry.id}_CREATE`,
+            branchId,
+            nowIso,
+          });
+        }
+
         invoice.branchId = branchId;
         invoice.journalEntryId = journalEntry.id;
         invoice.isPosted = true;
         invoice.status = 'POSTED';
         invoice.type = invoice.type || 'SALE';
-        invoice.date = invoice.date || todayStr;
+        invoice.date = invoiceDate;
+        invoice.advanceAppliedAmount = unitsToNumber(applyAdvanceUnits, MONEY_SCALE);
+        invoice.paidAmount = unitsToNumber(cashPaidUnits + applyAdvanceUnits, MONEY_SCALE);
 
         const persistedInvoice = insertInvoiceTx(database, tenantId, invoice);
 
@@ -946,12 +1241,12 @@ export function createFinancialService(database, core) {
           database,
           { ...actor, branchId },
           'إصدار فاتورة مبيعات ذرية',
-          `فاتورة ${persistedInvoice.invoiceNumber} بقيمة ${persistedInvoice.total} ${currencySymbol} وقيد ${journalEntry.entryNumber}`,
+          `فاتورة ${persistedInvoice.invoiceNumber} بقيمة ${persistedInvoice.total} ${currencySymbol} وقيد ${journalEntry.entryNumber}${applyAdvanceUnits > 0n ? ` (تسوية رصيد مقدم: ${unitsToNumber(applyAdvanceUnits, MONEY_SCALE)})` : ''}`,
           nowIso
         );
 
         database.exec('COMMIT');
-        return { success: true, invoice: persistedInvoice, journalEntry };
+        return { success: true, invoice: persistedInvoice, journalEntry, advanceJournalEntry };
       } catch (error) {
         try { database.exec('ROLLBACK'); } catch {}
         throw error;
@@ -988,7 +1283,7 @@ export function createFinancialService(database, core) {
 
         // 1. Idempotency check
         const existingInvRow = database.prepare(
-          'SELECT tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json FROM invoices WHERE tenant_id = ? AND id = ?'
+          `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`
         ).get(tenantId, invoice.id);
         if (existingInvRow) {
           const existingInv = hydrateInvoiceRow(database, tenantId, existingInvRow);
@@ -1009,7 +1304,7 @@ export function createFinancialService(database, core) {
           ).get(tenantId, `REQ_${tenantId}_${clientRequestId}`);
           if (dupOutbox) {
             const dupInvRow = database.prepare(
-              'SELECT tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json FROM invoices WHERE tenant_id = ? AND id = ?'
+              `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`
             ).get(tenantId, dupOutbox.entity_id);
             if (dupInvRow) {
               const dupInv = hydrateInvoiceRow(database, tenantId, dupInvRow);
@@ -1389,10 +1684,13 @@ export function createFinancialService(database, core) {
       database.exec('BEGIN IMMEDIATE');
       try {
         const accountRow = database.prepare(
-          'SELECT 1 FROM accounts WHERE tenant_id = ? AND code = ?'
+          'SELECT code, is_leaf, data_json FROM accounts WHERE tenant_id = ? AND code = ?'
         ).get(tenantId, accountCode);
         if (!accountRow) {
           throw new FinancialValidationError(`الحساب المرتبط (${accountCode}) غير موجود في الدليل المحاسبي.`);
+        }
+        if (accountRow.is_leaf === 0 || parseRowJson(accountRow).isLeaf === false) {
+          throw new FinancialValidationError(`لا يجوز ربط الصندوق بالحساب التجميعي (${accountCode}).`);
         }
 
         const dupCode = database.prepare(
@@ -1459,13 +1757,14 @@ export function createFinancialService(database, core) {
       }
     },
 
-    // --- السندات النقدية الذرية (Vouchers) ---
+    // --- السندات النقدية الذرية والتخصيص والأرصدة المقدمة (Vouchers, Allocations & Advances) ---
     getVouchers(actor) {
       assertPermission(actor, 'vouchers:view', 'عرض السندات المالية');
       const rows = database.prepare(
         'SELECT tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json FROM vouchers WHERE tenant_id = ? ORDER BY voucher_date DESC, rowid DESC'
       ).all(actor.tenantId);
       const vouchers = rows.map((row) => ({
+        status: 'POSTED',
         ...parseRowJson(row),
         id: row.id,
         tenantId: row.tenant_id,
@@ -1478,6 +1777,87 @@ export function createFinancialService(database, core) {
         partyId: row.party_id ?? undefined,
       }));
       return filterRecordsByBranchScope(vouchers, actor);
+    },
+
+    getPaymentAllocations(actor, partyId, voucherId) {
+      assertPermission(actor, 'vouchers:view', 'عرض تخصيصات الدفعات');
+      let sql = 'SELECT tenant_id,id,branch_id,voucher_id,advance_transaction_id,party_id,invoice_id,allocated_decimal,allocation_method,status,created_at,created_by,data_json FROM payment_allocations WHERE tenant_id = ?';
+      const args = [actor.tenantId];
+      if (partyId) {
+        sql += ' AND party_id = ?';
+        args.push(String(partyId));
+      }
+      if (voucherId) {
+        sql += ' AND voucher_id = ?';
+        args.push(String(voucherId));
+      }
+      sql += ' ORDER BY created_at DESC, rowid DESC';
+      const rows = database.prepare(sql).all(...args).map((r) => ({
+        ...parseRowJson(r),
+        id: r.id,
+        tenantId: r.tenant_id,
+        branchId: r.branch_id || '',
+        voucherId: r.voucher_id ?? undefined,
+        advanceTransactionId: r.advance_transaction_id ?? undefined,
+        partyId: r.party_id,
+        invoiceId: r.invoice_id,
+        allocatedAmount: unitsToNumber(parseScaledInt(r.allocated_decimal, MONEY_SCALE, 'allocAmount'), MONEY_SCALE),
+        allocationMethod: r.allocation_method,
+        status: r.status,
+        createdAt: r.created_at,
+        createdBy: r.created_by ?? undefined,
+      }));
+      return filterRecordsByBranchScope(rows, actor);
+    },
+
+    getPartyAdvanceTransactions(actor, partyId) {
+      assertPermission(actor, 'party:view', 'عرض حركات الأرصدة المقدمة');
+      let sql = 'SELECT tenant_id,id,branch_id,party_id,party_type,tx_type,amount_decimal,balance_after_decimal,voucher_id,invoice_id,journal_entry_id,tx_date,created_at,data_json FROM party_advance_transactions WHERE tenant_id = ?';
+      const args = [actor.tenantId];
+      if (partyId) {
+        sql += ' AND party_id = ?';
+        args.push(String(partyId));
+      }
+      sql += ' ORDER BY created_at DESC, rowid DESC';
+      const rows = database.prepare(sql).all(...args).map((r) => ({
+        ...parseRowJson(r),
+        id: r.id,
+        tenantId: r.tenant_id,
+        branchId: r.branch_id || '',
+        partyId: r.party_id,
+        partyType: r.party_type,
+        type: r.tx_type,
+        amount: unitsToNumber(parseScaledInt(r.amount_decimal, MONEY_SCALE, 'advAmount'), MONEY_SCALE),
+        balanceAfter: unitsToNumber(parseScaledInt(r.balance_after_decimal, MONEY_SCALE, 'advBalAfter'), MONEY_SCALE),
+        voucherId: r.voucher_id ?? undefined,
+        invoiceId: r.invoice_id ?? undefined,
+        journalEntryId: r.journal_entry_id ?? undefined,
+        date: r.tx_date,
+        createdAt: r.created_at,
+      }));
+      return filterRecordsByBranchScope(rows, actor);
+    },
+
+    getAllocationAudits(actor, voucherId) {
+      assertPermission(actor, 'audit:allocation:view', 'عرض سجل تدقيق تخصيصات الدفعات');
+      let sql = 'SELECT tenant_id,id,branch_id,voucher_id,party_id,user_id,audit_timestamp,data_json FROM allocation_audits WHERE tenant_id = ?';
+      const args = [actor.tenantId];
+      if (voucherId) {
+        sql += ' AND voucher_id = ?';
+        args.push(String(voucherId));
+      }
+      sql += ' ORDER BY audit_timestamp DESC, rowid DESC';
+      const rows = database.prepare(sql).all(...args).map((r) => ({
+        ...parseRowJson(r),
+        id: r.id,
+        tenantId: r.tenant_id,
+        branchId: r.branch_id || '',
+        voucherId: r.voucher_id,
+        partyId: r.party_id,
+        userId: r.user_id,
+        timestamp: r.audit_timestamp,
+      }));
+      return filterRecordsByBranchScope(rows, actor);
     },
 
     createCashVoucherAtomic(actor, params) {
@@ -1501,66 +1881,102 @@ export function createFinancialService(database, core) {
       const currencySymbol = getCurrencySymbol(database, tenantId);
       const nowIso = new Date().toISOString();
 
-      database.exec('BEGIN IMMEDIATE');
-      try {
-        const voucher = { ...rawVoucher };
-        if (!voucher.id || !String(voucher.id).trim()) {
-          voucher.id = randomUUID();
-        } else {
-          voucher.id = String(voucher.id).trim();
-        }
+      const hydrateVoucherRow = (row) => ({
+        status: 'POSTED',
+        ...parseRowJson(row),
+        id: row.id,
+        tenantId: row.tenant_id,
+        branchId: row.branch_id || '',
+        voucherNumber: row.voucher_number,
+        type: row.voucher_type,
+        date: row.voucher_date,
+        amount: unitsToNumber(parseScaledInt(row.amount_decimal, MONEY_SCALE, 'voucherAmount'), MONEY_SCALE),
+        cashBoxId: row.cash_box_id,
+        partyId: row.party_id ?? undefined,
+      });
 
-        // Idempotency
-        const existingVoucherRow = database.prepare(
-          'SELECT tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json FROM vouchers WHERE tenant_id = ? AND id = ?'
-        ).get(tenantId, voucher.id);
-        if (existingVoucherRow) {
-          const existingVoucher = {
-            ...parseRowJson(existingVoucherRow),
-            id: existingVoucherRow.id,
-            branchId: existingVoucherRow.branch_id || '',
-            voucherNumber: existingVoucherRow.voucher_number,
-            type: existingVoucherRow.voucher_type,
-            date: existingVoucherRow.voucher_date,
-            amount: unitsToNumber(parseScaledInt(existingVoucherRow.amount_decimal, MONEY_SCALE, 'voucherAmount'), MONEY_SCALE),
-            cashBoxId: existingVoucherRow.cash_box_id,
-            partyId: existingVoucherRow.party_id ?? undefined,
-          };
-          if (existingVoucher.journalEntryId) {
-            const existingJeRow = database.prepare(
-              'SELECT tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json FROM journal_entries WHERE tenant_id = ? AND id = ?'
-            ).get(tenantId, existingVoucher.journalEntryId);
-            if (existingJeRow) {
-              const existingJe = hydrateJournalEntryRow(database, tenantId, existingJeRow);
-              database.exec('COMMIT');
-              return { success: true, voucher: existingVoucher, journalEntry: existingJe };
-            }
-          }
+      const postVoucherCoreTx = ({ voucher, targetBranch, isPromotingDraft = false }) => {
+        const cashBox = getCashBoxRowTx(database, tenantId, voucher.cashBoxId);
+        if (!voucher.cashBoxId || !cashBox) {
+          throw new FinancialValidationError(`الصندوق المحدد (${voucher.cashBoxId || '-'}) غير موجود أو غير نشط.`);
         }
+        assertCashBoxBranchAccessTx(actor, cashBox, targetBranch.id);
 
         const amountUnits = parseScaledInt(voucher.amount, MONEY_SCALE, 'voucher.amount');
         if (amountUnits <= 0n) {
           throw new FinancialValidationError('مبلغ السند المالي يجب أن يكون رقماً موجباً أكبر من الصفر.');
         }
-        const cashBox = getCashBoxRowTx(database, tenantId, voucher.cashBoxId);
-        if (!voucher.cashBoxId || !cashBox) {
-          throw new FinancialValidationError(`الصندوق المحدد (${voucher.cashBoxId || '-'}) غير موجود أو غير نشط.`);
-        }
-        assertCashBoxBranchAccessTx(actor, cashBox, branchId);
-
-        const targetAccCode = String(voucher.accountCode || '').trim();
-        const targetAccRow = targetAccCode
-          ? database.prepare('SELECT code, data_json FROM accounts WHERE tenant_id = ? AND code = ?').get(tenantId, targetAccCode)
-          : null;
-        if (!targetAccCode || !targetAccRow) {
-          throw new FinancialValidationError(`الحساب المقابل (${voucher.accountCode || '-'}) غير موجود في الدليل المحاسبي.`);
-        }
         if (!voucher.description || !String(voucher.description).trim()) {
           throw new FinancialValidationError('وصف السند وسبب الحركة مطلوب محاسبياً.');
         }
+        const amountNum = unitsToNumber(amountUnits, MONEY_SCALE);
+
+        let partyObj = null;
+        if (voucher.partyId) {
+          const pRow = database.prepare(
+            'SELECT tenant_id,id,party_type,balance_decimal,advance_balance_decimal,data_json FROM parties WHERE tenant_id = ? AND id = ?'
+          ).get(tenantId, String(voucher.partyId));
+          if (!pRow) {
+            throw new FinancialValidationError('العميل أو المورد المحدد غير موجود في قاعدة البيانات.');
+          }
+          partyObj = {
+            ...parseRowJson(pRow),
+            id: pRow.id,
+            type: pRow.party_type,
+            balance: unitsToNumber(parseScaledInt(pRow.balance_decimal, MONEY_SCALE, 'pBal'), MONEY_SCALE),
+            advanceBalance: unitsToNumber(parseScaledInt(pRow.advance_balance_decimal ?? 0, MONEY_SCALE, 'pAdv'), MONEY_SCALE),
+          };
+          if (voucher.voucherMode === 'CUSTOMER_RECEIPT' && (voucher.type !== 'RECEIPT' || partyObj.type !== 'CUSTOMER')) {
+            throw new FinancialValidationError('وضع تحصيل العميل يقتصر على سند قبض مرتبط بسجل عميل.');
+          }
+          if (voucher.voucherMode === 'SUPPLIER_PAYMENT' && (voucher.type !== 'PAYMENT' || partyObj.type !== 'SUPPLIER')) {
+            throw new FinancialValidationError('وضع سداد المورد يقتصر على سند صرف مرتبط بسجل مورد.');
+          }
+        } else if (voucher.voucherMode === 'CUSTOMER_RECEIPT' || voucher.voucherMode === 'SUPPLIER_PAYMENT') {
+          throw new FinancialValidationError('يجب اختيار سجل عميل أو مورد حقيقي لتنفيذ تسوية الذمم.');
+        }
+
+        const partyInvoices = partyObj
+          ? filterRecordsByBranchScope(
+              database
+                .prepare(`SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND party_id = ?`)
+                .all(tenantId, partyObj.id)
+                .map((r) => hydrateInvoiceRow(database, tenantId, r)),
+              actor
+            )
+          : [];
+
+        const reqAccCode = String(voucher.accountCode || '').trim();
+        const reqAccRow = reqAccCode
+          ? database.prepare('SELECT code, is_leaf, data_json FROM accounts WHERE tenant_id = ? AND code = ?').get(tenantId, reqAccCode)
+          : null;
+        if (!partyObj && !reqAccRow) {
+          throw new FinancialValidationError(`الحساب المقابل (${voucher.accountCode || '-'}) غير موجود في الدليل المحاسبي.`);
+        }
+        const reqAccIsLeaf = reqAccRow ? reqAccRow.is_leaf === 1 && parseRowJson(reqAccRow).isLeaf !== false : false;
+
+        let plan;
+        try {
+          plan = resolveVoucherAccountingPlan({
+            voucherType: voucher.type,
+            voucherMode: voucher.voucherMode,
+            party: partyObj,
+            requestedAccountCode: reqAccCode,
+            amount: amountNum,
+            openInvoices: partyInvoices,
+            manualAllocations: params.manualAllocations,
+            hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
+            overrideReason: params.overrideReason,
+            hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
+            targetAccountIsLeaf: reqAccIsLeaf,
+          });
+        } catch (err) {
+          throw new FinancialValidationError(err instanceof Error ? err.message : 'تعذر اعتماد خطة السند المالي.');
+        }
+
         if (voucher.type === 'PAYMENT' && cashBox._balanceUnits < amountUnits) {
           throw new FinancialValidationError(
-            `رصيد الصندوق (${cashBox.nameAr}: ${cashBox.balance}) غير كافٍ لصرف مبلغ ${unitsToNumber(amountUnits, MONEY_SCALE)}.`
+            `رصيد الصندوق (${cashBox.nameAr}: ${cashBox.balance}) غير كافٍ لصرف مبلغ ${amountNum}.`
           );
         }
 
@@ -1569,7 +1985,7 @@ export function createFinancialService(database, core) {
             database,
             tenantId,
             voucher.type === 'RECEIPT' ? 'RCT' : 'PAY',
-            activeBranch.code,
+            targetBranch.code,
             terminalCode,
             nowIso
           );
@@ -1577,69 +1993,85 @@ export function createFinancialService(database, core) {
           voucher.voucherNumber = String(voucher.voucherNumber).trim();
         }
 
-        const amountNum = unitsToNumber(amountUnits, MONEY_SCALE);
         const voucherDate = voucher.date || nowIso.split('T')[0];
-        const cashDeltaUnits = voucher.type === 'RECEIPT' ? amountUnits : -amountUnits;
+        const cashBoxAccRow = database.prepare(
+          'SELECT code, data_json FROM accounts WHERE tenant_id = ? AND code = ?'
+        ).get(tenantId, cashBox.accountCode);
+        if (!cashBoxAccRow) {
+          throw new FinancialValidationError(`حساب الصندوق (${cashBox.accountCode}) غير موجود في الدليل المحاسبي.`);
+        }
+        const cashBoxAccName = parseRowJson(cashBoxAccRow).nameAr || cashBox.nameAr;
 
-        const updatedBox = updateCashBoxBalanceTx(database, tenantId, cashBox.id, cashDeltaUnits, voucher.type === 'PAYMENT');
-        const cashBoxAcc = updateAccountBalanceTx(database, tenantId, cashBox.accountCode, cashDeltaUnits);
-        const targetAccDelta = voucher.type === 'RECEIPT' ? -amountUnits : amountUnits;
-        const targetAcc = updateAccountBalanceTx(database, tenantId, targetAccCode, targetAccDelta);
+        ensureCanonicalAccountTx(database, tenantId, SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES);
+        ensureCanonicalAccountTx(database, tenantId, SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES);
 
-        if (voucher.partyId) {
-          updatePartyBalanceTx(database, tenantId, voucher.partyId, voucher.type === 'RECEIPT' ? -amountUnits : amountUnits);
+        const lines = [];
+        if (voucher.type === 'RECEIPT') {
+          lines.push({
+            id: randomUUID(),
+            accountCode: cashBox.accountCode,
+            accountName: cashBoxAccName,
+            debit: amountNum,
+            credit: 0,
+            costCenterId: voucher.costCenterId || 'general',
+            memo: `سند قبض ${voucher.voucherNumber} - ${voucher.description}`,
+          });
+          for (const cLine of plan.creditLines) {
+            const acc = ensureCanonicalAccountTx(database, tenantId, cLine.accountCode);
+            if (!acc) {
+              throw new FinancialValidationError(`الحساب المحاسبي (${cLine.accountCode}) غير معرف في الدليل المحاسبي.`);
+            }
+            lines.push({
+              id: randomUUID(),
+              accountCode: cLine.accountCode,
+              accountName: acc.nameAr,
+              debit: 0,
+              credit: cLine.amount,
+              costCenterId: voucher.costCenterId || 'general',
+              memo:
+                cLine.accountCode === SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES
+                  ? `دفعة مقدمة من العميل - سند ${voucher.voucherNumber}`
+                  : String(voucher.description),
+            });
+          }
+        } else {
+          for (const dLine of plan.debitLines) {
+            const acc = ensureCanonicalAccountTx(database, tenantId, dLine.accountCode);
+            if (!acc) {
+              throw new FinancialValidationError(`الحساب المحاسبي (${dLine.accountCode}) غير معرف في الدليل المحاسبي.`);
+            }
+            lines.push({
+              id: randomUUID(),
+              accountCode: dLine.accountCode,
+              accountName: acc.nameAr,
+              debit: dLine.amount,
+              credit: 0,
+              costCenterId: voucher.costCenterId || 'general',
+              memo:
+                dLine.accountCode === SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES
+                  ? `دفعة مقدمة / سلفة مورد - سند ${voucher.voucherNumber}`
+                  : String(voucher.description),
+            });
+          }
+          lines.push({
+            id: randomUUID(),
+            accountCode: cashBox.accountCode,
+            accountName: cashBoxAccName,
+            debit: 0,
+            credit: amountNum,
+            costCenterId: voucher.costCenterId || 'general',
+            memo: `سند صرف ${voucher.voucherNumber} - ${voucher.description}`,
+          });
         }
 
-        const lines = voucher.type === 'RECEIPT'
-          ? [
-              {
-                id: randomUUID(),
-                accountCode: cashBox.accountCode,
-                accountName: cashBoxAcc?.nameAr || updatedBox.nameAr,
-                debit: amountNum,
-                credit: 0,
-                costCenterId: voucher.costCenterId || 'general',
-                memo: `سند قبض ${voucher.voucherNumber} - ${voucher.description}`,
-              },
-              {
-                id: randomUUID(),
-                accountCode: targetAccCode,
-                accountName: targetAcc?.nameAr || parseRowJson(targetAccRow).nameAr || targetAccCode,
-                debit: 0,
-                credit: amountNum,
-                costCenterId: voucher.costCenterId || 'general',
-                memo: String(voucher.description),
-              },
-            ]
-          : [
-              {
-                id: randomUUID(),
-                accountCode: targetAccCode,
-                accountName: targetAcc?.nameAr || parseRowJson(targetAccRow).nameAr || targetAccCode,
-                debit: amountNum,
-                credit: 0,
-                costCenterId: voucher.costCenterId || 'general',
-                memo: String(voucher.description),
-              },
-              {
-                id: randomUUID(),
-                accountCode: cashBox.accountCode,
-                accountName: cashBoxAcc?.nameAr || updatedBox.nameAr,
-                debit: 0,
-                credit: amountNum,
-                costCenterId: voucher.costCenterId || 'general',
-                memo: `سند صرف ${voucher.voucherNumber} - ${voucher.description}`,
-              },
-            ];
-
-        const entryNumber = allocateSequenceTx(database, tenantId, 'JV', activeBranch.code, terminalCode, nowIso);
-        const { persisted: journalEntry } = insertJournalEntryTx(database, tenantId, {
+        const entryNumber = allocateSequenceTx(database, tenantId, 'JV', targetBranch.code, terminalCode, nowIso);
+        const { persisted: journalEntry, linesWithUnits } = insertJournalEntryTx(database, tenantId, {
           id: randomUUID(),
           entryNumber,
           date: voucherDate,
-          description: `${voucher.type === 'RECEIPT' ? 'سند قبض' : 'سند صرف'} ${voucher.voucherNumber}: ${voucher.partyName || ''} - ${voucher.description}`,
+          description: `${voucher.type === 'RECEIPT' ? 'سند قبض' : 'سند صرف'} ${voucher.voucherNumber}: ${partyObj?.nameAr || voucher.partyName || ''} - ${voucher.description}`,
           costCenterId: voucher.costCenterId || 'general',
-          branchId,
+          branchId: targetBranch.id,
           lines,
           status: 'POSTED',
           referenceType: 'VOUCHER',
@@ -1647,33 +2079,266 @@ export function createFinancialService(database, core) {
           isAutoGenerated: true,
         });
 
+        // 1) Update CashBox & Accounts using account type polarity
+        const cashDeltaUnits = voucher.type === 'RECEIPT' ? amountUnits : -amountUnits;
+        updateCashBoxBalanceTx(database, tenantId, cashBox.id, cashDeltaUnits, voucher.type === 'PAYMENT');
+        for (const line of linesWithUnits) {
+          updateAccountBalanceByLineTx(database, tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+        }
+
+        // 2) Update Invoices & insert payment_allocations
+        const createdAllocations = [];
+        for (const alloc of plan.allocations) {
+          const invRow = database.prepare(
+            `SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`
+          ).get(tenantId, alloc.invoiceId);
+          if (!invRow) {
+            throw new FinancialValidationError(`الفاتورة (${alloc.invoiceId}) غير موجودة أثناء التخصيص.`);
+          }
+          const invObj = hydrateInvoiceRow(database, tenantId, invRow);
+          const allocUnits = parseScaledInt(alloc.allocatedAmount, MONEY_SCALE, 'allocAmount');
+          const invTotalUnits = parseScaledInt(invRow.total_decimal, MONEY_SCALE, 'invTotal');
+          const invPaidUnits = parseScaledInt(invRow.paid_amount_decimal, MONEY_SCALE, 'invPaid');
+          const nextPaidUnits = invPaidUnits + allocUnits;
+          if (nextPaidUnits > invTotalUnits) {
+            throw new FinancialValidationError(`تجاوز التخصيص إجمالي الفاتورة (${invObj.invoiceNumber}).`);
+          }
+          const nextPaidNum = unitsToNumber(nextPaidUnits, MONEY_SCALE);
+          invObj.paidAmount = nextPaidNum;
+          database.prepare(
+            'UPDATE invoices SET paid_amount_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?'
+          ).run(formatScaledInt(nextPaidUnits, MONEY_SCALE), JSON.stringify(invObj), tenantId, invObj.id);
+
+          const allocRow = {
+            id: randomUUID(),
+            tenantId,
+            branchId: targetBranch.id,
+            voucherId: voucher.id,
+            partyId: partyObj.id,
+            invoiceId: invObj.id,
+            invoiceNumber: invObj.invoiceNumber,
+            invoiceDate: invObj.date,
+            allocatedAmount: alloc.allocatedAmount,
+            allocationMethod: plan.manualOverride ? 'MANUAL' : 'FIFO',
+            status: 'ACTIVE',
+            createdAt: nowIso,
+            createdBy: actor.id,
+          };
+          createdAllocations.push(allocRow);
+          database.prepare(
+            `INSERT INTO payment_allocations
+              (tenant_id,id,branch_id,voucher_id,advance_transaction_id,party_id,invoice_id,allocated_decimal,allocation_method,status,created_at,created_by,data_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          ).run(
+            tenantId,
+            allocRow.id,
+            allocRow.branchId,
+            allocRow.voucherId,
+            null,
+            allocRow.partyId,
+            allocRow.invoiceId,
+            formatScaledInt(allocUnits, MONEY_SCALE),
+            allocRow.allocationMethod,
+            allocRow.status,
+            allocRow.createdAt,
+            allocRow.createdBy,
+            JSON.stringify(allocRow)
+          );
+          enqueueOutboxTx(database, actor, {
+            entityType: 'PAYMENT_ALLOCATION',
+            entityId: allocRow.id,
+            action: 'CREATE',
+            payload: allocRow,
+            priority: 4,
+            dependsOn: [voucher.id, invObj.id],
+            idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${allocRow.id}_CREATE`,
+            branchId: targetBranch.id,
+            nowIso,
+          });
+        }
+
+        // 3) Allocation audit if manually overridden
+        if (plan.manualOverride && partyObj) {
+          const auditRow = {
+            id: randomUUID(),
+            tenantId,
+            branchId: targetBranch.id,
+            voucherId: voucher.id,
+            partyId: partyObj.id,
+            userId: actor.id,
+            userName: actor.fullName,
+            reason: plan.overrideReason || '',
+            previousAllocations: plan.previousFifoAllocations.map((a) => ({
+              invoiceId: a.invoiceId,
+              invoiceNumber: a.invoiceNumber,
+              allocatedAmount: a.allocatedAmount,
+            })),
+            newAllocations: plan.allocations.map((a) => ({
+              invoiceId: a.invoiceId,
+              invoiceNumber: a.invoiceNumber,
+              allocatedAmount: a.allocatedAmount,
+            })),
+            timestamp: nowIso,
+          };
+          database.prepare(
+            `INSERT INTO allocation_audits
+              (tenant_id,id,branch_id,voucher_id,party_id,user_id,audit_timestamp,data_json)
+             VALUES (?,?,?,?,?,?,?,?)`
+          ).run(
+            tenantId,
+            auditRow.id,
+            auditRow.branchId,
+            auditRow.voucherId,
+            auditRow.partyId,
+            auditRow.userId,
+            auditRow.timestamp,
+            JSON.stringify(auditRow)
+          );
+          enqueueOutboxTx(database, actor, {
+            entityType: 'ALLOCATION_AUDIT',
+            entityId: auditRow.id,
+            action: 'CREATE',
+            payload: auditRow,
+            priority: 4,
+            dependsOn: [voucher.id],
+            idempotencyKey: `${tenantId}_ALLOCATION_AUDIT_${auditRow.id}_CREATE`,
+            branchId: targetBranch.id,
+            nowIso,
+          });
+        }
+
+        // 4) Party balance + advance ledger transaction
+        let createdAdvanceTx;
+        if (partyObj) {
+          const debtDeltaUnits = parseScaledInt(plan.partyDebtDelta, MONEY_SCALE, 'partyDebtDelta');
+          const advDeltaUnits = parseScaledInt(plan.partyAdvanceDelta, MONEY_SCALE, 'partyAdvanceDelta');
+          const updatedParty = updatePartyBalancesTx(database, tenantId, partyObj.id, debtDeltaUnits, advDeltaUnits);
+
+          if (plan.advanceDirection !== 'NONE' && plan.advanceAmount > 0) {
+            const txType =
+              plan.advanceDirection === 'DEPOSIT_CUSTOMER'
+                ? 'OVERPAYMENT_DEPOSIT'
+                : plan.advanceDirection === 'DEPOSIT_SUPPLIER'
+                ? 'PREPAYMENT_DEPOSIT'
+                : 'REFUND';
+            const signedAmt =
+              plan.advanceDirection === 'REFUND_CUSTOMER' || plan.advanceDirection === 'REFUND_SUPPLIER'
+                ? -plan.advanceAmount
+                : plan.advanceAmount;
+            createdAdvanceTx = {
+              id: randomUUID(),
+              tenantId,
+              branchId: targetBranch.id,
+              partyId: partyObj.id,
+              partyType: partyObj.type,
+              type: txType,
+              amount: signedAmt,
+              balanceAfter: updatedParty.advanceBalance,
+              voucherId: voucher.id,
+              journalEntryId: journalEntry.id,
+              date: voucherDate,
+              description: String(voucher.description),
+              createdBy: actor.id,
+              createdAt: nowIso,
+            };
+            database.prepare(
+              `INSERT INTO party_advance_transactions
+                (tenant_id,id,branch_id,party_id,party_type,tx_type,amount_decimal,balance_after_decimal,voucher_id,invoice_id,journal_entry_id,tx_date,created_at,data_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            ).run(
+              tenantId,
+              createdAdvanceTx.id,
+              createdAdvanceTx.branchId,
+              createdAdvanceTx.partyId,
+              createdAdvanceTx.partyType,
+              createdAdvanceTx.type,
+              formatScaledInt(parseScaledInt(signedAmt, MONEY_SCALE, 'signedAdvAmt'), MONEY_SCALE),
+              formatScaledInt(parseScaledInt(updatedParty.advanceBalance, MONEY_SCALE, 'advBalAfter'), MONEY_SCALE),
+              createdAdvanceTx.voucherId,
+              null,
+              createdAdvanceTx.journalEntryId,
+              createdAdvanceTx.date,
+              createdAdvanceTx.createdAt,
+              JSON.stringify(createdAdvanceTx)
+            );
+            enqueueOutboxTx(database, actor, {
+              entityType: 'PARTY_ADVANCE',
+              entityId: createdAdvanceTx.id,
+              action: 'CREATE',
+              payload: createdAdvanceTx,
+              priority: 4,
+              dependsOn: [voucher.id],
+              idempotencyKey: `${tenantId}_PARTY_ADVANCE_${createdAdvanceTx.id}_CREATE`,
+              branchId: targetBranch.id,
+              nowIso,
+            });
+          }
+        }
+
+        const persistedMode =
+          plan.mode === 'GENERAL'
+            ? 'GENERAL'
+            : partyObj?.type === 'CUSTOMER'
+            ? 'CUSTOMER_RECEIPT'
+            : 'SUPPLIER_PAYMENT';
+
         const persistedVoucher = {
           ...voucher,
           tenantId,
-          branchId,
+          branchId: targetBranch.id,
           amount: amountNum,
           date: voucherDate,
+          voucherMode: persistedMode,
+          partyType: partyObj?.type,
+          partyName: partyObj?.nameAr || voucher.partyName || '',
           cashBoxId: cashBox.id,
-          accountCode: targetAccCode,
+          accountCode: plan.primaryContraAccountCode,
+          paymentMethod: voucher.paymentMethod || 'CASH',
           journalEntryId: journalEntry.id,
+          status: 'POSTED',
+          appliedToDebtAmount: plan.appliedToDebtAmount,
+          advanceAmount: plan.advanceAmount,
+          allocations: createdAllocations,
+          manualOverride: plan.manualOverride,
+          overrideReason: plan.overrideReason,
+          createdBy: voucher.createdBy || actor.id,
+          createdByName: voucher.createdByName || actor.fullName,
+          createdAt: voucher.createdAt || nowIso,
         };
 
-        database.prepare(
-          `INSERT INTO vouchers
-            (tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json)
-           VALUES (?,?,?,?,?,?,?,?,?,?)`
-        ).run(
-          tenantId,
-          persistedVoucher.id,
-          branchId,
-          persistedVoucher.voucherNumber,
-          persistedVoucher.type,
-          persistedVoucher.date,
-          formatScaledInt(amountUnits, MONEY_SCALE),
-          persistedVoucher.cashBoxId,
-          persistedVoucher.partyId || null,
-          JSON.stringify(persistedVoucher)
-        );
+        if (isPromotingDraft) {
+          database.prepare(
+            `UPDATE vouchers
+             SET voucher_number = ?, voucher_date = ?, amount_decimal = ?, cash_box_id = ?, party_id = ?, data_json = ?
+             WHERE tenant_id = ? AND id = ?`
+          ).run(
+            persistedVoucher.voucherNumber,
+            persistedVoucher.date,
+            formatScaledInt(amountUnits, MONEY_SCALE),
+            persistedVoucher.cashBoxId,
+            persistedVoucher.partyId || null,
+            JSON.stringify(persistedVoucher),
+            tenantId,
+            persistedVoucher.id
+          );
+        } else {
+          database.prepare(
+            `INSERT INTO vouchers
+              (tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?)`
+          ).run(
+            tenantId,
+            persistedVoucher.id,
+            targetBranch.id,
+            persistedVoucher.voucherNumber,
+            persistedVoucher.type,
+            persistedVoucher.date,
+            formatScaledInt(amountUnits, MONEY_SCALE),
+            persistedVoucher.cashBoxId,
+            persistedVoucher.partyId || null,
+            JSON.stringify(persistedVoucher)
+          );
+        }
 
         const deps = [cashBox.id];
         if (persistedVoucher.partyId) deps.push(persistedVoucher.partyId);
@@ -1681,12 +2346,12 @@ export function createFinancialService(database, core) {
         enqueueOutboxTx(database, actor, {
           entityType: 'VOUCHER',
           entityId: persistedVoucher.id,
-          action: 'CREATE',
+          action: isPromotingDraft ? 'UPDATE' : 'CREATE',
           payload: persistedVoucher,
           priority: 3,
           dependsOn: deps,
-          idempotencyKey: `${tenantId}_VOUCHER_${persistedVoucher.id}_CREATE`,
-          branchId,
+          idempotencyKey: `${tenantId}_VOUCHER_${persistedVoucher.id}_${isPromotingDraft ? 'POST' : 'CREATE'}`,
+          branchId: targetBranch.id,
           nowIso,
         });
         enqueueOutboxTx(database, actor, {
@@ -1697,19 +2362,877 @@ export function createFinancialService(database, core) {
           priority: 4,
           dependsOn: [persistedVoucher.id],
           idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
-          branchId,
+          branchId: targetBranch.id,
           nowIso,
         });
         writeAuditLogTx(
           database,
-          { ...actor, branchId },
-          `سند ${persistedVoucher.type === 'RECEIPT' ? 'قبض' : 'صرف'} ذري`,
-          `سند ${persistedVoucher.voucherNumber} بمبلغ ${amountNum} ${currencySymbol} وقيد ${journalEntry.entryNumber}`,
+          { ...actor, branchId: targetBranch.id },
+          `سند ${persistedVoucher.type === 'RECEIPT' ? 'قبض' : 'صرف'} مرحل`,
+          `سند ${persistedVoucher.voucherNumber} بمبلغ ${amountNum} ${currencySymbol} وقيد ${journalEntry.entryNumber}${plan.advanceAmount > 0 ? ` (رصيد مقدم: ${plan.advanceAmount})` : ''}`,
+          nowIso
+        );
+
+        return {
+          success: true,
+          voucher: persistedVoucher,
+          journalEntry,
+          allocations: createdAllocations,
+          advanceTransaction: createdAdvanceTx,
+        };
+      };
+
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const voucher = { ...rawVoucher };
+        if (!voucher.id || !String(voucher.id).trim()) {
+          voucher.id = randomUUID();
+        } else {
+          voucher.id = String(voucher.id).trim();
+        }
+
+        // Idempotency check
+        const existingVoucherRow = database.prepare(
+          'SELECT tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json FROM vouchers WHERE tenant_id = ? AND id = ?'
+        ).get(tenantId, voucher.id);
+        if (existingVoucherRow) {
+          const existingVoucher = hydrateVoucherRow(existingVoucherRow);
+          if (existingVoucher.journalEntryId) {
+            const existingJeRow = database.prepare(
+              'SELECT tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json FROM journal_entries WHERE tenant_id = ? AND id = ?'
+            ).get(tenantId, existingVoucher.journalEntryId);
+            if (existingJeRow) {
+              const existingJe = hydrateJournalEntryRow(database, tenantId, existingJeRow);
+              database.exec('COMMIT');
+              return { success: true, voucher: existingVoucher, journalEntry: existingJe };
+            }
+          }
+          if (existingVoucher.status === 'DRAFT' && voucher.status === 'DRAFT') {
+            database.exec('COMMIT');
+            return { success: true, voucher: existingVoucher, allocations: [] };
+          }
+        }
+
+        if (voucher.status === 'DRAFT') {
+          const cashBox = getCashBoxRowTx(database, tenantId, voucher.cashBoxId);
+          if (!voucher.cashBoxId || !cashBox) {
+            throw new FinancialValidationError(`الصندوق المحدد (${voucher.cashBoxId || '-'}) غير موجود أو غير نشط.`);
+          }
+          assertCashBoxBranchAccessTx(actor, cashBox, branchId);
+          const amountUnits = parseScaledInt(voucher.amount, MONEY_SCALE, 'voucher.amount');
+          if (amountUnits <= 0n) {
+            throw new FinancialValidationError('مبلغ السند المالي يجب أن يكون رقماً موجباً أكبر من الصفر.');
+          }
+          if (!voucher.description || !String(voucher.description).trim()) {
+            throw new FinancialValidationError('وصف السند وسبب الحركة مطلوب محاسبياً.');
+          }
+
+          let partyObj = null;
+          if (voucher.partyId) {
+            const pRow = database.prepare(
+              'SELECT id, party_type, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?'
+            ).get(tenantId, String(voucher.partyId));
+            if (!pRow) {
+              throw new FinancialValidationError('العميل أو المورد المحدد غير موجود.');
+            }
+            partyObj = {
+              ...parseRowJson(pRow),
+              id: pRow.id,
+              type: pRow.party_type,
+              balance: unitsToNumber(parseScaledInt(pRow.balance_decimal, MONEY_SCALE, 'pBal'), MONEY_SCALE),
+              advanceBalance: unitsToNumber(parseScaledInt(pRow.advance_balance_decimal ?? 0, MONEY_SCALE, 'pAdv'), MONEY_SCALE),
+            };
+          }
+          const reqAccCode = String(voucher.accountCode || '').trim();
+          const reqAccRow = reqAccCode
+            ? database.prepare('SELECT code, is_leaf, data_json FROM accounts WHERE tenant_id = ? AND code = ?').get(tenantId, reqAccCode)
+            : null;
+          if (!partyObj && !reqAccRow) {
+            throw new FinancialValidationError(`الحساب المقابل (${voucher.accountCode || '-'}) غير موجود في الدليل المحاسبي.`);
+          }
+          const reqAccIsLeaf = reqAccRow ? reqAccRow.is_leaf === 1 && parseRowJson(reqAccRow).isLeaf !== false : false;
+          const previewPlan = resolveVoucherAccountingPlan({
+            voucherType: voucher.type,
+            voucherMode: voucher.voucherMode,
+            party: partyObj,
+            requestedAccountCode: reqAccCode,
+            amount: unitsToNumber(amountUnits, MONEY_SCALE),
+            openInvoices: [],
+            hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
+            hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
+            targetAccountIsLeaf: reqAccIsLeaf,
+          });
+
+          if (!voucher.voucherNumber || !String(voucher.voucherNumber).trim()) {
+            voucher.voucherNumber = allocateSequenceTx(
+              database,
+              tenantId,
+              voucher.type === 'RECEIPT' ? 'RCT' : 'PAY',
+              activeBranch.code,
+              terminalCode,
+              nowIso
+            );
+          } else {
+            voucher.voucherNumber = String(voucher.voucherNumber).trim();
+          }
+
+          const draftVoucher = {
+            ...voucher,
+            tenantId,
+            branchId,
+            amount: unitsToNumber(amountUnits, MONEY_SCALE),
+            date: voucher.date || nowIso.split('T')[0],
+            status: 'DRAFT',
+            accountCode: previewPlan.primaryContraAccountCode,
+            partyType: partyObj?.type,
+            partyName: partyObj?.nameAr || voucher.partyName || '',
+            paymentMethod: voucher.paymentMethod || 'CASH',
+            createdBy: actor.id,
+            createdByName: actor.fullName,
+            createdAt: nowIso,
+          };
+
+          database.prepare(
+            `INSERT INTO vouchers
+              (tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?)`
+          ).run(
+            tenantId,
+            draftVoucher.id,
+            branchId,
+            draftVoucher.voucherNumber,
+            draftVoucher.type,
+            draftVoucher.date,
+            formatScaledInt(amountUnits, MONEY_SCALE),
+            draftVoucher.cashBoxId,
+            draftVoucher.partyId || null,
+            JSON.stringify(draftVoucher)
+          );
+          enqueueOutboxTx(database, actor, {
+            entityType: 'VOUCHER',
+            entityId: draftVoucher.id,
+            action: 'CREATE',
+            payload: draftVoucher,
+            priority: 3,
+            idempotencyKey: `${tenantId}_VOUCHER_${draftVoucher.id}_DRAFT`,
+            branchId,
+            nowIso,
+          });
+          writeAuditLogTx(
+            database,
+            { ...actor, branchId },
+            `إنشاء مسودة سند ${draftVoucher.type === 'RECEIPT' ? 'قبض' : 'صرف'}`,
+            `مسودة ${draftVoucher.voucherNumber} بمبلغ ${draftVoucher.amount} ${currencySymbol}`,
+            nowIso
+          );
+          database.exec('COMMIT');
+          return { success: true, voucher: draftVoucher, allocations: [] };
+        }
+
+        const result = postVoucherCoreTx({ voucher, targetBranch: activeBranch, isPromotingDraft: false });
+        database.exec('COMMIT');
+        return result;
+      } catch (error) {
+        try { database.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
+    },
+
+    postDraftCashVoucherAtomic(actor, params) {
+      if (!params || !params.voucherId) {
+        throw new FinancialValidationError('معرف السند المطلوب ترحيله مطلوب.');
+      }
+      const tenantId = actor.tenantId;
+      const terminalCode = getTerminalCodeValue(database, tenantId);
+      const currencySymbol = getCurrencySymbol(database, tenantId);
+      const nowIso = new Date().toISOString();
+
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const vRow = database.prepare(
+          'SELECT tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json FROM vouchers WHERE tenant_id = ? AND id = ?'
+        ).get(tenantId, String(params.voucherId));
+        if (!vRow) {
+          throw new FinancialValidationError('السند المطلوب ترحيله غير موجود.');
+        }
+        const draft = {
+          status: 'POSTED',
+          ...parseRowJson(vRow),
+          id: vRow.id,
+          tenantId: vRow.tenant_id,
+          branchId: vRow.branch_id || '',
+          voucherNumber: vRow.voucher_number,
+          type: vRow.voucher_type,
+          date: vRow.voucher_date,
+          amount: unitsToNumber(parseScaledInt(vRow.amount_decimal, MONEY_SCALE, 'voucherAmount'), MONEY_SCALE),
+          cashBoxId: vRow.cash_box_id,
+          partyId: vRow.party_id ?? undefined,
+        };
+        assertPermission(
+          actor,
+          draft.type === 'RECEIPT' ? 'voucher:receipt' : 'voucher:payment',
+          'ترحيل مسودة السند'
+        );
+        const targetBranch = resolveBranchTx(database, core, actor, draft.branchId);
+        if (draft.status !== 'DRAFT') {
+          throw new FinancialValidationError('يمكن ترحيل السندات التي في حالة المسودة فقط.');
+        }
+
+        const cashBox = getCashBoxRowTx(database, tenantId, draft.cashBoxId);
+        if (!draft.cashBoxId || !cashBox) {
+          throw new FinancialValidationError(`الصندوق المحدد (${draft.cashBoxId || '-'}) غير موجود أو غير نشط.`);
+        }
+        assertCashBoxBranchAccessTx(actor, cashBox, targetBranch.id);
+        const amountUnits = parseScaledInt(draft.amount, MONEY_SCALE, 'voucher.amount');
+        const amountNum = unitsToNumber(amountUnits, MONEY_SCALE);
+
+        let partyObj = null;
+        if (draft.partyId) {
+          const pRow = database.prepare(
+            'SELECT id, party_type, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?'
+          ).get(tenantId, String(draft.partyId));
+          if (!pRow) throw new FinancialValidationError('العميل أو المورد المحدد غير موجود.');
+          partyObj = {
+            ...parseRowJson(pRow),
+            id: pRow.id,
+            type: pRow.party_type,
+            balance: unitsToNumber(parseScaledInt(pRow.balance_decimal, MONEY_SCALE, 'pBal'), MONEY_SCALE),
+            advanceBalance: unitsToNumber(parseScaledInt(pRow.advance_balance_decimal ?? 0, MONEY_SCALE, 'pAdv'), MONEY_SCALE),
+          };
+        }
+        const partyInvoices = partyObj
+          ? filterRecordsByBranchScope(
+              database
+                .prepare(`SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND party_id = ?`)
+                .all(tenantId, partyObj.id)
+                .map((r) => hydrateInvoiceRow(database, tenantId, r)),
+              actor
+            )
+          : [];
+        const reqAccCode = String(draft.accountCode || '').trim();
+        const reqAccRow = reqAccCode
+          ? database.prepare('SELECT code, is_leaf, data_json FROM accounts WHERE tenant_id = ? AND code = ?').get(tenantId, reqAccCode)
+          : null;
+        const reqAccIsLeaf = reqAccRow ? reqAccRow.is_leaf === 1 && parseRowJson(reqAccRow).isLeaf !== false : false;
+
+        const plan = resolveVoucherAccountingPlan({
+          voucherType: draft.type,
+          voucherMode: draft.voucherMode,
+          party: partyObj,
+          requestedAccountCode: reqAccCode,
+          amount: amountNum,
+          openInvoices: partyInvoices,
+          manualAllocations: params.manualAllocations,
+          hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
+          overrideReason: params.overrideReason,
+          hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
+          targetAccountIsLeaf: reqAccIsLeaf,
+        });
+
+        if (draft.type === 'PAYMENT' && cashBox._balanceUnits < amountUnits) {
+          throw new FinancialValidationError(
+            `رصيد الصندوق (${cashBox.nameAr}: ${cashBox.balance}) غير كافٍ لصرف مبلغ ${amountNum}.`
+          );
+        }
+
+        const voucherDate = draft.date || nowIso.split('T')[0];
+        const cashBoxAccRow = database.prepare('SELECT code, data_json FROM accounts WHERE tenant_id = ? AND code = ?').get(tenantId, cashBox.accountCode);
+        const cashBoxAccName = cashBoxAccRow ? parseRowJson(cashBoxAccRow).nameAr || cashBox.nameAr : cashBox.nameAr;
+
+        ensureCanonicalAccountTx(database, tenantId, SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES);
+        ensureCanonicalAccountTx(database, tenantId, SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES);
+
+        const lines = [];
+        if (draft.type === 'RECEIPT') {
+          lines.push({
+            id: randomUUID(),
+            accountCode: cashBox.accountCode,
+            accountName: cashBoxAccName,
+            debit: amountNum,
+            credit: 0,
+            costCenterId: draft.costCenterId || 'general',
+            memo: `سند قبض ${draft.voucherNumber} - ${draft.description}`,
+          });
+          for (const cLine of plan.creditLines) {
+            const acc = ensureCanonicalAccountTx(database, tenantId, cLine.accountCode);
+            lines.push({
+              id: randomUUID(),
+              accountCode: cLine.accountCode,
+              accountName: acc.nameAr,
+              debit: 0,
+              credit: cLine.amount,
+              costCenterId: draft.costCenterId || 'general',
+              memo: String(draft.description),
+            });
+          }
+        } else {
+          for (const dLine of plan.debitLines) {
+            const acc = ensureCanonicalAccountTx(database, tenantId, dLine.accountCode);
+            lines.push({
+              id: randomUUID(),
+              accountCode: dLine.accountCode,
+              accountName: acc.nameAr,
+              debit: dLine.amount,
+              credit: 0,
+              costCenterId: draft.costCenterId || 'general',
+              memo: String(draft.description),
+            });
+          }
+          lines.push({
+            id: randomUUID(),
+            accountCode: cashBox.accountCode,
+            accountName: cashBoxAccName,
+            debit: 0,
+            credit: amountNum,
+            costCenterId: draft.costCenterId || 'general',
+            memo: `سند صرف ${draft.voucherNumber} - ${draft.description}`,
+          });
+        }
+
+        const entryNumber = allocateSequenceTx(database, tenantId, 'JV', targetBranch.code, terminalCode, nowIso);
+        const { persisted: journalEntry, linesWithUnits } = insertJournalEntryTx(database, tenantId, {
+          id: randomUUID(),
+          entryNumber,
+          date: voucherDate,
+          description: `${draft.type === 'RECEIPT' ? 'سند قبض' : 'سند صرف'} ${draft.voucherNumber}: ${partyObj?.nameAr || draft.partyName || ''} - ${draft.description}`,
+          costCenterId: draft.costCenterId || 'general',
+          branchId: targetBranch.id,
+          lines,
+          status: 'POSTED',
+          referenceType: 'VOUCHER',
+          referenceId: draft.id,
+          isAutoGenerated: true,
+        });
+
+        const cashDeltaUnits = draft.type === 'RECEIPT' ? amountUnits : -amountUnits;
+        updateCashBoxBalanceTx(database, tenantId, cashBox.id, cashDeltaUnits, draft.type === 'PAYMENT');
+        for (const line of linesWithUnits) {
+          updateAccountBalanceByLineTx(database, tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+        }
+
+        const createdAllocations = [];
+        for (const alloc of plan.allocations) {
+          const invRow = database.prepare(`SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`).get(tenantId, alloc.invoiceId);
+          const invObj = hydrateInvoiceRow(database, tenantId, invRow);
+          const allocUnits = parseScaledInt(alloc.allocatedAmount, MONEY_SCALE, 'allocAmount');
+          const nextPaidUnits = parseScaledInt(invRow.paid_amount_decimal, MONEY_SCALE, 'invPaid') + allocUnits;
+          if (nextPaidUnits > parseScaledInt(invRow.total_decimal, MONEY_SCALE, 'invTotal')) {
+            throw new FinancialValidationError(`تجاوز التخصيص إجمالي الفاتورة (${invObj.invoiceNumber}).`);
+          }
+          invObj.paidAmount = unitsToNumber(nextPaidUnits, MONEY_SCALE);
+          database.prepare('UPDATE invoices SET paid_amount_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?')
+            .run(formatScaledInt(nextPaidUnits, MONEY_SCALE), JSON.stringify(invObj), tenantId, invObj.id);
+
+          const allocRow = {
+            id: randomUUID(),
+            tenantId,
+            branchId: targetBranch.id,
+            voucherId: draft.id,
+            partyId: partyObj.id,
+            invoiceId: invObj.id,
+            invoiceNumber: invObj.invoiceNumber,
+            invoiceDate: invObj.date,
+            allocatedAmount: alloc.allocatedAmount,
+            allocationMethod: plan.manualOverride ? 'MANUAL' : 'FIFO',
+            status: 'ACTIVE',
+            createdAt: nowIso,
+            createdBy: actor.id,
+          };
+          createdAllocations.push(allocRow);
+          database.prepare(
+            `INSERT INTO payment_allocations
+              (tenant_id,id,branch_id,voucher_id,advance_transaction_id,party_id,invoice_id,allocated_decimal,allocation_method,status,created_at,created_by,data_json)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+          ).run(
+            tenantId, allocRow.id, allocRow.branchId, allocRow.voucherId, null, allocRow.partyId, allocRow.invoiceId,
+            formatScaledInt(allocUnits, MONEY_SCALE), allocRow.allocationMethod, allocRow.status, allocRow.createdAt, allocRow.createdBy, JSON.stringify(allocRow)
+          );
+          enqueueOutboxTx(database, actor, {
+            entityType: 'PAYMENT_ALLOCATION',
+            entityId: allocRow.id,
+            action: 'CREATE',
+            payload: allocRow,
+            priority: 4,
+            dependsOn: [draft.id, invObj.id],
+            idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${allocRow.id}_CREATE`,
+            branchId: targetBranch.id,
+            nowIso,
+          });
+        }
+
+        if (plan.manualOverride && partyObj) {
+          const auditRow = {
+            id: randomUUID(),
+            tenantId,
+            branchId: targetBranch.id,
+            voucherId: draft.id,
+            partyId: partyObj.id,
+            userId: actor.id,
+            userName: actor.fullName,
+            reason: plan.overrideReason || '',
+            previousAllocations: plan.previousFifoAllocations.map((a) => ({ invoiceId: a.invoiceId, invoiceNumber: a.invoiceNumber, allocatedAmount: a.allocatedAmount })),
+            newAllocations: plan.allocations.map((a) => ({ invoiceId: a.invoiceId, invoiceNumber: a.invoiceNumber, allocatedAmount: a.allocatedAmount })),
+            timestamp: nowIso,
+          };
+          database.prepare(
+            'INSERT INTO allocation_audits (tenant_id,id,branch_id,voucher_id,party_id,user_id,audit_timestamp,data_json) VALUES (?,?,?,?,?,?,?,?)'
+          ).run(tenantId, auditRow.id, auditRow.branchId, auditRow.voucherId, auditRow.partyId, auditRow.userId, auditRow.timestamp, JSON.stringify(auditRow));
+          enqueueOutboxTx(database, actor, {
+            entityType: 'ALLOCATION_AUDIT',
+            entityId: auditRow.id,
+            action: 'CREATE',
+            payload: auditRow,
+            priority: 4,
+            dependsOn: [draft.id],
+            idempotencyKey: `${tenantId}_ALLOCATION_AUDIT_${auditRow.id}_CREATE`,
+            branchId: targetBranch.id,
+            nowIso,
+          });
+        }
+
+        let createdAdvanceTx;
+        if (partyObj) {
+          const debtDeltaUnits = parseScaledInt(plan.partyDebtDelta, MONEY_SCALE, 'partyDebtDelta');
+          const advDeltaUnits = parseScaledInt(plan.partyAdvanceDelta, MONEY_SCALE, 'partyAdvanceDelta');
+          const updatedParty = updatePartyBalancesTx(database, tenantId, partyObj.id, debtDeltaUnits, advDeltaUnits);
+          if (plan.advanceDirection !== 'NONE' && plan.advanceAmount > 0) {
+            const txType =
+              plan.advanceDirection === 'DEPOSIT_CUSTOMER'
+                ? 'OVERPAYMENT_DEPOSIT'
+                : plan.advanceDirection === 'DEPOSIT_SUPPLIER'
+                ? 'PREPAYMENT_DEPOSIT'
+                : 'REFUND';
+            const signedAmt =
+              plan.advanceDirection === 'REFUND_CUSTOMER' || plan.advanceDirection === 'REFUND_SUPPLIER'
+                ? -plan.advanceAmount
+                : plan.advanceAmount;
+            createdAdvanceTx = {
+              id: randomUUID(),
+              tenantId,
+              branchId: targetBranch.id,
+              partyId: partyObj.id,
+              partyType: partyObj.type,
+              type: txType,
+              amount: signedAmt,
+              balanceAfter: updatedParty.advanceBalance,
+              voucherId: draft.id,
+              journalEntryId: journalEntry.id,
+              date: voucherDate,
+              description: String(draft.description),
+              createdBy: actor.id,
+              createdAt: nowIso,
+            };
+            database.prepare(
+              `INSERT INTO party_advance_transactions
+                (tenant_id,id,branch_id,party_id,party_type,tx_type,amount_decimal,balance_after_decimal,voucher_id,invoice_id,journal_entry_id,tx_date,created_at,data_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+            ).run(
+              tenantId, createdAdvanceTx.id, createdAdvanceTx.branchId, createdAdvanceTx.partyId, createdAdvanceTx.partyType,
+              createdAdvanceTx.type, formatScaledInt(parseScaledInt(signedAmt, MONEY_SCALE, 'signedAmt'), MONEY_SCALE),
+              formatScaledInt(parseScaledInt(updatedParty.advanceBalance, MONEY_SCALE, 'advBalAfter'), MONEY_SCALE),
+              createdAdvanceTx.voucherId, null, createdAdvanceTx.journalEntryId, createdAdvanceTx.date, createdAdvanceTx.createdAt, JSON.stringify(createdAdvanceTx)
+            );
+            enqueueOutboxTx(database, actor, {
+              entityType: 'PARTY_ADVANCE',
+              entityId: createdAdvanceTx.id,
+              action: 'CREATE',
+              payload: createdAdvanceTx,
+              priority: 4,
+              dependsOn: [draft.id],
+              idempotencyKey: `${tenantId}_PARTY_ADVANCE_${createdAdvanceTx.id}_CREATE`,
+              branchId: targetBranch.id,
+              nowIso,
+            });
+          }
+        }
+
+        const persistedVoucher = {
+          ...draft,
+          branchId: targetBranch.id,
+          amount: amountNum,
+          date: voucherDate,
+          voucherMode: plan.mode === 'GENERAL' ? 'GENERAL' : partyObj?.type === 'CUSTOMER' ? 'CUSTOMER_RECEIPT' : 'SUPPLIER_PAYMENT',
+          partyType: partyObj?.type,
+          partyName: partyObj?.nameAr || draft.partyName || '',
+          accountCode: plan.primaryContraAccountCode,
+          journalEntryId: journalEntry.id,
+          status: 'POSTED',
+          appliedToDebtAmount: plan.appliedToDebtAmount,
+          advanceAmount: plan.advanceAmount,
+          allocations: createdAllocations,
+          manualOverride: plan.manualOverride,
+          overrideReason: plan.overrideReason,
+        };
+        database.prepare('UPDATE vouchers SET data_json = ? WHERE tenant_id = ? AND id = ?')
+          .run(JSON.stringify(persistedVoucher), tenantId, persistedVoucher.id);
+
+        enqueueOutboxTx(database, actor, {
+          entityType: 'VOUCHER',
+          entityId: persistedVoucher.id,
+          action: 'UPDATE',
+          payload: persistedVoucher,
+          priority: 3,
+          idempotencyKey: `${tenantId}_VOUCHER_${persistedVoucher.id}_POST`,
+          branchId: targetBranch.id,
+          nowIso,
+        });
+        enqueueOutboxTx(database, actor, {
+          entityType: 'JOURNAL_ENTRY',
+          entityId: journalEntry.id,
+          action: 'CREATE',
+          payload: journalEntry,
+          priority: 4,
+          dependsOn: [persistedVoucher.id],
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
+          branchId: targetBranch.id,
+          nowIso,
+        });
+        writeAuditLogTx(
+          database,
+          { ...actor, branchId: targetBranch.id },
+          `ترحيل مسودة سند ${persistedVoucher.type === 'RECEIPT' ? 'قبض' : 'صرف'}`,
+          `سند ${persistedVoucher.voucherNumber} بمبلغ ${amountNum} ${currencySymbol}`,
           nowIso
         );
 
         database.exec('COMMIT');
-        return { success: true, voucher: persistedVoucher, journalEntry };
+        return {
+          success: true,
+          voucher: persistedVoucher,
+          journalEntry,
+          allocations: createdAllocations,
+          advanceTransaction: createdAdvanceTx,
+        };
+      } catch (error) {
+        try { database.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
+    },
+
+    cancelCashVoucherAtomic(actor, params) {
+      assertPermission(actor, 'voucher:cancel', 'إلغاء مسودة سند');
+      const reason = String(params?.reason || '').trim();
+      if (!reason) {
+        throw new FinancialValidationError('سبب إلغاء مسودة السند مطلوب.');
+      }
+      if (!params?.voucherId) {
+        throw new FinancialValidationError('معرف السند مطلوب.');
+      }
+      const tenantId = actor.tenantId;
+      const nowIso = new Date().toISOString();
+
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const row = database.prepare(
+          'SELECT tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json FROM vouchers WHERE tenant_id = ? AND id = ?'
+        ).get(tenantId, String(params.voucherId));
+        if (!row) {
+          throw new FinancialValidationError('السند غير موجود.');
+        }
+        const voucher = { status: 'POSTED', ...parseRowJson(row), id: row.id, branchId: row.branch_id || '' };
+        assertBranchAccess(actor, voucher.branchId || actor.branchId);
+        if ((voucher.status || 'POSTED') !== 'DRAFT') {
+          throw new FinancialValidationError(
+            'لا يجوز إلغاء أو حذف سند مالي مرحّل نهائياً؛ استخدم إجراء العكس المحاسبي الموثق.'
+          );
+        }
+
+        const cancelled = {
+          ...voucher,
+          status: 'CANCELLED',
+          cancelledReason: reason,
+        };
+        database.prepare('UPDATE vouchers SET data_json = ? WHERE tenant_id = ? AND id = ?')
+          .run(JSON.stringify(cancelled), tenantId, cancelled.id);
+
+        enqueueOutboxTx(database, actor, {
+          entityType: 'VOUCHER',
+          entityId: cancelled.id,
+          action: 'UPDATE',
+          payload: cancelled,
+          priority: 3,
+          idempotencyKey: `${tenantId}_VOUCHER_${cancelled.id}_CANCEL`,
+          branchId: voucher.branchId,
+          nowIso,
+        });
+        writeAuditLogTx(
+          database,
+          { ...actor, branchId: voucher.branchId },
+          'إلغاء مسودة سند',
+          `إلغاء مسودة ${cancelled.voucherNumber} - السبب: ${reason}`,
+          nowIso
+        );
+        database.exec('COMMIT');
+        return cancelled;
+      } catch (error) {
+        try { database.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
+    },
+
+    reverseCashVoucherAtomic(actor, params) {
+      assertPermission(actor, 'voucher:reverse', 'عكس سند مالي');
+      const reason = String(params?.reversalReason || '').trim();
+      if (!reason) {
+        throw new FinancialValidationError('سبب عكس السند المالي مطلوب لتوثيق سجل التدقيق.');
+      }
+      if (!params?.voucherId) {
+        throw new FinancialValidationError('معرف السند المطلوب عكسه مطلوب.');
+      }
+      const tenantId = actor.tenantId;
+      const terminalCode = getTerminalCodeValue(database, tenantId);
+      const nowIso = new Date().toISOString();
+      const reversalDate = nowIso.split('T')[0];
+
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const vRow = database.prepare(
+          'SELECT tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json FROM vouchers WHERE tenant_id = ? AND id = ?'
+        ).get(tenantId, String(params.voucherId));
+        if (!vRow) {
+          throw new FinancialValidationError('السند المطلوب عكسه غير موجود.');
+        }
+        const voucher = {
+          status: 'POSTED',
+          ...parseRowJson(vRow),
+          id: vRow.id,
+          tenantId: vRow.tenant_id,
+          branchId: vRow.branch_id || '',
+          voucherNumber: vRow.voucher_number,
+          type: vRow.voucher_type,
+          date: vRow.voucher_date,
+          amount: unitsToNumber(parseScaledInt(vRow.amount_decimal, MONEY_SCALE, 'voucherAmount'), MONEY_SCALE),
+          cashBoxId: vRow.cash_box_id,
+          partyId: vRow.party_id ?? undefined,
+        };
+        const voucherBranchId = String(voucher.branchId || '').trim();
+        assertBranchAccess(actor, voucherBranchId);
+        if ((voucher.status || 'POSTED') !== 'POSTED') {
+          throw new FinancialValidationError('يمكن عكس السندات المرحّلة (POSTED) فقط.');
+        }
+        if (!voucher.journalEntryId) {
+          throw new FinancialValidationError('السند لا يرتبط بقيد محاسبي مرحّل.');
+        }
+
+        const origJeRow = database.prepare(
+          'SELECT tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json FROM journal_entries WHERE tenant_id = ? AND id = ?'
+        ).get(tenantId, voucher.journalEntryId);
+        if (!origJeRow) {
+          throw new FinancialValidationError('القيد المرتبط بهذا السند غير موجود.');
+        }
+        const originalJe = hydrateJournalEntryRow(database, tenantId, origJeRow);
+        if (originalJe.status === 'REVERSED') {
+          throw new FinancialValidationError('تم عكس القيد المرتبط بهذا السند مسبقاً.');
+        }
+
+        const cashBox = getCashBoxRowTx(database, tenantId, voucher.cashBoxId);
+        assertCashBoxBranchAccessTx(actor, cashBox, voucherBranchId);
+        const amountUnits = parseScaledInt(voucher.amount, MONEY_SCALE, 'voucher.amount');
+        if (voucher.type === 'RECEIPT' && cashBox._balanceUnits < amountUnits) {
+          throw new FinancialValidationError(
+            `رصيد الصندوق (${cashBox.nameAr}) غير كافٍ لعكس سند القبض بمبلغ ${voucher.amount}.`
+          );
+        }
+
+        const origBranchRow = database.prepare('SELECT id, code FROM branches WHERE tenant_id = ? AND id = ?').get(tenantId, voucherBranchId);
+        const reversalNumber = allocateSequenceTx(database, tenantId, 'REV', origBranchRow?.code || 'BR01', terminalCode, nowIso);
+        const reversedLines = originalJe.lines.map((l) => ({
+          id: randomUUID(),
+          accountCode: l.accountCode,
+          accountName: l.accountName,
+          debit: l.credit,
+          credit: l.debit,
+          costCenterId: l.costCenterId,
+          memo: `عكس سند ${voucher.voucherNumber}: ${reason}`,
+        }));
+
+        const { persisted: reversalEntry, linesWithUnits } = insertJournalEntryTx(database, tenantId, {
+          id: randomUUID(),
+          entryNumber: reversalNumber,
+          date: reversalDate,
+          description: `قيد عكسي للسند ${voucher.voucherNumber} (${originalJe.entryNumber}) - السبب: ${reason}`,
+          costCenterId: originalJe.costCenterId,
+          branchId: voucherBranchId,
+          lines: reversedLines,
+          status: 'POSTED',
+          referenceType: 'VOUCHER_REVERSAL',
+          referenceId: voucher.id,
+          isAutoGenerated: true,
+          reversedEntryId: originalJe.id,
+          reversalReason: reason,
+        });
+
+        const cashDeltaUnits = voucher.type === 'RECEIPT' ? -amountUnits : amountUnits;
+        updateCashBoxBalanceTx(database, tenantId, cashBox.id, cashDeltaUnits, voucher.type === 'RECEIPT');
+        for (const line of linesWithUnits) {
+          updateAccountBalanceByLineTx(database, tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+        }
+
+        const activeAllocs = database.prepare(
+          "SELECT tenant_id,id,branch_id,voucher_id,advance_transaction_id,party_id,invoice_id,allocated_decimal,allocation_method,status,created_at,created_by,data_json FROM payment_allocations WHERE tenant_id = ? AND voucher_id = ? AND status = 'ACTIVE'"
+        ).all(tenantId, voucher.id);
+        for (const aRow of activeAllocs) {
+          const allocUnits = parseScaledInt(aRow.allocated_decimal, MONEY_SCALE, 'allocUnits');
+          const invRow = database.prepare(`SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`).get(tenantId, aRow.invoice_id);
+          if (invRow) {
+            const invObj = hydrateInvoiceRow(database, tenantId, invRow);
+            const curPaid = parseScaledInt(invRow.paid_amount_decimal, MONEY_SCALE, 'invPaid');
+            const nextPaid = curPaid > allocUnits ? curPaid - allocUnits : 0n;
+            invObj.paidAmount = unitsToNumber(nextPaid, MONEY_SCALE);
+            database.prepare('UPDATE invoices SET paid_amount_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?')
+              .run(formatScaledInt(nextPaid, MONEY_SCALE), JSON.stringify(invObj), tenantId, invObj.id);
+          }
+          const allocObj = { ...parseRowJson(aRow), id: aRow.id, status: 'REVERSED' };
+          database.prepare("UPDATE payment_allocations SET status = 'REVERSED', data_json = ? WHERE tenant_id = ? AND id = ?")
+            .run(JSON.stringify(allocObj), tenantId, aRow.id);
+          enqueueOutboxTx(database, actor, {
+            entityType: 'PAYMENT_ALLOCATION',
+            entityId: allocObj.id,
+            action: 'UPDATE',
+            payload: allocObj,
+            priority: 4,
+            idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${allocObj.id}_REVERSED`,
+            branchId: voucherBranchId,
+            nowIso,
+          });
+        }
+
+        const advTxRows = database.prepare(
+          "SELECT tenant_id,id,amount_decimal,data_json FROM party_advance_transactions WHERE tenant_id = ? AND voucher_id = ? AND tx_type <> 'REVERSAL'"
+        ).all(tenantId, voucher.id);
+
+        if (voucher.partyId) {
+          const pRow = database.prepare(
+            'SELECT id, party_type, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?'
+          ).get(tenantId, voucher.partyId);
+          if (pRow) {
+            let netOrigAdvUnits = 0n;
+            for (const txR of advTxRows) {
+              netOrigAdvUnits += parseScaledInt(txR.amount_decimal, MONEY_SCALE, 'advTxAmt');
+            }
+            const currentAdvUnits = parseScaledInt(pRow.advance_balance_decimal ?? 0, MONEY_SCALE, 'partyAdv');
+            const nextAdvUnits = currentAdvUnits - netOrigAdvUnits;
+            if (nextAdvUnits < 0n) {
+              throw new FinancialValidationError(
+                'لا يمكن عكس هذا السند لأن الرصيد المقدم الناتج عنه قد استُخدم بالفعل في فواتير أو رد نقدي لاحق.'
+              );
+            }
+
+            let debtRestoreUnits = 0n;
+            if (voucher.appliedToDebtAmount !== undefined) {
+              const appliedUnits = parseScaledInt(voucher.appliedToDebtAmount, MONEY_SCALE, 'appliedDebt');
+              if (pRow.party_type === 'CUSTOMER' && voucher.type === 'RECEIPT') debtRestoreUnits = appliedUnits;
+              else if (pRow.party_type === 'SUPPLIER' && voucher.type === 'PAYMENT') debtRestoreUnits = -appliedUnits;
+            } else if (activeAllocs.length === 0 && advTxRows.length === 0) {
+              debtRestoreUnits = voucher.type === 'RECEIPT' ? amountUnits : -amountUnits;
+            }
+
+            const updatedParty = updatePartyBalancesTx(database, tenantId, pRow.id, debtRestoreUnits, -netOrigAdvUnits);
+
+            if (netOrigAdvUnits !== 0n) {
+              const revAdvAmt = unitsToNumber(-netOrigAdvUnits, MONEY_SCALE);
+              const revAdvTx = {
+                id: randomUUID(),
+                tenantId,
+                branchId: voucherBranchId,
+                partyId: pRow.id,
+                partyType: pRow.party_type,
+                type: 'REVERSAL',
+                amount: revAdvAmt,
+                balanceAfter: updatedParty.advanceBalance,
+                voucherId: voucher.id,
+                journalEntryId: reversalEntry.id,
+                date: reversalDate,
+                description: `عكس رصيد مقدم لسند ${voucher.voucherNumber}: ${reason}`,
+                createdBy: actor.id,
+                createdAt: nowIso,
+              };
+              database.prepare(
+                `INSERT INTO party_advance_transactions
+                  (tenant_id,id,branch_id,party_id,party_type,tx_type,amount_decimal,balance_after_decimal,voucher_id,invoice_id,journal_entry_id,tx_date,created_at,data_json)
+                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+              ).run(
+                tenantId, revAdvTx.id, revAdvTx.branchId, revAdvTx.partyId, revAdvTx.partyType,
+                revAdvTx.type, formatScaledInt(-netOrigAdvUnits, MONEY_SCALE),
+                formatScaledInt(parseScaledInt(updatedParty.advanceBalance, MONEY_SCALE, 'advBalAfter'), MONEY_SCALE),
+                revAdvTx.voucherId, null, revAdvTx.journalEntryId, revAdvTx.date, revAdvTx.createdAt, JSON.stringify(revAdvTx)
+              );
+              enqueueOutboxTx(database, actor, {
+                entityType: 'PARTY_ADVANCE',
+                entityId: revAdvTx.id,
+                action: 'CREATE',
+                payload: revAdvTx,
+                priority: 4,
+                idempotencyKey: `${tenantId}_PARTY_ADVANCE_${revAdvTx.id}_CREATE`,
+                branchId: voucherBranchId,
+                nowIso,
+              });
+            }
+          }
+        }
+
+        const updatedOriginalJe = {
+          ...originalJe,
+          status: 'REVERSED',
+          reversalReason: reason,
+          reversedEntryId: reversalEntry.id,
+        };
+        database.prepare('UPDATE journal_entries SET status = ?, data_json = ? WHERE tenant_id = ? AND id = ?')
+          .run('REVERSED', JSON.stringify(updatedOriginalJe), tenantId, originalJe.id);
+
+        const reversedVoucher = {
+          ...voucher,
+          status: 'REVERSED',
+          reversedByJournalId: reversalEntry.id,
+          reversalReason: reason,
+        };
+        database.prepare('UPDATE vouchers SET data_json = ? WHERE tenant_id = ? AND id = ?')
+          .run(JSON.stringify(reversedVoucher), tenantId, reversedVoucher.id);
+
+        enqueueOutboxTx(database, actor, {
+          entityType: 'VOUCHER',
+          entityId: reversedVoucher.id,
+          action: 'UPDATE',
+          payload: reversedVoucher,
+          priority: 3,
+          idempotencyKey: `${tenantId}_VOUCHER_${reversedVoucher.id}_REVERSED`,
+          branchId: voucherBranchId,
+          nowIso,
+        });
+        enqueueOutboxTx(database, actor, {
+          entityType: 'JOURNAL_ENTRY',
+          entityId: reversalEntry.id,
+          action: 'CREATE',
+          payload: reversalEntry,
+          priority: 4,
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${reversalEntry.id}_CREATE`,
+          branchId: voucherBranchId,
+          nowIso,
+        });
+        enqueueOutboxTx(database, actor, {
+          entityType: 'JOURNAL_ENTRY',
+          entityId: updatedOriginalJe.id,
+          action: 'UPDATE',
+          payload: updatedOriginalJe,
+          priority: 4,
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${updatedOriginalJe.id}_REVERSED`,
+          branchId: voucherBranchId,
+          nowIso,
+        });
+        writeAuditLogTx(
+          database,
+          { ...actor, branchId: voucherBranchId },
+          'عكس سند مالي',
+          `عكس السند ${reversedVoucher.voucherNumber} بقيد ${reversalEntry.entryNumber} - السبب: ${reason}`,
+          nowIso
+        );
+
+        database.exec('COMMIT');
+        return {
+          success: true,
+          voucher: reversedVoucher,
+          reversalJournalEntry: reversalEntry,
+        };
       } catch (error) {
         try { database.exec('ROLLBACK'); } catch {}
         throw error;
@@ -2224,8 +3747,8 @@ export function createFinancialService(database, core) {
         });
 
         for (const line of linesWithUnits) {
-          const deltaUnits = line._debitUnits - line._creditUnits;
-          updateAccountBalanceTx(database, tenantId, line.accountCode, deltaUnits);
+          updateAccountBalanceByLineTx(database, tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+          const cashDeltaUnits = line._debitUnits - line._creditUnits;
 
           const linkedBoxes = database.prepare(
             'SELECT id, branch_id, account_code, data_json FROM cash_boxes WHERE tenant_id = ? AND account_code = ?'
@@ -2240,7 +3763,7 @@ export function createFinancialService(database, core) {
               if (parsed.isCentral) {
                 assertPermission(actor, 'cashbox:central_access', 'قيد يدوي على الصندوق المركزي');
               }
-              updateCashBoxBalanceTx(database, tenantId, branchBoxes[0].id, deltaUnits, true);
+              updateCashBoxBalanceTx(database, tenantId, branchBoxes[0].id, cashDeltaUnits, true);
             }
           }
         }
@@ -2347,8 +3870,8 @@ export function createFinancialService(database, core) {
         });
 
         for (const line of linesWithUnits) {
-          const deltaUnits = line._debitUnits - line._creditUnits;
-          updateAccountBalanceTx(database, tenantId, line.accountCode, deltaUnits);
+          updateAccountBalanceByLineTx(database, tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+          const cashDeltaUnits = line._debitUnits - line._creditUnits;
 
           const linkedBoxes = database.prepare(
             'SELECT id, branch_id, account_code, data_json FROM cash_boxes WHERE tenant_id = ? AND account_code = ?'
@@ -2367,7 +3890,7 @@ export function createFinancialService(database, core) {
             if (parsedBox.isCentral) {
               assertPermission(actor, 'cashbox:central_access', 'عكس قيد على الصندوق المركزي');
             }
-            updateCashBoxBalanceTx(database, tenantId, branchBoxes[0].id, deltaUnits, true);
+            updateCashBoxBalanceTx(database, tenantId, branchBoxes[0].id, cashDeltaUnits, true);
           }
         }
 

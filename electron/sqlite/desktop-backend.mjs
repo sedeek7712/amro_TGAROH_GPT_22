@@ -293,7 +293,18 @@ export function createDesktopBackend({
     createSalesInvoiceAtomic({ token, params }) {
       const actor = requireActor(token);
       const result = financial.createSalesInvoiceAtomic(actor, params);
-      onDataChanged(['invoices', 'products', 'parties', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
+      onDataChanged([
+        'invoices',
+        'products',
+        'parties',
+        'cashBoxes',
+        'accounts',
+        'journalEntries',
+        'paymentAllocations',
+        'partyAdvances',
+        'outbox',
+        'auditLogs',
+      ]);
       return result;
     },
 
@@ -324,8 +335,79 @@ export function createDesktopBackend({
     createCashVoucherAtomic({ token, params }) {
       const actor = requireActor(token);
       const result = financial.createCashVoucherAtomic(actor, params);
-      onDataChanged(['vouchers', 'cashBoxes', 'accounts', 'parties', 'journalEntries', 'outbox', 'auditLogs']);
+      onDataChanged([
+        'vouchers',
+        'invoices',
+        'cashBoxes',
+        'accounts',
+        'parties',
+        'journalEntries',
+        'paymentAllocations',
+        'partyAdvances',
+        'allocationAudits',
+        'outbox',
+        'auditLogs',
+      ]);
       return result;
+    },
+
+    postDraftCashVoucherAtomic({ token, params }) {
+      const actor = requireActor(token);
+      const result = financial.postDraftCashVoucherAtomic(actor, params);
+      onDataChanged([
+        'vouchers',
+        'invoices',
+        'cashBoxes',
+        'accounts',
+        'parties',
+        'journalEntries',
+        'paymentAllocations',
+        'partyAdvances',
+        'allocationAudits',
+        'outbox',
+        'auditLogs',
+      ]);
+      return result;
+    },
+
+    cancelCashVoucherAtomic({ token, params }) {
+      const actor = requireActor(token);
+      const result = financial.cancelCashVoucherAtomic(actor, params);
+      onDataChanged(['vouchers', 'outbox', 'auditLogs']);
+      return result;
+    },
+
+    reverseCashVoucherAtomic({ token, params }) {
+      const actor = requireActor(token);
+      const result = financial.reverseCashVoucherAtomic(actor, params);
+      onDataChanged([
+        'vouchers',
+        'invoices',
+        'cashBoxes',
+        'accounts',
+        'parties',
+        'journalEntries',
+        'paymentAllocations',
+        'partyAdvances',
+        'outbox',
+        'auditLogs',
+      ]);
+      return result;
+    },
+
+    getPaymentAllocations({ token, partyId, voucherId }) {
+      const actor = requireActor(token);
+      return financial.getPaymentAllocations(actor, partyId, voucherId);
+    },
+
+    getPartyAdvanceTransactions({ token, partyId }) {
+      const actor = requireActor(token);
+      return financial.getPartyAdvanceTransactions(actor, partyId);
+    },
+
+    getAllocationAudits({ token, voucherId }) {
+      const actor = requireActor(token);
+      return financial.getAllocationAudits(actor, voucherId);
     },
 
     getAmanatRecords({ token }) {

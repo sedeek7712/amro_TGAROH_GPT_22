@@ -104,6 +104,7 @@ describe('Financial Atomicity, Cash Vouchers + JVs, Stock Batch Integrity & Idem
     });
 
     assert.ok(res.voucher.journalEntryId, 'Voucher must have journalEntryId linked');
+    assert.ok(res.journalEntry, 'Posted voucher must return linked journalEntry');
     assert.equal(res.voucher.journalEntryId, res.journalEntry.id);
 
     const totalDr = res.journalEntry.lines.reduce((s, l) => s + l.debit, 0);

@@ -25,7 +25,9 @@ import { storage, OFFICIAL_ACTIVITIES } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
 import { dataService } from '../../services/dataService';
 import { desktopSession } from '../../services/desktopSession';
-import { getActiveCurrencyConfig } from '../../config/currency';
+import { authService } from '../../services/authService';
+import { hasPermission } from '../../config/rbac';
+import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
@@ -67,6 +69,8 @@ export const PointOfSale: React.FC<POSProps> = ({
     typeof window !== 'undefined' && window.amroDesktop ? '' : storage.getCashBoxes()[0]?.id || ''
   );
   const [paidAmountInput, setPaidAmountInput] = useState<string>('');
+  const [applyAdvanceInput, setApplyAdvanceInput] = useState<string>('');
+  const [dueDate, setDueDate] = useState<string>('');
   const [invoiceNotes, setInvoiceNotes] = useState<string>('');
   const [completedInvoice, setCompletedInvoice] = useState<Invoice | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -76,6 +80,11 @@ export const PointOfSale: React.FC<POSProps> = ({
   const [clientRequestId, setClientRequestId] = useState<string>(() => storage.generateUUID());
 
   const searchInputRef = useRef<HTMLInputElement>(null);
+
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const actor =
+    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
+  const canUseAdvance = hasPermission(actor, 'party:advance:use');
 
   const products = useLiveProducts(currentActivity);
   const customers = useLiveParties('CUSTOMER');
@@ -199,15 +208,25 @@ export const PointOfSale: React.FC<POSProps> = ({
     setCart((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // العمليات الحسابية للسلة
+  // العمليات الحسابية للسلة وتطبيق الرصيد المقدم للعميل
   const subtotal = cart.reduce((sum, item) => sum + item.quantity * item.unitPrice, 0);
-  const total = Math.max(0, Number((subtotal - discountAmount).toFixed(2)));
+  const total = Math.max(0, roundMoney(subtotal - discountAmount));
+  const selectedCustomer = customers.find((c) => c.id === selectedCustomerId);
+  const availableAdvanceBalance = selectedCustomer ? roundMoney(selectedCustomer.advanceBalance || 0) : 0;
+  const maxApplicableAdvance =
+    selectedCustomer && canUseAdvance ? roundMoney(Math.min(availableAdvanceBalance, total)) : 0;
+  const appliedAdvanceAmount =
+    selectedCustomer && canUseAdvance
+      ? roundMoney(Math.min(Math.max(0, Number(applyAdvanceInput) || 0), maxApplicableAdvance))
+      : 0;
+  const netAfterAdvance = roundMoney(Math.max(0, total - appliedAdvanceAmount));
 
-  // المبلغ المدفوع الافتراضي
+  // المبلغ النقدي المحصل في الصندوق فعلياً (بدون الرصيد المقدم)
   const actualPaidAmount =
     paymentMethod === 'CREDIT'
-      ? Math.min(Number(paidAmountInput) || 0, total)
-      : total;
+      ? roundMoney(Math.min(Math.max(0, Number(paidAmountInput) || 0), netAfterAdvance))
+      : netAfterAdvance;
+  const remainingCreditAmount = roundMoney(Math.max(0, netAfterAdvance - actualPaidAmount));
 
   // إتمام البيع وإصدار الفاتورة والترحيل المحاسبي بالمعاملة الذرية
   const handleCheckout = async () => {
@@ -219,6 +238,11 @@ export const PointOfSale: React.FC<POSProps> = ({
 
     if (paymentMethod === 'CREDIT' && !selectedCustomerId) {
       setErrorMessage('يجب تحديد عميل مسجل لإتمام عملية البيع الآجل (ذمم).');
+      return;
+    }
+
+    if (appliedAdvanceAmount > 0 && (!selectedCustomerId || !canUseAdvance)) {
+      setErrorMessage('استخدام الرصيد المقدم يتطلب تحديد عميل مسجل وتوفر الصلاحية.');
       return;
     }
 
@@ -255,6 +279,7 @@ export const PointOfSale: React.FC<POSProps> = ({
       partyId: selectedCustomerId || undefined,
       partyName: finalPartyName,
       date: new Date().toISOString().split('T')[0],
+      dueDate: paymentMethod === 'CREDIT' && dueDate ? dueDate : undefined,
       items: cart,
       subtotal,
       discount: discountAmount,
@@ -267,7 +292,7 @@ export const PointOfSale: React.FC<POSProps> = ({
     };
 
     try {
-      // 3. التنفيذ الذري المركب في IndexedDB عبر DexieDataService مع ترقيم تسلسلي ومنع تكرار
+      // 3. التنفيذ الذري المركب عبر مزود البيانات الموحد مع ترقيم تسلسلي ومنع تكرار
       const res = await dataService.createSalesInvoiceAtomic({
         invoice: newInvoice,
         totalCogs: Number(totalCogs.toFixed(2)),
@@ -276,6 +301,7 @@ export const PointOfSale: React.FC<POSProps> = ({
           quantity: item.quantity,
           batchNumber: item.batchNumber,
         })),
+        applyAdvanceAmount: appliedAdvanceAmount > 0 ? appliedAdvanceAmount : undefined,
         clientRequestId,
       });
 
@@ -284,6 +310,8 @@ export const PointOfSale: React.FC<POSProps> = ({
       setCart([]);
       setDiscountAmount(0);
       setPaidAmountInput('');
+      setApplyAdvanceInput('');
+      setDueDate('');
       setInvoiceNotes('');
       setClientRequestId(storage.generateUUID());
       onRefresh();
@@ -491,8 +519,9 @@ export const PointOfSale: React.FC<POSProps> = ({
                 value={selectedCustomerId}
                 onChange={(e) => {
                   setSelectedCustomerId(e.target.value);
+                  setApplyAdvanceInput('');
                   const cust = customers.find((c) => c.id === e.target.value);
-                  if (cust) setCustomCustomerName(cust.nameAr);
+                  setCustomCustomerName(cust ? cust.nameAr : 'عميل نقدي عام');
                 }}
                 className="flex-1 py-1 px-2 bg-white border border-slate-200 rounded text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
               >
@@ -500,10 +529,22 @@ export const PointOfSale: React.FC<POSProps> = ({
                 {customers.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.nameAr} - رصيد: {c.balance.toFixed(2)} {currencySymbol}
+                    {(c.advanceBalance || 0) > 0
+                      ? ` | مقدم متاح: ${(c.advanceBalance || 0).toFixed(2)}`
+                      : ''}
                   </option>
                 ))}
               </select>
             </div>
+
+            {selectedCustomer && availableAdvanceBalance > 0 && (
+              <div className="flex items-center justify-between px-2.5 py-1.5 bg-indigo-50 border border-indigo-200 rounded-lg text-[11px] text-indigo-900">
+                <span className="font-bold">رصيد مقدم متاح للعميل (2103):</span>
+                <span className="font-mono font-extrabold">
+                  {availableAdvanceBalance.toFixed(2)} {currencySymbol}
+                </span>
+              </div>
+            )}
 
             {/* Cash Box selector */}
             <div className="flex items-center gap-2">
@@ -646,19 +687,73 @@ export const PointOfSale: React.FC<POSProps> = ({
                 <span className="font-mono tabular-nums text-emerald-800">{total.toFixed(2)} {currencySymbol}</span>
               </div>
 
-              {/* In Credit payment: Paid amount input */}
+              {/* Customer Advance Settlement (2103 -> 1103) */}
+              {selectedCustomer && availableAdvanceBalance > 0 && canUseAdvance && total > 0 && (
+                <div className="p-2 bg-indigo-50/70 border border-indigo-200 rounded-lg space-y-1.5 text-indigo-950">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-bold text-[11px]">خصم من الرصيد المقدم:</span>
+                    <div className="flex items-center gap-1">
+                      <input
+                        type="number"
+                        min="0"
+                        max={maxApplicableAdvance}
+                        step="any"
+                        value={applyAdvanceInput}
+                        onChange={(e) => setApplyAdvanceInput(e.target.value)}
+                        placeholder="0.00"
+                        className="w-20 px-2 py-0.5 text-left font-mono bg-white border border-indigo-300 rounded text-xs font-bold text-indigo-900 focus:outline-none"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setApplyAdvanceInput(String(maxApplicableAdvance))}
+                        className="px-2 py-0.5 bg-indigo-600 hover:bg-indigo-700 text-white rounded text-[10px] font-bold"
+                      >
+                        الحد الأقصى
+                      </button>
+                    </div>
+                  </div>
+                  {appliedAdvanceAmount > 0 && (
+                    <div className="flex justify-between text-[11px] font-bold text-indigo-800">
+                      <span>المتبقي بعد تسوية الرصيد المقدم:</span>
+                      <span className="font-mono">
+                        {netAfterAdvance.toFixed(2)} {currencySymbol}
+                      </span>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* In Credit payment: Paid amount & due date */}
               {paymentMethod === 'CREDIT' && (
-                <div className="flex justify-between items-center text-amber-800 pt-1">
-                  <span>المبلغ المسدد الآن:</span>
-                  <input
-                    type="number"
-                    min="0"
-                    step="any"
-                    value={paidAmountInput}
-                    onChange={(e) => setPaidAmountInput(e.target.value)}
-                    placeholder="0.00"
-                    className="w-24 px-2 py-0.5 text-left font-mono bg-white border border-amber-300 rounded text-xs font-bold text-amber-900 focus:outline-none"
-                  />
+                <div className="space-y-1.5 pt-1">
+                  <div className="flex justify-between items-center text-amber-800">
+                    <span>المبلغ النقدي المسدد الآن:</span>
+                    <input
+                      type="number"
+                      min="0"
+                      max={netAfterAdvance}
+                      step="any"
+                      value={paidAmountInput}
+                      onChange={(e) => setPaidAmountInput(e.target.value)}
+                      placeholder="0.00"
+                      className="w-24 px-2 py-0.5 text-left font-mono bg-white border border-amber-300 rounded text-xs font-bold text-amber-900 focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex justify-between items-center text-slate-600">
+                    <span>تاريخ الاستحقاق (اختياري):</span>
+                    <input
+                      type="date"
+                      value={dueDate}
+                      onChange={(e) => setDueDate(e.target.value)}
+                      className="px-2 py-0.5 bg-white border border-slate-300 rounded text-xs font-mono text-slate-900 focus:outline-none"
+                    />
+                  </div>
+                  <div className="flex justify-between text-[11px] font-bold text-rose-700">
+                    <span>المتبقي ذمة آجل على العميل:</span>
+                    <span className="font-mono">
+                      {remainingCreditAmount.toFixed(2)} {currencySymbol}
+                    </span>
+                  </div>
                 </div>
               )}
             </div>

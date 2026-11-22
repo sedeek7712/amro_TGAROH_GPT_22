@@ -43,17 +43,26 @@ npm run preview -- --host 127.0.0.1 --port 4173
 - لا تمسح بيانات المتصفح أو تخزنه المؤقت قبل أخذ نسخة احتياطية والتحقق منها.
 - عند تشغيل النظام على جهاز آخر، يلزم استيراد نسخة احتياطية أو إعداد خادم مركزي ومزامنة موثقة.
 
-## حدود إصدار المستودع
+## بنية مسارات التشغيل والتخزين في المستودع
 
-هذا المستودع حاليًا تطبيق Vite/React PWA مع Dexie/IndexedDB. لا يتضمن في هذا الإصدار برنامج تثبيت Windows مستقلًا (EXE/MSI)، ولا تطبيق Electron/Tauri، ولا قاعدة SQLite، ولا خادم API مستقلًا. لذلك لا تعتبره بعدُ نظامًا مركزيًا متعدد الأجهزة أو بديلًا عن خادم إنتاج محمي.
+يدعم المستودع مساري تشغيل متوافقين محاسبياً ووظيفياً عبر واجهة `IDataService` الموحدة:
 
-قبل استخدامه في عمليات مالية حقيقية أو على عدة أجهزة، يجب اختبار النسخة على بيانات تجريبية، إعداد الخادم ومصادقة المستخدمين وسياسات قاعدة البيانات من جهة الخادم، والتحقق من النسخ الاحتياطي والاستعادة على جهاز منفصل.
+1. **مسار الويب والتطبيق التقدمي (Web / PWA)**:
+   - يعتمد على React وTypeScript وVite مع قاعدة بيانات محلية عبر `Dexie / IndexedDB` (`src/db/erpDatabase.ts` و`src/services/dexieDataService.ts`).
+2. **مسار سطح المكتب لنظام Windows (Electron + SQLite)**:
+   - يعتمد على Electron (`electron/main.mjs` و`electron/preload.cjs`) مع محرك `node:sqlite` المدمج (`electron/sqlite/database.mjs` و`electron/sqlite/desktop-backend.mjs`) ومصادقة مستقلة على مستوى العملية الرئيسية (`electron/security/authentication.mjs`).
+   - يتضمن `package.json` إعدادات `electron-builder` لبناء حزمة Windows Preview (`npm run build:windows:preview`) ويجب اختبارها وبناؤها على جهاز Windows مستهدف قبل التوزيع الإنتاجي.
 
-## أوامر الفحص
+> تنبيه أمني وتشغيلي: لا يزال النظام يعمل محلياً على الجهاز (Offline-First)؛ قبل الاعتماد الإنتاجي متعدد الأجهزة، يجب تهيئة خادم المزامنة الموثق واختبار النسخ الاحتياطي والاستعادة على جهاز منفصل.
+
+## أوامر الفحص والتحقق
 
 ```powershell
 npm run lint
+npm run verify:architecture
 npm test
+npm run test:sqlite
 npm run test:legacy
 npm run build
+npm run verify
 ```

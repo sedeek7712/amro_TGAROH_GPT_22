@@ -41,6 +41,12 @@ export type Permission =
   | 'vouchers:view'
   | 'voucher:receipt'
   | 'voucher:payment'
+  | 'voucher:cancel'
+  | 'voucher:reverse'
+  | 'payment:allocation:override'
+  | 'party:advance:use'
+  | 'supplier:advance:approve'
+  | 'audit:allocation:view'
   | 'cashbox:view'
   | 'cashbox:create'
   | 'cashbox:central_access'
@@ -69,6 +75,9 @@ export const ENTITY_SCOPE_POLICY = {
     'Invoice',
     'JournalEntry',
     'PaymentVoucher',
+    'PaymentAllocation',
+    'PartyAdvanceTransaction',
+    'AllocationAudit',
     'AmanatRecord',
     'SystemAuditLog',
     'OutboxQueueItem',
@@ -126,6 +135,12 @@ const ALL_PERMISSIONS: Permission[] = [
   'vouchers:view',
   'voucher:receipt',
   'voucher:payment',
+  'voucher:cancel',
+  'voucher:reverse',
+  'payment:allocation:override',
+  'party:advance:use',
+  'supplier:advance:approve',
+  'audit:allocation:view',
   'cashbox:view',
   'cashbox:create',
   'cashbox:central_access',
@@ -165,6 +180,11 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'vouchers:view',
     'voucher:receipt',
     'voucher:payment',
+    'voucher:cancel',
+    'voucher:reverse',
+    'party:advance:use',
+    'supplier:advance:approve',
+    'audit:allocation:view',
     'cashbox:view',
     'cashbox:create',
     'amanat:view',

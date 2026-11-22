@@ -1,5 +1,6 @@
 import type {
   Account,
+  AllocationAudit,
   AmanatRecord,
   Branch,
   CashBox,
@@ -11,11 +12,14 @@ import type {
   JournalEntry,
   OutboxQueueItem,
   Party,
+  PartyAdvanceTransaction,
+  PaymentAllocation,
   PaymentVoucher,
   Product,
   SyncConflict,
   SystemAuditLog,
   SystemUser,
+  VoucherManualAllocationInput,
 } from './erp';
 
 export {};
@@ -189,9 +193,10 @@ declare global {
           invoice: Invoice;
           totalCogs: number;
           stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+          applyAdvanceAmount?: number;
           clientRequestId?: string;
         };
-      }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
+      }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }>;
       createPurchaseInvoiceAtomic(input: {
         token: string;
         params: {
@@ -211,8 +216,57 @@ declare global {
       getVouchers(input: { token: string }): Promise<PaymentVoucher[]>;
       createCashVoucherAtomic(input: {
         token: string;
-        params: { voucher: PaymentVoucher };
-      }): Promise<{ success: boolean; voucher: PaymentVoucher; journalEntry: JournalEntry }>;
+        params: {
+          voucher: PaymentVoucher;
+          manualAllocations?: VoucherManualAllocationInput[];
+          overrideReason?: string;
+        };
+      }): Promise<{
+        success: boolean;
+        voucher: PaymentVoucher;
+        journalEntry?: JournalEntry;
+        allocations?: PaymentAllocation[];
+        advanceTransaction?: PartyAdvanceTransaction;
+      }>;
+      postDraftCashVoucherAtomic(input: {
+        token: string;
+        params: {
+          voucherId: string;
+          manualAllocations?: VoucherManualAllocationInput[];
+          overrideReason?: string;
+        };
+      }): Promise<{
+        success: boolean;
+        voucher: PaymentVoucher;
+        journalEntry: JournalEntry;
+        allocations: PaymentAllocation[];
+        advanceTransaction?: PartyAdvanceTransaction;
+      }>;
+      cancelCashVoucherAtomic(input: {
+        token: string;
+        params: { voucherId: string; reason: string };
+      }): Promise<PaymentVoucher>;
+      reverseCashVoucherAtomic(input: {
+        token: string;
+        params: { voucherId: string; reversalReason: string };
+      }): Promise<{
+        success: boolean;
+        voucher: PaymentVoucher;
+        reversalJournalEntry: JournalEntry;
+      }>;
+      getPaymentAllocations(input: {
+        token: string;
+        partyId?: string;
+        voucherId?: string;
+      }): Promise<PaymentAllocation[]>;
+      getPartyAdvanceTransactions(input: {
+        token: string;
+        partyId?: string;
+      }): Promise<PartyAdvanceTransaction[]>;
+      getAllocationAudits(input: {
+        token: string;
+        voucherId?: string;
+      }): Promise<AllocationAudit[]>;
       getAmanatRecords(input: { token: string }): Promise<AmanatRecord[]>;
       getAmanatById(input: { token: string; id: string }): Promise<AmanatRecord | undefined>;
       createAmanatDepositAtomic(input: {

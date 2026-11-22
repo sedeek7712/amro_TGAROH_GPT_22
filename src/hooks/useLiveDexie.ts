@@ -28,6 +28,9 @@ import {
   Branch,
   SystemUser,
   SystemAuditLog,
+  PaymentAllocation,
+  PartyAdvanceTransaction,
+  AllocationAudit,
 } from '../types/erp';
 
 function currentActorKey(actor: SystemUser | null): string {
@@ -415,6 +418,83 @@ export function useLiveBranches(): Branch[] {
       const current = desktopSession.getActor();
       if (!token || !hasPermission(current, 'branches:view')) return [];
       return await window.amroDesktop!.getBranches({ token });
+    }
+  );
+}
+
+export function useLivePaymentAllocations(partyId?: string, voucherId?: string): PaymentAllocation[] {
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => {
+      let rows: PaymentAllocation[];
+      if (voucherId) {
+        rows = await db.paymentAllocations.where('voucherId').equals(voucherId).toArray();
+      } else if (partyId) {
+        rows = await db.paymentAllocations.where('partyId').equals(partyId).toArray();
+      } else {
+        rows = await db.paymentAllocations.toArray();
+      }
+      if (partyId && voucherId) {
+        rows = rows.filter((r) => r.partyId === partyId);
+      }
+      return scopeBranchRows(rows, actor).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    },
+    [],
+    [partyId, voucherId, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || (!hasPermission(current, 'vouchers:view') && !hasPermission(current, 'party:view'))) {
+        return [];
+      }
+      return await window.amroDesktop!.getPaymentAllocations({ token, partyId, voucherId });
+    }
+  );
+}
+
+export function useLivePartyAdvances(partyId?: string): PartyAdvanceTransaction[] {
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => {
+      const rows = partyId
+        ? await db.partyAdvanceTransactions.where('partyId').equals(partyId).toArray()
+        : await db.partyAdvanceTransactions.toArray();
+      return scopeBranchRows(rows, actor).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+    },
+    [],
+    [partyId, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || (!hasPermission(current, 'party:view') && !hasPermission(current, 'vouchers:view'))) {
+        return [];
+      }
+      return await window.amroDesktop!.getPartyAdvanceTransactions({ token, partyId });
+    }
+  );
+}
+
+export function useLiveAllocationAudits(voucherId?: string): AllocationAudit[] {
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => {
+      if (!hasPermission(actor, 'audit:allocation:view') && !hasPermission(actor, 'view:audit_logs')) {
+        return [];
+      }
+      const rows = voucherId
+        ? await db.allocationAudits.where('voucherId').equals(voucherId).toArray()
+        : await db.allocationAudits.toArray();
+      return scopeBranchRows(rows, actor).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+    },
+    [],
+    [voucherId, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || (!hasPermission(current, 'audit:allocation:view') && !hasPermission(current, 'view:audit_logs'))) {
+        return [];
+      }
+      return await window.amroDesktop!.getAllocationAudits({ token, voucherId });
     }
   );
 }

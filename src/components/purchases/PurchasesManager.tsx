@@ -41,6 +41,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH');
   const [cashBoxId, setCashBoxId] = useState('');
   const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [dueDate, setDueDate] = useState('');
   const [paidAmountInput, setPaidAmountInput] = useState('');
   const [items, setItems] = useState<
     Array<{
@@ -172,6 +173,11 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
     const actualPaid =
       paymentMethod === 'CREDIT' ? Number(paidAmountInput) || 0 : totalInvoice;
 
+    if ((paymentMethod === 'CREDIT' || actualPaid < totalInvoice) && !supplierId) {
+      setFormError('يجب اختيار مورد مسجل من القائمة عند تسجيل فاتورة شراء آجلة أو مسددة جزئياً.');
+      return;
+    }
+
     // 1. تجهيز سطور الفاتورة
     const invoiceItems: InvoiceItem[] = items.map((item) => ({
       id: storage.generateUUID(),
@@ -197,6 +203,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
       partyId: supplierId || undefined,
       partyName: finalPartyName,
       date: invoiceDate,
+      dueDate: paymentMethod === 'CREDIT' && dueDate ? dueDate : undefined,
       items: invoiceItems,
       subtotal: totalInvoice,
       discount: 0,
@@ -209,7 +216,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
     setIsSubmitting(true);
     try {
-      // 3. التنفيذ الذري المركب عبر DexieDataService (تحديث المخزون والتشغيلات والقيد المزدوج ومنع التكرار)
+      // 3. التنفيذ الذري المركب عبر مزود البيانات الموحد (تحديث المخزون والتشغيلات والقيد المزدوج ومنع التكرار)
       await dataService.createPurchaseInvoiceAtomic({
         invoice: newInvoice,
         itemsWithBatches: items.map((item) => ({
@@ -224,6 +231,10 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
       setIsAddModalOpen(false);
       setItems([]);
+      setSupplierId('');
+      setSupplierName('');
+      setPaidAmountInput('');
+      setDueDate('');
       setFormError(null);
       setClientRequestId(storage.generateUUID());
       onRefresh();
@@ -253,6 +264,11 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
         <button
           onClick={() => {
             setItems([]);
+            setSupplierId('');
+            setSupplierName('');
+            setPaidAmountInput('');
+            setDueDate('');
+            setFormError(null);
             setIsAddModalOpen(true);
           }}
           className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold shadow-sm transition-colors shrink-0"
@@ -291,7 +307,12 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                 filteredInvoices.map((inv) => (
                   <tr key={inv.id} className="hover:bg-slate-50/80 transition-colors">
                     <td className="py-3 px-4 font-mono font-bold text-slate-900">{inv.invoiceNumber}</td>
-                    <td className="py-3 px-4 font-mono text-slate-600">{inv.date}</td>
+                    <td className="py-3 px-4 font-mono text-slate-600">
+                      <div>{inv.date}</div>
+                      {inv.dueDate && (
+                        <div className="text-[10px] text-amber-700">استحقاق: {inv.dueDate}</div>
+                      )}
+                    </td>
                     <td className="py-3 px-4 font-bold text-slate-900">{inv.partyName}</td>
                     <td className="py-3 px-4 text-slate-700">
                       {inv.activityId === 'pharmacy'
@@ -621,6 +642,26 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                   />
                 </div>
               </div>
+
+              {paymentMethod === 'CREDIT' && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                  <div>
+                    <label className="block font-semibold text-slate-700 mb-1">تاريخ الاستحقاق (اختياري للآجل)</label>
+                    <input
+                      type="date"
+                      value={dueDate}
+                      onChange={(e) => setDueDate(e.target.value)}
+                      className="w-full px-3 py-1.5 border border-slate-200 rounded font-mono"
+                    />
+                  </div>
+                  <div className="flex items-end pb-1 text-xs font-bold text-rose-700">
+                    المتبقي ذمة للمورد:{' '}
+                    <span className="font-mono mr-1">
+                      {Math.max(0, totalInvoice - (Number(paidAmountInput) || 0)).toFixed(2)} {currencySymbol}
+                    </span>
+                  </div>
+                </div>
+              )}
 
               <div className="flex justify-between items-center pt-3 border-t border-slate-200">
                 <div className="text-sm font-extrabold text-slate-900">

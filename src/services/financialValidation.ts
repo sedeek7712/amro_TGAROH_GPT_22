@@ -6,6 +6,7 @@
 
 import { roundMoney } from '../config/currency';
 import {
+  Account,
   AmanatRecord,
   CashBox,
   Invoice,
@@ -36,8 +37,9 @@ export function validateSalesInvoiceInput(params: {
   totalCogs: number;
   stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
   cashBox?: CashBox | null;
+  applyAdvanceAmount?: number;
 }): void {
-  const { invoice, totalCogs, stockDeductions, cashBox } = params;
+  const { invoice, totalCogs, stockDeductions, cashBox, applyAdvanceAmount = 0 } = params;
 
   if (!invoice || !invoice.items || invoice.items.length === 0) {
     throw new FinancialValidationError('فاتورة المبيعات يجب أن تحتوي على صنف واحد على الأقل.');
@@ -107,9 +109,14 @@ export function validateSalesInvoiceInput(params: {
     );
   }
 
-  if (invoice.paidAmount > invoice.total + 0.01) {
+  if (!isFiniteNonNegative(applyAdvanceAmount)) {
+    throw new FinancialValidationError('مبلغ التسوية من الرصيد المقدم لا يجوز أن يكون سالباً.');
+  }
+
+  const totalSettled = roundMoney(invoice.paidAmount + applyAdvanceAmount);
+  if (totalSettled > invoice.total + 0.01) {
     throw new FinancialValidationError(
-      `المبلغ المدفوع (${invoice.paidAmount}) لا يمكن أن يتجاوز إجمالي الفاتورة (${invoice.total}).`
+      `مجموع المدفوع نقداً والمخصوم من الرصيد المقدم (${totalSettled}) لا يمكن أن يتجاوز إجمالي الفاتورة (${invoice.total}).`
     );
   }
 
@@ -122,7 +129,11 @@ export function validateSalesInvoiceInput(params: {
     }
   }
 
-  const unpaid = roundMoney(invoice.total - invoice.paidAmount);
+  if (applyAdvanceAmount > 0 && !invoice.partyId) {
+    throw new FinancialValidationError('استخدام الرصيد المقدم يتطلب اختيار عميل مسجل.');
+  }
+
+  const unpaid = roundMoney(invoice.total - totalSettled);
   if (invoice.paymentMethod === 'CREDIT' && unpaid > 0 && !invoice.partyId) {
     throw new FinancialValidationError('يجب تحديد عميل مسجل عند البيع الآجل لتسجيل الذمة المدينة.');
   }
@@ -208,8 +219,9 @@ export function validateVoucherInput(params: {
   voucher: PaymentVoucher;
   cashBox?: CashBox | null;
   accountExists: boolean;
+  account?: Pick<Account, 'isLeaf'> | null;
 }): void {
-  const { voucher, cashBox, accountExists } = params;
+  const { voucher, cashBox, accountExists, account } = params;
 
   if (!isFinitePositive(voucher.amount)) {
     throw new FinancialValidationError('مبلغ السند المالي يجب أن يكون رقماً موجباً أكبر من الصفر.');
@@ -220,10 +232,14 @@ export function validateVoucherInput(params: {
   if (!voucher.accountCode || !accountExists) {
     throw new FinancialValidationError(`الحساب المقابل (${voucher.accountCode || '-'}) غير موجود في الدليل المحاسبي.`);
   }
+  if (account && account.isLeaf === false) {
+    throw new FinancialValidationError(`لا يجوز الترحيل على الحساب التجميعي غير الفرعي (${voucher.accountCode}).`);
+  }
   if (!voucher.description || !voucher.description.trim()) {
     throw new FinancialValidationError('وصف السند وسبب الحركة مطلوب محاسبياً.');
   }
-  if (voucher.type === 'PAYMENT' && roundMoney(cashBox.balance) + 0.001 < roundMoney(voucher.amount)) {
+  const willPost = (voucher.status || 'POSTED') !== 'DRAFT';
+  if (willPost && voucher.type === 'PAYMENT' && roundMoney(cashBox.balance) + 0.001 < roundMoney(voucher.amount)) {
     throw new FinancialValidationError(
       `رصيد الصندوق (${cashBox.nameAr}: ${roundMoney(cashBox.balance)}) غير كافٍ لصرف مبلغ ${roundMoney(voucher.amount)}.`
     );
@@ -233,8 +249,9 @@ export function validateVoucherInput(params: {
 export function validateJournalEntryInput(params: {
   entry: JournalEntry;
   validAccountCodes?: Set<string>;
+  accountsByCode?: Map<string, Pick<Account, 'isLeaf'>>;
 }): void {
-  const { entry, validAccountCodes } = params;
+  const { entry, validAccountCodes, accountsByCode } = params;
   if (!entry.description || !entry.description.trim()) {
     throw new FinancialValidationError('شرح وبيان القيد المحاسبي مطلوب.');
   }
@@ -248,7 +265,15 @@ export function validateJournalEntryInput(params: {
     if (!line.accountCode || !line.accountCode.trim()) {
       throw new FinancialValidationError('جميع أسطر القيد يجب أن تحتوي على كود حساب صالح.');
     }
-    if (validAccountCodes && validAccountCodes.size > 0 && !validAccountCodes.has(line.accountCode)) {
+    if (accountsByCode && accountsByCode.size > 0) {
+      const targetAcc = accountsByCode.get(line.accountCode);
+      if (!targetAcc) {
+        throw new FinancialValidationError(`الحساب المحاسبي (${line.accountCode}) غير معرف في الدليل المحاسبي.`);
+      }
+      if (targetAcc.isLeaf === false) {
+        throw new FinancialValidationError(`لا يجوز القيد على الحساب التجميعي غير الفرعي (${line.accountCode}).`);
+      }
+    } else if (validAccountCodes && validAccountCodes.size > 0 && !validAccountCodes.has(line.accountCode)) {
       throw new FinancialValidationError(`الحساب المحاسبي (${line.accountCode}) غير معرف في الدليل المحاسبي.`);
     }
     if (!isFiniteNonNegative(line.debit) || !isFiniteNonNegative(line.credit)) {

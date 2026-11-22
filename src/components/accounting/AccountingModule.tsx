@@ -434,13 +434,36 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
                         <span className="font-mono font-extrabold text-xs text-slate-900 bg-slate-100 px-2.5 py-1 rounded">
                           {entry.entryNumber}
                         </span>
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                          entry.status === 'REVERSED'
-                            ? 'bg-rose-100 text-rose-800 border border-rose-200'
-                            : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                        }`}>
-                          {entry.status === 'REVERSED' ? 'معكوس / ملغى' : 'مرحّل قطعي'}
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                            entry.status === 'REVERSED'
+                              ? 'bg-rose-100 text-rose-800 border border-rose-200'
+                              : entry.status === 'DRAFT'
+                              ? 'bg-amber-100 text-amber-800 border border-amber-200'
+                              : 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                          }`}
+                        >
+                          {entry.status === 'REVERSED'
+                            ? 'معكوس'
+                            : entry.status === 'DRAFT'
+                            ? 'مسودة'
+                            : 'مرحّل قطعي'}
                         </span>
+                        {entry.referenceType && (
+                          <span className="px-2 py-0.5 rounded text-[10px] font-semibold bg-indigo-50 text-indigo-800 border border-indigo-200">
+                            {entry.referenceType === 'ADVANCE_SETTLEMENT'
+                              ? 'تسوية رصيد مقدم'
+                              : entry.referenceType === 'VOUCHER_REVERSAL'
+                              ? 'عكس سند'
+                              : entry.referenceType === 'VOUCHER'
+                              ? 'سند مالي'
+                              : entry.referenceType === 'INVOICE'
+                              ? 'فاتورة'
+                              : entry.referenceType === 'AMANAT'
+                              ? 'أمانات'
+                              : 'قيد يدوي'}
+                          </span>
+                        )}
                         <span className="text-xs font-bold text-slate-800">{entry.description}</span>
                       </div>
                       <div className="flex items-center gap-2 text-xs">
@@ -459,7 +482,7 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
                         <span className="font-mono tabular-nums font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded">
                           {entryTotal.toFixed(2)} {currencySymbol}
                         </span>
-                        {entry.status !== 'REVERSED' && (
+                        {entry.status === 'POSTED' && (
                           <button
                             onClick={() => {
                               setReversalError(null);

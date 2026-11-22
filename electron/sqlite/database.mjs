@@ -14,6 +14,9 @@ const CORE_TABLES = [
   'cash_boxes', 'vouchers', 'amanat_records', 'users', 'audit_logs',
   'outbox_queue', 'sync_conflicts', 'document_sequences', 'legacy_imports',
 ];
+const V2_TABLES = [
+  'payment_allocations', 'party_advance_transactions', 'allocation_audits',
+];
 
 function sha256(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -119,12 +122,22 @@ export function verifySqliteFile(filePath, migrationsDirectory = DEFAULT_MIGRATI
       }
     }
 
+    const schemaVersion = appliedRows[appliedRows.length - 1].version;
+    const hasV2PaymentMigration = migrationFiles.some((m) => m.filename === '002_payment_allocations_advances.sql');
+    if (schemaVersion >= 2 && hasV2PaymentMigration) {
+      for (const tableName of V2_TABLES) {
+        if (!hasTableStmt.get(tableName)) {
+          throw new Error('النسخة الاحتياطية تفتقر إلى جدول مطور (v2): ' + tableName);
+        }
+      }
+    }
+
     const counts = tableCounts(candidateDb);
     return {
       valid: true,
       path: resolved,
       sizeBytes: stat.size,
-      schemaVersion: appliedRows[appliedRows.length - 1].version,
+      schemaVersion,
       counts,
     };
   } finally {
@@ -353,7 +366,9 @@ export async function openErpDatabase(options) {
     const required = database.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
     );
-    for (const tableName of CORE_TABLES) {
+    const hasV2PaymentMigration = migrationFiles.some((m) => m.filename === '002_payment_allocations_advances.sql');
+    const tablesToRequire = hasV2PaymentMigration ? [...CORE_TABLES, ...V2_TABLES] : CORE_TABLES;
+    for (const tableName of tablesToRequire) {
       if (!required.get(tableName)) {
         throw new Error('Required ERP table is missing after migration: ' + tableName);
       }

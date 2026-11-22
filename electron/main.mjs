@@ -538,6 +538,46 @@ if (!hasSingleInstance) {
       return desktopBackend.createCashVoucherAtomic({ token: input?.token, params: input?.params });
     });
 
+    ipcMain.handle('erp:finance:post-draft-voucher', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.postDraftCashVoucherAtomic({ token: input?.token, params: input?.params });
+    });
+
+    ipcMain.handle('erp:finance:cancel-cash-voucher', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.cancelCashVoucherAtomic({ token: input?.token, params: input?.params });
+    });
+
+    ipcMain.handle('erp:finance:reverse-cash-voucher', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.reverseCashVoucherAtomic({ token: input?.token, params: input?.params });
+    });
+
+    ipcMain.handle('erp:finance:get-payment-allocations', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getPaymentAllocations({
+        token: input?.token,
+        partyId: input?.partyId,
+        voucherId: input?.voucherId,
+      });
+    });
+
+    ipcMain.handle('erp:finance:get-party-advances', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getPartyAdvanceTransactions({
+        token: input?.token,
+        partyId: input?.partyId,
+      });
+    });
+
+    ipcMain.handle('erp:finance:get-allocation-audits', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getAllocationAudits({
+        token: input?.token,
+        voucherId: input?.voucherId,
+      });
+    });
+
     ipcMain.handle('erp:finance:get-amanat-records', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.getAmanatRecords({ token: input?.token });

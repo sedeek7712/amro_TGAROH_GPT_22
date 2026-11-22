@@ -207,6 +207,9 @@ class DjangoSyncService {
       ACCOUNT: '/accounts/',
       CASHBOX: '/cash-boxes/',
       BRANCH: '/branches/',
+      PAYMENT_ALLOCATION: '/payment-allocations/',
+      PARTY_ADVANCE: '/party-advances/',
+      ALLOCATION_AUDIT: '/allocation-audits/',
     };
     return map[entityType] || '/sync/';
   }

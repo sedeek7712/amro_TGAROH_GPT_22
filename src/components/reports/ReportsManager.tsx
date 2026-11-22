@@ -46,6 +46,10 @@ import {
   useLiveAccounts,
   useLiveJournalEntries,
   useLiveBranches,
+  useLiveVouchers,
+  useLivePaymentAllocations,
+  useLivePartyAdvances,
+  useLiveAllocationAudits,
 } from '../../hooks/useLiveDexie';
 import { CommercialActivityId, Party, JournalEntry } from '../../types/erp';
 import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
@@ -56,10 +60,13 @@ import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 type ReportTab =
   | 'activity_profits'
   | 'trial_balance'
+  | 'balance_sheet'
   | 'customer_statement'
+  | 'aging_advances'
   | 'stock_valuation'
   | 'sales_purchases'
-  | 'amanat_custody';
+  | 'amanat_custody'
+  | 'audit_reconciliation';
 
 export const ReportsManager: React.FC = () => {
   const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
@@ -72,9 +79,10 @@ export const ReportsManager: React.FC = () => {
   );
   const [printSize, setPrintSize] = useState<'A4' | '80mm'>('A4');
 
-  // فلاتر كشف الحساب
+  // فلاتر كشف الحساب وأعمار الديون
   const [selectedPartyId, setSelectedPartyId] = useState<string>('');
   const [partyTypeFilter, setPartyTypeFilter] = useState<'CUSTOMER' | 'SUPPLIER'>('CUSTOMER');
+  const [agingPartyType, setAgingPartyType] = useState<'CUSTOMER' | 'SUPPLIER'>('CUSTOMER');
   const [startDate, setStartDate] = useState<string>('');
   const [endDate, setEndDate] = useState<string>('');
 
@@ -113,6 +121,10 @@ export const ReportsManager: React.FC = () => {
   const liveInvoices = useLiveInvoices();
   const liveParties = useLiveParties();
   const liveCashBoxes = useLiveCashBoxes();
+  const liveVouchers = useLiveVouchers();
+  const livePaymentAllocations = useLivePaymentAllocations();
+  const livePartyAdvances = useLivePartyAdvances();
+  const liveAllocationAudits = useLiveAllocationAudits();
   const liveAmanat = useLiveAmanatRecords();
   const liveBranches = useLiveBranches();
 
@@ -153,23 +165,154 @@ export const ReportsManager: React.FC = () => {
     };
   }, [liveProducts, activityFilter, searchQuery]);
 
-  // 2. كشف حساب الطرف المختار (عميل / مورد)
+  // 2. كشف حساب الطرف المختار (عميل / مورد) شاملاً السندات والتخصيصات والأرصدة المقدمة
   const statementData = useMemo(() => {
     if (!selectedPartyId) return null;
     const party = liveParties.find((p) => p.id === selectedPartyId);
     if (!party) return null;
 
-    // تجميع الفواتير المرتبطة
-    const partyInvoices = liveInvoices.filter((inv) => inv.partyId === party.id);
+    const partyInvoices = liveInvoices.filter(
+      (inv) => inv.partyId === party.id && inv.status !== 'REVERSED'
+    );
+    const partyVouchers = liveVouchers.filter(
+      (v) =>
+        v.partyId === party.id &&
+        (v.status || 'POSTED') !== 'DRAFT' &&
+        v.status !== 'CANCELLED'
+    );
+    const partyAdvances = livePartyAdvances.filter(
+      (tx) => tx.partyId === party.id && tx.type === 'APPLY_TO_INVOICE'
+    );
 
-    // تجميع القيود المرتبطة
-    const partyEntries = liveJournalEntries.filter((j) => {
-      if (j.referenceId === party.id) return true;
-      if (partyInvoices.some((inv) => inv.id === j.referenceId)) return true;
-      return false;
-    });
+    const rawRows: Array<{
+      id: string;
+      date: string;
+      sortKey: string;
+      type: string;
+      docNumber: string;
+      debit: number;
+      credit: number;
+      memo: string;
+      extraBadge?: string;
+    }> = [];
 
-    // ترتيب الحركات تاريخياً
+    for (const inv of partyInvoices) {
+      const cashPaid = Math.max(0, roundMoney(inv.paidAmount - (inv.advanceAppliedAmount || 0)));
+      if (party.type === 'CUSTOMER') {
+        rawRows.push({
+          id: inv.id,
+          date: inv.date,
+          sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+          type: inv.type === 'SALE' ? 'فاتورة مبيعات' : 'مرتجع مبيعات',
+          docNumber: inv.invoiceNumber,
+          debit: inv.type === 'SALE' ? inv.total : 0,
+          credit: cashPaid,
+          memo: `فاتورة ${inv.type === 'SALE' ? 'مبيعات' : 'مرتجع'} (${inv.paymentMethod})`,
+          extraBadge:
+            (inv.advanceAppliedAmount || 0) > 0
+              ? `خصم من الرصيد المقدم: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
+              : undefined,
+        });
+      } else {
+        rawRows.push({
+          id: inv.id,
+          date: inv.date,
+          sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
+          type: inv.type === 'PURCHASE' ? 'فاتورة مشتريات' : 'مرتجع مشتريات',
+          docNumber: inv.invoiceNumber,
+          debit: cashPaid,
+          credit: inv.type === 'PURCHASE' ? inv.total : 0,
+          memo: `فاتورة مشتريات (${inv.paymentMethod})`,
+        });
+      }
+    }
+
+    for (const v of partyVouchers) {
+      const allocs = livePaymentAllocations.filter((a) => a.voucherId === v.id);
+      const allocInfo =
+        allocs.length > 0
+          ? `تخصيص: ${allocs
+              .map((a) => `${a.invoiceNumber || a.invoiceId} (${a.allocatedAmount.toFixed(2)})`)
+              .join('، ')}`
+          : undefined;
+      const isReversed = v.status === 'REVERSED';
+      const settledDebt = v.appliedToDebtAmount ?? v.amount;
+      const badge = [
+        allocInfo,
+        (v.advanceAmount || 0) > 0 ? `رصيد مقدم: ${Number(v.advanceAmount).toFixed(2)}` : '',
+      ]
+        .filter(Boolean)
+        .join(' | ');
+
+      if (v.type === 'RECEIPT') {
+        rawRows.push({
+          id: v.id,
+          date: v.date,
+          sortKey: `${v.date}-2-${v.voucherNumber}`,
+          type: isReversed ? 'سند قبض (معكوس)' : 'سند قبض',
+          docNumber: v.voucherNumber,
+          debit: 0,
+          credit: settledDebt,
+          memo: v.description,
+          extraBadge: badge || undefined,
+        });
+        if (isReversed) {
+          rawRows.push({
+            id: `${v.id}-rev`,
+            date: v.date,
+            sortKey: `${v.date}-3-${v.voucherNumber}-REV`,
+            type: 'عكس سند قبض',
+            docNumber: `${v.voucherNumber}-REV`,
+            debit: settledDebt,
+            credit: 0,
+            memo: v.reversalReason || 'عكس قيد وسند مالي',
+          });
+        }
+      } else {
+        rawRows.push({
+          id: v.id,
+          date: v.date,
+          sortKey: `${v.date}-2-${v.voucherNumber}`,
+          type: isReversed ? 'سند صرف (معكوس)' : 'سند صرف',
+          docNumber: v.voucherNumber,
+          debit: settledDebt,
+          credit: 0,
+          memo: v.description,
+          extraBadge: badge || undefined,
+        });
+        if (isReversed) {
+          rawRows.push({
+            id: `${v.id}-rev`,
+            date: v.date,
+            sortKey: `${v.date}-3-${v.voucherNumber}-REV`,
+            type: 'عكس سند صرف',
+            docNumber: `${v.voucherNumber}-REV`,
+            debit: 0,
+            credit: settledDebt,
+            memo: v.reversalReason || 'عكس قيد وسند مالي',
+          });
+        }
+      }
+    }
+
+    for (const tx of partyAdvances) {
+      rawRows.push({
+        id: tx.id,
+        date: tx.date,
+        sortKey: `${tx.date}-4-${tx.id}`,
+        type: 'تسوية رصيد مقدم',
+        docNumber: 'ADV-SET',
+        debit: party.type === 'SUPPLIER' ? Math.abs(tx.amount) : 0,
+        credit: party.type === 'CUSTOMER' ? Math.abs(tx.amount) : 0,
+        memo: tx.description,
+        extraBadge: `متبقي مقدم: ${tx.balanceAfter.toFixed(2)}`,
+      });
+    }
+
+    rawRows.sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'en'));
+
+    let openingBalance = 0;
+    let runningBalance = 0;
     const transactions: Array<{
       id: string;
       date: string;
@@ -179,66 +322,61 @@ export const ReportsManager: React.FC = () => {
       credit: number;
       balanceAfter: number;
       memo: string;
+      extraBadge?: string;
     }> = [];
 
-    let runningBalance = 0;
-
-    // معالجة الفواتير
-    const sortedInvoices = [...partyInvoices].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-
-    for (const inv of sortedInvoices) {
-      if (startDate && inv.date < startDate) continue;
-      if (endDate && inv.date > endDate) continue;
-
-      if (party.type === 'CUSTOMER') {
-        // مبيعات لعميل: تزيد رصيده المدين، والسداد ينقصه
-        const debit = inv.type === 'SALE' ? inv.total : 0;
-        const credit = inv.paidAmount;
-        runningBalance += debit - credit;
-
-        transactions.push({
-          id: inv.id,
-          date: inv.date,
-          type: inv.type === 'SALE' ? 'فاتورة مبيعات' : 'مرتجع مبيعات',
-          docNumber: inv.invoiceNumber,
-          debit,
-          credit,
-          balanceAfter: runningBalance,
-          memo: `فاتورة ${inv.type === 'SALE' ? 'مبيعات' : 'مرتجع'} رقم ${inv.invoiceNumber} (${inv.paymentMethod})`,
-        });
-      } else {
-        // مشتريات من مورد: تزيد رصيده الدائن، والسداد ينقصه
-        const credit = inv.type === 'PURCHASE' ? inv.total : 0;
-        const debit = inv.paidAmount;
-        runningBalance += credit - debit;
-
-        transactions.push({
-          id: inv.id,
-          date: inv.date,
-          type: inv.type === 'PURCHASE' ? 'فاتورة مشتريات' : 'مرتجع مشتريات',
-          docNumber: inv.invoiceNumber,
-          debit,
-          credit,
-          balanceAfter: runningBalance,
-          memo: `فاتورة مشتريات رقم ${inv.invoiceNumber}`,
-        });
+    for (const r of rawRows) {
+      if (endDate && r.date > endDate) continue;
+      const delta =
+        party.type === 'CUSTOMER' ? r.debit - r.credit : r.credit - r.debit;
+      if (startDate && r.date < startDate) {
+        openingBalance = roundMoney(openingBalance + delta);
+        runningBalance = openingBalance;
+        continue;
       }
+      runningBalance = roundMoney(runningBalance + delta);
+      transactions.push({
+        id: r.id,
+        date: r.date,
+        type: r.type,
+        docNumber: r.docNumber,
+        debit: r.debit,
+        credit: r.credit,
+        balanceAfter: runningBalance,
+        memo: r.memo,
+        extraBadge: r.extraBadge,
+      });
     }
 
     return {
       party,
+      openingBalance,
       transactions,
+      periodClosingBalance: runningBalance,
       finalBalance: party.balance,
+      advanceBalance: roundMoney(party.advanceBalance || 0),
       invoicesCount: partyInvoices.length,
     };
-  }, [selectedPartyId, liveParties, liveInvoices, liveJournalEntries, startDate, endDate]);
+  }, [
+    selectedPartyId,
+    liveParties,
+    liveInvoices,
+    liveVouchers,
+    livePaymentAllocations,
+    livePartyAdvances,
+    startDate,
+    endDate,
+  ]);
 
-  // 3. ميزان المراجعة وتوازن القيد المزدوج
+  // 3. ميزان المراجعة وتوازن القيد المزدوج (يشمل القيود المرحلة والمعكوسة ويستبعد المسودات)
   const trialBalanceData = useMemo(() => {
     let totalDebit = 0;
     let totalCredit = 0;
 
-    const accountsMap = new Map<string, { code: string; nameAr: string; type: string; debit: number; credit: number; balance: number }>();
+    const accountsMap = new Map<
+      string,
+      { code: string; nameAr: string; type: string; debit: number; credit: number; balance: number }
+    >();
 
     for (const acc of liveAccounts) {
       accountsMap.set(acc.code, {
@@ -252,20 +390,19 @@ export const ReportsManager: React.FC = () => {
     }
 
     for (const entry of liveJournalEntries) {
-      if (entry.status === 'POSTED') {
-        for (const line of entry.lines) {
-          const accItem = accountsMap.get(line.accountCode);
-          if (accItem) {
-            accItem.debit += Number(line.debit) || 0;
-            accItem.credit += Number(line.credit) || 0;
-          }
-          totalDebit += Number(line.debit) || 0;
-          totalCredit += Number(line.credit) || 0;
+      if (entry.status === 'DRAFT') continue;
+      for (const line of entry.lines) {
+        const accItem = accountsMap.get(line.accountCode);
+        if (accItem) {
+          accItem.debit = roundMoney(accItem.debit + (Number(line.debit) || 0));
+          accItem.credit = roundMoney(accItem.credit + (Number(line.credit) || 0));
         }
+        totalDebit = roundMoney(totalDebit + (Number(line.debit) || 0));
+        totalCredit = roundMoney(totalCredit + (Number(line.credit) || 0));
       }
     }
 
-    const diff = Math.abs(totalDebit - totalCredit);
+    const diff = roundMoney(Math.abs(totalDebit - totalCredit));
     const isBalanced = diff <= 0.02;
 
     return {
@@ -276,6 +413,36 @@ export const ReportsManager: React.FC = () => {
       isBalanced,
     };
   }, [liveAccounts, liveJournalEntries]);
+
+  const balanceSheetData = useMemo(
+    () => accounting.getBalanceSheet({ accounts: liveAccounts, entries: liveJournalEntries }),
+    [liveAccounts, liveJournalEntries]
+  );
+
+  const agingData = useMemo(
+    () =>
+      accounting.getAgingReport({
+        parties: liveParties,
+        invoices: liveInvoices,
+        partyType: agingPartyType,
+      }),
+    [liveParties, liveInvoices, agingPartyType]
+  );
+
+  const reconciliationRows = useMemo(
+    () => accounting.getControlReconciliation({ parties: liveParties, accounts: liveAccounts }),
+    [liveParties, liveAccounts]
+  );
+
+  const reversedVouchers = useMemo(
+    () => liveVouchers.filter((v) => v.status === 'REVERSED'),
+    [liveVouchers]
+  );
+
+  const reversedJournalEntries = useMemo(
+    () => liveJournalEntries.filter((j) => j.status === 'REVERSED'),
+    [liveJournalEntries]
+  );
 
   // تشغيل الطباعة
   const handlePrint = (mode: 'A4' | '80mm' = 'A4') => {
@@ -359,12 +526,28 @@ export const ReportsManager: React.FC = () => {
           ميزان المراجعة الشامل
         </button>
         <button
+          onClick={() => setActiveTab('balance_sheet')}
+          className={`px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
+            activeTab === 'balance_sheet' ? 'bg-white text-slate-900 shadow-sm' : 'hover:bg-slate-200/70'
+          }`}
+        >
+          الميزانية العمومية
+        </button>
+        <button
           onClick={() => setActiveTab('customer_statement')}
           className={`px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
             activeTab === 'customer_statement' ? 'bg-white text-slate-900 shadow-sm' : 'hover:bg-slate-200/70'
           }`}
         >
           كشف حساب عميل / مورد
+        </button>
+        <button
+          onClick={() => setActiveTab('aging_advances')}
+          className={`px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
+            activeTab === 'aging_advances' ? 'bg-white text-slate-900 shadow-sm' : 'hover:bg-slate-200/70'
+          }`}
+        >
+          أعمار الديون والأرصدة المقدمة
         </button>
         <button
           onClick={() => setActiveTab('stock_valuation')}
@@ -389,6 +572,14 @@ export const ReportsManager: React.FC = () => {
           }`}
         >
           سجل الأمانات المعزول
+        </button>
+        <button
+          onClick={() => setActiveTab('audit_reconciliation')}
+          className={`px-3.5 py-2 rounded-lg transition-all whitespace-nowrap ${
+            activeTab === 'audit_reconciliation' ? 'bg-indigo-900 text-white shadow-sm' : 'text-indigo-900 hover:bg-indigo-100'
+          }`}
+        >
+          التدقيق والمطابقة مع الرقابة
         </button>
       </div>
 
@@ -565,6 +756,118 @@ export const ReportsManager: React.FC = () => {
       )}
 
       {/* ========================================================================= */}
+      {/* 2B. الميزانية العمومية (Balance Sheet) */}
+      {/* ========================================================================= */}
+      {activeTab === 'balance_sheet' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm printable-area space-y-6">
+          <div className="border-b-2 border-slate-800 pb-4 text-center">
+            <h2 className="text-lg font-black text-slate-900">نظام الإدارة التجارية والمحاسبية المتكامل</h2>
+            <h3 className="text-base font-bold text-blue-900 mt-1">قائمة المركز المالي (الميزانية العمومية)</h3>
+            <p className="text-xs text-slate-500 mt-1">
+              تطابق المعادلة المحاسبية (الأصول = الخصوم + حقوق الملكية):{' '}
+              {balanceSheetData.isBalanced ? (
+                <span className="font-bold text-emerald-700">متوازنة تماماً</span>
+              ) : (
+                <span className="font-bold text-rose-700">يوجد فارق ({balanceSheetData.diff.toFixed(2)} {currencySymbol})</span>
+              )}
+            </p>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 text-xs">
+            {/* الأصول */}
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="px-4 py-2.5 bg-blue-900 text-white font-extrabold flex justify-between">
+                <span>الأصول (Assets)</span>
+                <span className="font-mono">{balanceSheetData.totalAssets.toFixed(2)} {currencySymbol}</span>
+              </div>
+              <table className="w-full text-right">
+                <tbody className="divide-y divide-slate-100">
+                  {balanceSheetData.assets.length === 0 ? (
+                    <tr>
+                      <td className="py-6 text-center text-slate-400">لا توجد أرصدة أصول مسجلة</td>
+                    </tr>
+                  ) : (
+                    balanceSheetData.assets.map((row) => (
+                      <tr key={row.code} className="hover:bg-slate-50">
+                        <td className="py-2 px-3 font-mono text-slate-500 w-20">{row.code}</td>
+                        <td className="py-2 px-3 font-semibold text-slate-900">{row.nameAr}</td>
+                        <td className="py-2 px-3 font-mono font-bold text-left text-slate-900">
+                          {row.amount.toFixed(2)} {currencySymbol}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            {/* الخصوم وحقوق الملكية */}
+            <div className="space-y-4">
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-4 py-2.5 bg-purple-900 text-white font-extrabold flex justify-between">
+                  <span>الخصوم والالتزامات (Liabilities)</span>
+                  <span className="font-mono">{balanceSheetData.totalLiabilities.toFixed(2)} {currencySymbol}</span>
+                </div>
+                <table className="w-full text-right">
+                  <tbody className="divide-y divide-slate-100">
+                    {balanceSheetData.liabilities.length === 0 ? (
+                      <tr>
+                        <td className="py-6 text-center text-slate-400">لا توجد التزامات مسجلة</td>
+                      </tr>
+                    ) : (
+                      balanceSheetData.liabilities.map((row) => (
+                        <tr key={row.code} className="hover:bg-slate-50">
+                          <td className="py-2 px-3 font-mono text-slate-500 w-20">{row.code}</td>
+                          <td className="py-2 px-3 font-semibold text-slate-900">{row.nameAr}</td>
+                          <td className="py-2 px-3 font-mono font-bold text-left text-slate-900">
+                            {row.amount.toFixed(2)} {currencySymbol}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="border border-slate-200 rounded-xl overflow-hidden">
+                <div className="px-4 py-2.5 bg-amber-800 text-white font-extrabold flex justify-between">
+                  <span>حقوق الملكية وصافي الربح (Equity)</span>
+                  <span className="font-mono">{balanceSheetData.totalEquity.toFixed(2)} {currencySymbol}</span>
+                </div>
+                <table className="w-full text-right">
+                  <tbody className="divide-y divide-slate-100">
+                    {balanceSheetData.equity.map((row) => (
+                      <tr key={row.code} className="hover:bg-slate-50">
+                        <td className="py-2 px-3 font-mono text-slate-500 w-20">{row.code}</td>
+                        <td className="py-2 px-3 font-semibold text-slate-900">{row.nameAr}</td>
+                        <td className="py-2 px-3 font-mono font-bold text-left text-slate-900">
+                          {row.amount.toFixed(2)} {currencySymbol}
+                        </td>
+                      </tr>
+                    ))}
+                    <tr className="bg-emerald-50/50">
+                      <td className="py-2 px-3 font-mono text-emerald-700 w-20">P&amp;L</td>
+                      <td className="py-2 px-3 font-bold text-emerald-900">صافي ربح / خسارة الفترة الحالية</td>
+                      <td className="py-2 px-3 font-mono font-extrabold text-left text-emerald-800">
+                        {balanceSheetData.netProfit.toFixed(2)} {currencySymbol}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="p-3 bg-slate-900 text-white rounded-xl flex items-center justify-between font-extrabold">
+                <span>إجمالي الخصوم + حقوق الملكية:</span>
+                <span className="font-mono text-sm text-emerald-400">
+                  {balanceSheetData.totalLiabilitiesAndEquity.toFixed(2)} {currencySymbol}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
       {/* 3. كشف حساب تفصيلي للعميل / المورد مع إشعار واتساب */}
       {/* ========================================================================= */}
       {activeTab === 'customer_statement' && (
@@ -609,6 +912,7 @@ export const ReportsManager: React.FC = () => {
                     .map((p) => (
                       <option key={p.id} value={p.id}>
                         {p.nameAr} ({p.phone || 'بدون هاتف'}) - الرصيد: {p.balance.toFixed(2)} {currencySymbol}
+                        {(p.advanceBalance || 0) > 0 ? ` | مقدم: ${(p.advanceBalance || 0).toFixed(2)}` : ''}
                       </option>
                     ))}
                 </select>
@@ -677,7 +981,7 @@ export const ReportsManager: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 mt-4 p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs">
                   <div>
                     <span className="text-slate-500">اسم الطرف: </span>
                     <strong className="text-slate-900">{statementData.party.nameAr}</strong>
@@ -693,9 +997,17 @@ export const ReportsManager: React.FC = () => {
                     </span>
                   </div>
                   <div>
-                    <span className="text-slate-500">الرصيد الختامي: </span>
+                    <span className="text-slate-500">الرصيد الختامي (نهاية الفترة): </span>
                     <span className="font-mono font-bold text-sm text-emerald-800">
-                      {statementData.finalBalance.toFixed(2)} {currencySymbol}
+                      {statementData.periodClosingBalance.toFixed(2)} {currencySymbol}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-500">
+                      {statementData.party.type === 'CUSTOMER' ? 'الرصيد المقدم (2103): ' : 'سلف المورد (1105): '}
+                    </span>
+                    <span className="font-mono font-bold text-sm text-indigo-800">
+                      {statementData.advanceBalance.toFixed(2)} {currencySymbol}
                     </span>
                   </div>
                 </div>
@@ -709,13 +1021,26 @@ export const ReportsManager: React.FC = () => {
                       <th className="py-2.5 px-3">التاريخ</th>
                       <th className="py-2.5 px-3">نوع الحركة</th>
                       <th className="py-2.5 px-3">رقم المستند</th>
-                      <th className="py-2.5 px-3">البيان</th>
+                      <th className="py-2.5 px-3">البيان والتخصيص</th>
                       <th className="py-2.5 px-3 text-center">مدين (+)</th>
                       <th className="py-2.5 px-3 text-center">دائن (-)</th>
                       <th className="py-2.5 px-3 text-center">الرصيد التراكمي</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
+                    {startDate && (
+                      <tr className="bg-slate-50/70 font-bold">
+                        <td className="py-2 px-3 font-mono text-slate-600">{startDate}</td>
+                        <td className="py-2 px-3 text-slate-700">رصيد أول المدة</td>
+                        <td className="py-2 px-3 font-mono">-</td>
+                        <td className="py-2 px-3 text-slate-600">الرصيد المرحل لما قبل {startDate}</td>
+                        <td className="py-2 px-3 text-center font-mono">-</td>
+                        <td className="py-2 px-3 text-center font-mono">-</td>
+                        <td className="py-2 px-3 text-center font-mono font-extrabold text-slate-900">
+                          {statementData.openingBalance.toFixed(2)} {currencySymbol}
+                        </td>
+                      </tr>
+                    )}
                     {statementData.transactions.length === 0 ? (
                       <tr>
                         <td colSpan={7} className="py-8 text-center text-slate-400">
@@ -728,12 +1053,17 @@ export const ReportsManager: React.FC = () => {
                           <td className="py-2.5 px-3 font-mono text-slate-600">{tr.date}</td>
                           <td className="py-2.5 px-3 font-bold text-slate-800">{tr.type}</td>
                           <td className="py-2.5 px-3 font-mono font-bold text-slate-900">{tr.docNumber}</td>
-                          <td className="py-2.5 px-3 text-slate-700">{tr.memo}</td>
+                          <td className="py-2.5 px-3 text-slate-700">
+                            <div>{tr.memo}</div>
+                            {tr.extraBadge && (
+                              <div className="text-[10px] text-indigo-700 font-semibold mt-0.5">{tr.extraBadge}</div>
+                            )}
+                          </td>
                           <td className="py-2.5 px-3 text-center font-mono tabular-nums text-slate-900">
-                            {tr.debit > 0 ? `${tr.debit.toFixed(2)}` : '-'}
+                            {tr.debit > 0 ? tr.debit.toFixed(2) : '-'}
                           </td>
                           <td className="py-2.5 px-3 text-center font-mono tabular-nums text-emerald-700 font-semibold">
-                            {tr.credit > 0 ? `${tr.credit.toFixed(2)}` : '-'}
+                            {tr.credit > 0 ? tr.credit.toFixed(2) : '-'}
                           </td>
                           <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
                             {tr.balanceAfter.toFixed(2)} {currencySymbol}
@@ -744,9 +1074,9 @@ export const ReportsManager: React.FC = () => {
                   </tbody>
                   <tfoot>
                     <tr className="border-t-2 border-slate-800 bg-slate-50 font-black text-xs">
-                      <td colSpan={4} className="py-3 px-3">الرصيد المستحق النهائي:</td>
+                      <td colSpan={4} className="py-3 px-3">رصيد نهاية الفترة (حسب مجموع الحركات):</td>
                       <td colSpan={3} className="py-3 px-3 text-center font-mono tabular-nums text-sm text-emerald-800">
-                        {statementData.finalBalance.toFixed(2)} {currencySymbol}
+                        {statementData.periodClosingBalance.toFixed(2)} {currencySymbol}
                       </td>
                     </tr>
                   </tfoot>
@@ -773,6 +1103,103 @@ export const ReportsManager: React.FC = () => {
               <p className="font-bold">يرجى اختيار عميل أو مورد من القائمة أعلاه لعرض كشف الحساب وطباعته أو إرساله عبر واتساب.</p>
             </div>
           )}
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 3B. أعمار الديون والفواتير المفتوحة والأرصدة المقدمة (Aging & Advances) */}
+      {/* ========================================================================= */}
+      {activeTab === 'aging_advances' && (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm printable-area space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b-2 border-slate-800 pb-4">
+            <div>
+              <h2 className="text-base font-black text-slate-900">تقرير أعمار الديون والمستحقات والأرصدة المقدمة</h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                متابعة الفواتير المفتوحة مصنفة زمنياً (0-30 / 31-60 / 61-90 / +90 يوم) مع الأرصدة المقدمة
+              </p>
+            </div>
+            <div className="flex rounded-lg bg-slate-100 p-1 text-xs font-bold no-print">
+              <button
+                onClick={() => setAgingPartyType('CUSTOMER')}
+                className={`px-3 py-1.5 rounded-md transition-all ${
+                  agingPartyType === 'CUSTOMER' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+                }`}
+              >
+                ذمم العملاء وأرصدة 2103
+              </button>
+              <button
+                onClick={() => setAgingPartyType('SUPPLIER')}
+                className={`px-3 py-1.5 rounded-md transition-all ${
+                  agingPartyType === 'SUPPLIER' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-600'
+                }`}
+              >
+                مستحقات الموردين وسلف 1105
+              </button>
+            </div>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-right text-xs">
+              <thead>
+                <tr className="border-b border-slate-300 bg-slate-100 text-slate-700 font-bold">
+                  <th className="py-2.5 px-3">{agingPartyType === 'CUSTOMER' ? 'العميل' : 'المورد'}</th>
+                  <th className="py-2.5 px-3 text-center">فواتير مفتوحة</th>
+                  <th className="py-2.5 px-3 text-center">0 - 30 يوم</th>
+                  <th className="py-2.5 px-3 text-center">31 - 60 يوم</th>
+                  <th className="py-2.5 px-3 text-center">61 - 90 يوم</th>
+                  <th className="py-2.5 px-3 text-center">+90 يوم</th>
+                  <th className="py-2.5 px-3 text-center">إجمالي المفتوح</th>
+                  <th className="py-2.5 px-3 text-center">
+                    {agingPartyType === 'CUSTOMER' ? 'الرصيد المقدم (2103)' : 'سلف الموردين (1105)'}
+                  </th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {agingData.rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="py-8 text-center text-slate-400">
+                      لا توجد سجلات أطراف مطابقة
+                    </td>
+                  </tr>
+                ) : (
+                  agingData.rows.map((r) => (
+                    <tr key={r.partyId} className="hover:bg-slate-50">
+                      <td className="py-2.5 px-3 font-bold text-slate-900">
+                        <div>{r.partyName}</div>
+                        <div className="text-[10px] font-mono text-slate-500">{r.phone}</div>
+                      </td>
+                      <td className="py-2.5 px-3 text-center font-mono">{r.openInvoicesCount}</td>
+                      <td className="py-2.5 px-3 text-center font-mono">{r.current0to30.toFixed(2)}</td>
+                      <td className="py-2.5 px-3 text-center font-mono">{r.days31to60.toFixed(2)}</td>
+                      <td className="py-2.5 px-3 text-center font-mono">{r.days61to90.toFixed(2)}</td>
+                      <td className="py-2.5 px-3 text-center font-mono text-rose-700 font-bold">{r.over90.toFixed(2)}</td>
+                      <td className="py-2.5 px-3 text-center font-mono font-extrabold text-slate-900">
+                        {r.totalOpenBalance.toFixed(2)} {currencySymbol}
+                      </td>
+                      <td className="py-2.5 px-3 text-center font-mono font-bold text-indigo-800">
+                        {r.advanceBalance.toFixed(2)} {currencySymbol}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+              <tfoot>
+                <tr className="border-t-2 border-slate-800 bg-slate-50 font-black">
+                  <td colSpan={2} className="py-3 px-3">الإجمالي:</td>
+                  <td className="py-3 px-3 text-center font-mono">{agingData.totals.current0to30.toFixed(2)}</td>
+                  <td className="py-3 px-3 text-center font-mono">{agingData.totals.days31to60.toFixed(2)}</td>
+                  <td className="py-3 px-3 text-center font-mono">{agingData.totals.days61to90.toFixed(2)}</td>
+                  <td className="py-3 px-3 text-center font-mono text-rose-700">{agingData.totals.over90.toFixed(2)}</td>
+                  <td className="py-3 px-3 text-center font-mono text-slate-900">
+                    {agingData.totals.totalOpenBalance.toFixed(2)} {currencySymbol}
+                  </td>
+                  <td className="py-3 px-3 text-center font-mono text-indigo-900">
+                    {agingData.totals.totalAdvanceBalance.toFixed(2)} {currencySymbol}
+                  </td>
+                </tr>
+              </tfoot>
+            </table>
+          </div>
         </div>
       )}
 
@@ -1090,6 +1517,158 @@ export const ReportsManager: React.FC = () => {
               )}
             </tbody>
           </table>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* 7. تقرير المطابقة مع حسابات الرقابة والتعديلات اليدوية والقيود المعكوسة */}
+      {/* ========================================================================= */}
+      {activeTab === 'audit_reconciliation' && (
+        <div className="space-y-6 printable-area">
+          {/* 1. مطابقة أرصدة الأطراف مع حسابات الرقابة */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+            <div className="border-b border-slate-200 pb-3">
+              <h3 className="text-base font-black text-slate-900">تقرير المطابقة بين أرصدة الأطراف التفصيلية وحسابات الرقابة (GL)</h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                يتحقق تلقائياً من تطابق مجموع ذمم وأرصدة العملاء والموردين مع الحسابات الرقابية 1103، 2101، 2103، 1105
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead>
+                  <tr className="border-b border-slate-300 bg-slate-100 text-slate-700 font-bold">
+                    <th className="py-2.5 px-3">البند الرقابي</th>
+                    <th className="py-2.5 px-3 text-center">كود الحساب</th>
+                    <th className="py-2.5 px-3 text-center">إجمالي سجل الأطراف</th>
+                    <th className="py-2.5 px-3 text-center">رصيد دفتر الأستاذ</th>
+                    <th className="py-2.5 px-3 text-center">الفارق</th>
+                    <th className="py-2.5 px-3 text-center">الحالة</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {reconciliationRows.map((r) => (
+                    <tr key={r.key} className="hover:bg-slate-50">
+                      <td className="py-2.5 px-3 font-bold text-slate-900">{r.label}</td>
+                      <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-700">{r.controlAccountCode}</td>
+                      <td className="py-2.5 px-3 text-center font-mono font-bold">{r.subledgerTotal.toFixed(2)} {currencySymbol}</td>
+                      <td className="py-2.5 px-3 text-center font-mono font-bold">{r.glAccountBalance.toFixed(2)} {currencySymbol}</td>
+                      <td className="py-2.5 px-3 text-center font-mono font-bold">{r.diff.toFixed(2)} {currencySymbol}</td>
+                      <td className="py-2.5 px-3 text-center">
+                        <span
+                          className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                            r.isMatched
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : 'bg-rose-100 text-rose-800'
+                          }`}
+                        >
+                          {r.isMatched ? 'متطابق' : 'يوجد فارق'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* 2. سجل التعديلات اليدوية لتخصيص الدفعات */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+            <div className="border-b border-slate-200 pb-3 flex items-center justify-between">
+              <div>
+                <h3 className="text-sm font-black text-slate-900">تقرير التعديلات اليدوية على تخصيص الدفعات</h3>
+                <p className="text-xs text-slate-500">سجل تدقيق غير قابل للتعديل لتجاوزات FIFO بصلاحية payment:allocation:override</p>
+              </div>
+              <span className="font-mono text-xs font-bold bg-indigo-50 text-indigo-800 px-2.5 py-1 rounded">
+                {liveAllocationAudits.length} تعديل
+              </span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead>
+                  <tr className="border-b border-slate-200 bg-slate-50 text-slate-700 font-bold">
+                    <th className="py-2 px-3">التاريخ والوقت</th>
+                    <th className="py-2 px-3">السند</th>
+                    <th className="py-2 px-3">المستخدم</th>
+                    <th className="py-2 px-3">السبب</th>
+                    <th className="py-2 px-3">التوزيع السابق (FIFO)</th>
+                    <th className="py-2 px-3">التوزيع المعتمد الجديد</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {liveAllocationAudits.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-6 text-center text-slate-400">
+                        لا توجد تعديلات يدوية على تخصيص الدفعات مسجلة
+                      </td>
+                    </tr>
+                  ) : (
+                    liveAllocationAudits.map((a) => (
+                      <tr key={a.id}>
+                        <td className="py-2 px-3 font-mono text-[11px]">{a.timestamp.replace('T', ' ').slice(0, 19)}</td>
+                        <td className="py-2 px-3 font-mono font-bold">{a.voucherId}</td>
+                        <td className="py-2 px-3 font-semibold">{a.userName}</td>
+                        <td className="py-2 px-3 text-slate-700">{a.reason}</td>
+                        <td className="py-2 px-3 font-mono text-[11px]">
+                          {a.previousAllocations.map((p) => `${p.invoiceNumber || p.invoiceId}: ${p.allocatedAmount}`).join(' | ') || '-'}
+                        </td>
+                        <td className="py-2 px-3 font-mono text-[11px] font-bold text-indigo-800">
+                          {a.newAllocations.map((n) => `${n.invoiceNumber || n.invoiceId}: ${n.allocatedAmount}`).join(' | ') || '-'}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* 3. تقرير السندات والقيود المعكوسة */}
+          <div className="bg-white rounded-2xl border border-slate-200 p-6 shadow-sm space-y-4">
+            <div className="border-b border-slate-200 pb-3">
+              <h3 className="text-sm font-black text-slate-900">تقرير القيود والسندات المعكوسة</h3>
+              <p className="text-xs text-slate-500">كافة المستندات التي خضعت لإجراء عكسي موثق مع مرجع القيد العكسي والسبب</p>
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 text-xs">
+              <div>
+                <h4 className="font-bold text-slate-800 mb-2">السندات المعكوسة ({reversedVouchers.length})</h4>
+                <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
+                  {reversedVouchers.length === 0 ? (
+                    <div className="p-4 text-center text-slate-400">لا توجد سندات معكوسة</div>
+                  ) : (
+                    reversedVouchers.map((v) => (
+                      <div key={v.id} className="p-2.5 space-y-0.5">
+                        <div className="flex justify-between font-bold">
+                          <span className="font-mono">{v.voucherNumber} ({v.partyName})</span>
+                          <span className="font-mono text-rose-700">{v.amount.toFixed(2)} {currencySymbol}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-600">السبب: {v.reversalReason || '-'}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+
+              <div>
+                <h4 className="font-bold text-slate-800 mb-2">القيود المعكوسة ({reversedJournalEntries.length})</h4>
+                <div className="border border-slate-200 rounded-lg divide-y divide-slate-100">
+                  {reversedJournalEntries.length === 0 ? (
+                    <div className="p-4 text-center text-slate-400">لا توجد قيود معكوسة</div>
+                  ) : (
+                    reversedJournalEntries.map((j) => (
+                      <div key={j.id} className="p-2.5 space-y-0.5">
+                        <div className="flex justify-between font-bold">
+                          <span className="font-mono">{j.entryNumber}</span>
+                          <span className="font-mono text-slate-500">{j.date}</span>
+                        </div>
+                        <div className="text-[11px] text-slate-700">{j.description}</div>
+                        <div className="text-[11px] text-rose-700">السبب: {j.reversalReason || '-'}</div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 

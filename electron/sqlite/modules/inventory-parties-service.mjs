@@ -476,40 +476,60 @@ export function createInventoryPartiesService(database) {
     // --- العملاء والموردون ---
     getParties(actor, type) {
       assertPermission(actor, 'party:view', 'عرض العملاء والموردين');
+      const hasAdvCol = database.prepare('PRAGMA table_info(parties)').all().some((c) => c.name === 'advance_balance_decimal');
+      const cols = hasAdvCol
+        ? 'tenant_id,id,party_type,name_ar,phone,balance_decimal,advance_balance_decimal,data_json'
+        : 'tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json';
       const rows = type && VALID_PARTY_TYPES.has(type)
         ? database.prepare(
-            'SELECT tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json FROM parties WHERE tenant_id = ? AND party_type = ? ORDER BY name_ar'
+            `SELECT ${cols} FROM parties WHERE tenant_id = ? AND party_type = ? ORDER BY name_ar`
           ).all(actor.tenantId, type)
         : database.prepare(
-            'SELECT tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json FROM parties WHERE tenant_id = ? ORDER BY name_ar'
+            `SELECT ${cols} FROM parties WHERE tenant_id = ? ORDER BY name_ar`
           ).all(actor.tenantId);
 
-      return rows.map((row) => ({
-        ...parseRowJson(row),
-        id: row.id,
-        tenantId: row.tenant_id,
-        type: row.party_type,
-        nameAr: row.name_ar,
-        phone: row.phone || '',
-        balance: unitsToNumber(parseScaledInt(row.balance_decimal, MONEY_SCALE, 'partyBalance'), MONEY_SCALE),
-      }));
+      return rows.map((row) => {
+        const parsed = parseRowJson(row);
+        return {
+          ...parsed,
+          id: row.id,
+          tenantId: row.tenant_id,
+          type: row.party_type,
+          nameAr: row.name_ar,
+          phone: row.phone || '',
+          balance: unitsToNumber(parseScaledInt(row.balance_decimal, MONEY_SCALE, 'partyBalance'), MONEY_SCALE),
+          advanceBalance: unitsToNumber(
+            parseScaledInt(row.advance_balance_decimal ?? parsed.advanceBalance ?? '0', MONEY_SCALE, 'partyAdvance'),
+            MONEY_SCALE
+          ),
+        };
+      });
     },
 
     getPartyById(actor, id) {
       assertPermission(actor, 'party:view', 'عرض بيانات العميل/المورد');
       if (!id) return undefined;
+      const hasAdvCol = database.prepare('PRAGMA table_info(parties)').all().some((c) => c.name === 'advance_balance_decimal');
+      const cols = hasAdvCol
+        ? 'tenant_id,id,party_type,name_ar,phone,balance_decimal,advance_balance_decimal,data_json'
+        : 'tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json';
       const row = database.prepare(
-        'SELECT tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json FROM parties WHERE tenant_id = ? AND id = ?'
+        `SELECT ${cols} FROM parties WHERE tenant_id = ? AND id = ?`
       ).get(actor.tenantId, String(id));
       if (!row) return undefined;
+      const parsed = parseRowJson(row);
       return {
-        ...parseRowJson(row),
+        ...parsed,
         id: row.id,
         tenantId: row.tenant_id,
         type: row.party_type,
         nameAr: row.name_ar,
         phone: row.phone || '',
         balance: unitsToNumber(parseScaledInt(row.balance_decimal, MONEY_SCALE, 'partyBalance'), MONEY_SCALE),
+        advanceBalance: unitsToNumber(
+          parseScaledInt(row.advance_balance_decimal ?? parsed.advanceBalance ?? '0', MONEY_SCALE, 'partyAdvance'),
+          MONEY_SCALE
+        ),
       };
     },
 
@@ -533,16 +553,27 @@ export function createInventoryPartiesService(database) {
 
       database.exec('BEGIN IMMEDIATE');
       try {
-        const existingRow = database.prepare(
-          'SELECT balance_decimal FROM parties WHERE tenant_id = ? AND id = ?'
-        ).get(actor.tenantId, id);
+        const hasAdvCol = database.prepare('PRAGMA table_info(parties)').all().some((c) => c.name === 'advance_balance_decimal');
+        const existingRow = hasAdvCol
+          ? database.prepare('SELECT balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?').get(actor.tenantId, id)
+          : database.prepare('SELECT balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?').get(actor.tenantId, id);
 
-        // Preserve audited balance on update; only allow initial balance on create.
+        // Preserve audited balance and advanceBalance on update; only allow initial values on create.
+        const existingParsed = existingRow ? parseRowJson(existingRow) : null;
         const balanceUnits = existingRow
           ? parseScaledInt(existingRow.balance_decimal, MONEY_SCALE, 'existingPartyBalance')
           : parseScaledInt(party.balance ?? 0, MONEY_SCALE, 'initialPartyBalance');
+        const advanceUnits = existingRow
+          ? parseScaledInt(existingRow.advance_balance_decimal ?? existingParsed?.advanceBalance ?? '0', MONEY_SCALE, 'existingPartyAdvance')
+          : parseScaledInt(party.advanceBalance ?? 0, MONEY_SCALE, 'initialPartyAdvance');
+        if (advanceUnits < 0n) {
+          throw new Error('الرصيد المقدم للطرف لا يجوز أن يكون سالباً.');
+        }
+
         const balanceNum = unitsToNumber(balanceUnits, MONEY_SCALE);
         const balanceDec = formatScaledInt(balanceUnits, MONEY_SCALE);
+        const advanceNum = unitsToNumber(advanceUnits, MONEY_SCALE);
+        const advanceDec = formatScaledInt(advanceUnits, MONEY_SCALE);
 
         persisted = {
           ...party,
@@ -552,25 +583,47 @@ export function createInventoryPartiesService(database) {
           nameAr,
           phone: String(party.phone || '').trim(),
           balance: balanceNum,
+          advanceBalance: advanceNum,
         };
 
-        database.prepare(
-          `INSERT INTO parties (tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json)
-           VALUES (?,?,?,?,?,?,?)
-           ON CONFLICT(tenant_id,id) DO UPDATE SET
-             party_type=excluded.party_type,
-             name_ar=excluded.name_ar,
-             phone=excluded.phone,
-             data_json=excluded.data_json`
-        ).run(
-          actor.tenantId,
-          persisted.id,
-          persisted.type,
-          persisted.nameAr,
-          persisted.phone,
-          balanceDec,
-          JSON.stringify(persisted)
-        );
+        if (hasAdvCol) {
+          database.prepare(
+            `INSERT INTO parties (tenant_id,id,party_type,name_ar,phone,balance_decimal,advance_balance_decimal,data_json)
+             VALUES (?,?,?,?,?,?,?,?)
+             ON CONFLICT(tenant_id,id) DO UPDATE SET
+               party_type=excluded.party_type,
+               name_ar=excluded.name_ar,
+               phone=excluded.phone,
+               data_json=excluded.data_json`
+          ).run(
+            actor.tenantId,
+            persisted.id,
+            persisted.type,
+            persisted.nameAr,
+            persisted.phone,
+            balanceDec,
+            advanceDec,
+            JSON.stringify(persisted)
+          );
+        } else {
+          database.prepare(
+            `INSERT INTO parties (tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json)
+             VALUES (?,?,?,?,?,?,?)
+             ON CONFLICT(tenant_id,id) DO UPDATE SET
+               party_type=excluded.party_type,
+               name_ar=excluded.name_ar,
+               phone=excluded.phone,
+               data_json=excluded.data_json`
+          ).run(
+            actor.tenantId,
+            persisted.id,
+            persisted.type,
+            persisted.nameAr,
+            persisted.phone,
+            balanceDec,
+            JSON.stringify(persisted)
+          );
+        }
 
         const actualUpdate = Boolean(existingRow) || isUpdate;
         enqueueOutboxTx(database, actor, {

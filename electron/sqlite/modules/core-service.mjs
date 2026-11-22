@@ -656,6 +656,9 @@ export function createCoreService(database) {
       const nowIso = new Date().toISOString();
       database.exec('BEGIN IMMEDIATE');
       try {
+        database.prepare('DELETE FROM payment_allocations WHERE tenant_id = ?').run(actor.tenantId);
+        database.prepare('DELETE FROM party_advance_transactions WHERE tenant_id = ?').run(actor.tenantId);
+        database.prepare('DELETE FROM allocation_audits WHERE tenant_id = ?').run(actor.tenantId);
         database.prepare('DELETE FROM invoice_stock_deductions WHERE tenant_id = ?').run(actor.tenantId);
         database.prepare('DELETE FROM invoice_items WHERE tenant_id = ?').run(actor.tenantId);
         database.prepare('DELETE FROM invoices WHERE tenant_id = ?').run(actor.tenantId);
@@ -684,11 +687,14 @@ export function createCoreService(database) {
         }
 
         const partyRows = database.prepare('SELECT id, data_json FROM parties WHERE tenant_id = ?').all(actor.tenantId);
-        const updParty = database.prepare('UPDATE parties SET balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?');
+        const updParty = database.prepare(
+          'UPDATE parties SET balance_decimal = ?, advance_balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?'
+        );
         for (const r of partyRows) {
           const obj = parseRowJson(r);
           obj.balance = 0;
-          updParty.run('0.00', JSON.stringify(obj), actor.tenantId, r.id);
+          obj.advanceBalance = 0;
+          updParty.run('0.00', '0.00', JSON.stringify(obj), actor.tenantId, r.id);
         }
 
         writeAuditLogTx(

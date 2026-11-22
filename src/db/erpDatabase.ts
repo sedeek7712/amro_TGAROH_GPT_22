@@ -23,7 +23,20 @@ import {
   SyncConflict,
   Branch,
   DocumentSequence,
+  PaymentAllocation,
+  PartyAdvanceTransaction,
+  AllocationAudit,
 } from '../types/erp';
+
+const CANONICAL_V6_ACCOUNTS: Account[] = [
+  { code: '1105', nameAr: 'سلف الموردين (دفعات مقدمة للموردين)', type: 'ASSET', parentCode: '11', isLeaf: true, balance: 0 },
+  { code: '2103', nameAr: 'دفعات مقدمة من العملاء', type: 'LIABILITY', parentCode: '21', isLeaf: true, balance: 0 },
+  { code: '42', nameAr: 'مردودات ومسموحات المبيعات', type: 'REVENUE', parentCode: '4', isLeaf: false, balance: 0 },
+  { code: '4201', nameAr: 'مردودات مبيعات الصيدلية', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'pharmacy' },
+  { code: '4202', nameAr: 'مردودات مبيعات المواد الغذائية والبقالة', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'grocery' },
+  { code: '4203', nameAr: 'مردودات مبيعات قطع غيار الدراجات', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
+  { code: '4204', nameAr: 'مردودات مبيعات قطع غيار المعدات', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
+];
 
 export class MultiActivityErpDatabase extends Dexie {
   activities!: Table<CommercialActivity, string>;
@@ -42,6 +55,9 @@ export class MultiActivityErpDatabase extends Dexie {
   syncConflicts!: Table<SyncConflict, string>;
   branches!: Table<Branch, string>;
   sequences!: Table<DocumentSequence, string>;
+  paymentAllocations!: Table<PaymentAllocation, string>;
+  partyAdvanceTransactions!: Table<PartyAdvanceTransaction, string>;
+  allocationAudits!: Table<AllocationAudit, string>;
 
   constructor() {
     super('MultiActivityErpDB');
@@ -130,6 +146,43 @@ export class MultiActivityErpDatabase extends Dexie {
               u.allowedBranches = [String(u.branchId || 'branch_main')];
             }
             if (!u.tenantId) u.tenantId = 'tenant_main';
+          });
+      });
+
+    // Schema v6: تخصيص الدفعات FIFO، الأرصدة المقدمة (2103 / 1105)، دورة حياة السندات، وسجل تدقيق التعديل اليدوي
+    this.version(6)
+      .stores({
+        vouchers: 'id, voucherNumber, type, date, cashBoxId, partyId, branchId, status',
+        paymentAllocations: 'id, tenantId, branchId, voucherId, advanceTransactionId, partyId, invoiceId, status, createdAt',
+        partyAdvanceTransactions: 'id, tenantId, branchId, partyId, type, voucherId, invoiceId, date, createdAt',
+        allocationAudits: 'id, tenantId, branchId, voucherId, partyId, userId, timestamp',
+      })
+      .upgrade(async (trans) => {
+        const accountsTable = trans.table('accounts');
+        const accountCount = await accountsTable.count();
+        if (accountCount > 0) {
+          for (const acc of CANONICAL_V6_ACCOUNTS) {
+            const exists = await accountsTable.get(acc.code);
+            if (!exists) {
+              await accountsTable.put({ ...acc });
+            }
+          }
+        }
+
+        await trans
+          .table('vouchers')
+          .toCollection()
+          .modify((v: Record<string, unknown>) => {
+            if (!v.status) v.status = 'POSTED';
+          });
+
+        await trans
+          .table('parties')
+          .toCollection()
+          .modify((p: Record<string, unknown>) => {
+            if (typeof p.advanceBalance !== 'number' || !Number.isFinite(p.advanceBalance)) {
+              p.advanceBalance = 0;
+            }
           });
       });
   }

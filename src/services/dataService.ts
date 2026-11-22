@@ -21,6 +21,10 @@ import {
   CostCenterId,
   OutboxQueueItem,
   Branch,
+  PaymentAllocation,
+  PartyAdvanceTransaction,
+  AllocationAudit,
+  VoucherManualAllocationInput,
 } from '../types/erp';
 
 export interface IDataService {
@@ -71,8 +75,9 @@ export interface IDataService {
     invoice: Invoice;
     totalCogs: number;
     stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    applyAdvanceAmount?: number;
     clientRequestId?: string;
-  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }>;
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }>;
 
   createPurchaseInvoiceAtomic(params: {
     invoice: Invoice;
@@ -142,7 +147,41 @@ export interface IDataService {
   createCashBoxAtomic(box: CashBox): Promise<CashBox>;
   createCashVoucherAtomic(params: {
     voucher: PaymentVoucher;
-  }): Promise<{ success: boolean; voucher: PaymentVoucher; journalEntry: JournalEntry }>;
+    manualAllocations?: VoucherManualAllocationInput[];
+    overrideReason?: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    journalEntry?: JournalEntry;
+    allocations?: PaymentAllocation[];
+    advanceTransaction?: PartyAdvanceTransaction;
+  }>;
+  postDraftCashVoucherAtomic(params: {
+    voucherId: string;
+    manualAllocations?: VoucherManualAllocationInput[];
+    overrideReason?: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    journalEntry: JournalEntry;
+    allocations: PaymentAllocation[];
+    advanceTransaction?: PartyAdvanceTransaction;
+  }>;
+  cancelCashVoucherAtomic(params: {
+    voucherId: string;
+    reason: string;
+  }): Promise<PaymentVoucher>;
+  reverseCashVoucherAtomic(params: {
+    voucherId: string;
+    reversalReason: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    reversalJournalEntry: JournalEntry;
+  }>;
+  getPaymentAllocations(partyId?: string, voucherId?: string): Promise<PaymentAllocation[]>;
+  getPartyAdvanceTransactions(partyId?: string): Promise<PartyAdvanceTransaction[]>;
+  getAllocationAudits(voucherId?: string): Promise<AllocationAudit[]>;
   createAmanatDepositAtomic(params: {
     record: AmanatRecord;
     cashBoxId?: string;

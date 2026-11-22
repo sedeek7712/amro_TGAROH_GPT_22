@@ -52,11 +52,13 @@ export const INITIAL_CHART_OF_ACCOUNTS = [
   { code: '11042', nameAr: 'مخزون المواد الغذائية والبقالة', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'grocery' },
   { code: '11043', nameAr: 'مخزون قطع غيار الدراجات النارية', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
   { code: '11044', nameAr: 'مخزون قطع غيار المعدات', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
+  { code: '1105', nameAr: 'سلف الموردين (دفعات مقدمة للموردين)', type: 'ASSET', parentCode: '11', isLeaf: true, balance: 0 },
   { code: '1106', nameAr: 'ضريبة القيمة المضافة - مدخلات', type: 'ASSET', parentCode: '11', isLeaf: true, balance: 0 },
   { code: '2', nameAr: 'الخصوم', type: 'LIABILITY', parentCode: null, isLeaf: false, balance: 0 },
   { code: '21', nameAr: 'الخصوم المتداولة', type: 'LIABILITY', parentCode: '2', isLeaf: false, balance: 0 },
   { code: '2101', nameAr: 'الموردون والدائنون', type: 'LIABILITY', parentCode: '21', isLeaf: true, balance: 0 },
   { code: '2102', nameAr: 'أمانات نقدية للغير (التزام معزول)', type: 'LIABILITY', parentCode: '21', isLeaf: true, balance: 0 },
+  { code: '2103', nameAr: 'دفعات مقدمة من العملاء', type: 'LIABILITY', parentCode: '21', isLeaf: true, balance: 0 },
   { code: '3', nameAr: 'حقوق الملكية', type: 'EQUITY', parentCode: null, isLeaf: false, balance: 0 },
   { code: '3101', nameAr: 'رأس المال المخصص', type: 'EQUITY', parentCode: '3', isLeaf: true, balance: 0 },
   { code: '3102', nameAr: 'الأرباح والخسائر المبقاة', type: 'EQUITY', parentCode: '3', isLeaf: true, balance: 0 },
@@ -65,6 +67,11 @@ export const INITIAL_CHART_OF_ACCOUNTS = [
   { code: '4102', nameAr: 'إيرادات مبيعات المواد الغذائية والبقالة', type: 'REVENUE', parentCode: '4', isLeaf: true, balance: 0, costCenterId: 'grocery' },
   { code: '4103', nameAr: 'إيرادات مبيعات قطع غيار الدراجات', type: 'REVENUE', parentCode: '4', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
   { code: '4104', nameAr: 'إيرادات مبيعات قطع غيار المعدات', type: 'REVENUE', parentCode: '4', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
+  { code: '42', nameAr: 'مردودات ومسموحات المبيعات', type: 'REVENUE', parentCode: '4', isLeaf: false, balance: 0 },
+  { code: '4201', nameAr: 'مردودات مبيعات الصيدلية', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'pharmacy' },
+  { code: '4202', nameAr: 'مردودات مبيعات المواد الغذائية والبقالة', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'grocery' },
+  { code: '4203', nameAr: 'مردودات مبيعات قطع غيار الدراجات', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
+  { code: '4204', nameAr: 'مردودات مبيعات قطع غيار المعدات', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
   { code: '5', nameAr: 'المصروفات', type: 'EXPENSE', parentCode: null, isLeaf: false, balance: 0 },
   { code: '51', nameAr: 'تكلفة المبيعات (بضاعة مباعة)', type: 'EXPENSE', parentCode: '5', isLeaf: false, balance: 0 },
   { code: '5101', nameAr: 'تكلفة مبيعات الصيدلية', type: 'EXPENSE', parentCode: '51', isLeaf: true, balance: 0, costCenterId: 'pharmacy' },
@@ -192,5 +199,28 @@ export function seedReferenceDataIfEmpty(database, tenantId = 'tenant_main', now
     database.prepare(
       'INSERT INTO app_settings (tenant_id,setting_key,value_json,updated_at) VALUES (?,?,?,?)'
     ).run(tenantId, 'company_profile', JSON.stringify(DEFAULT_COMPANY_PROFILE), nowIso);
+  }
+}
+
+export function ensureCanonicalAccounts(database, tenantId = 'tenant_main') {
+  const existing = database.prepare('SELECT code FROM accounts WHERE tenant_id = ?').all(tenantId);
+  if (existing.length === 0) return;
+  const existingCodes = new Set(existing.map((r) => r.code));
+  const stmt = database.prepare(
+    'INSERT OR IGNORE INTO accounts (tenant_id,code,account_type,parent_code,is_leaf,balance_decimal,data_json) VALUES (?,?,?,?,?,?,?)'
+  );
+  for (const acc of INITIAL_CHART_OF_ACCOUNTS) {
+    if (existingCodes.has(acc.code)) continue;
+    if (acc.parentCode && !existingCodes.has(acc.parentCode)) continue;
+    stmt.run(
+      tenantId,
+      acc.code,
+      acc.type,
+      acc.parentCode ?? null,
+      acc.isLeaf ? 1 : 0,
+      '0.00',
+      JSON.stringify({ ...acc, balance: 0, tenantId })
+    );
+    existingCodes.add(acc.code);
   }
 }

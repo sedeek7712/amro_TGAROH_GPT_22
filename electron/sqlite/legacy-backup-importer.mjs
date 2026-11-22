@@ -144,6 +144,18 @@ export function parseLegacyBackup(rawBackup) {
   }
   data.productBatches = buildBatchList(data);
 
+  for (const optKey of ['paymentAllocations', 'partyAdvanceTransactions', 'allocationAudits']) {
+    const rawList = backup.data[optKey];
+    if (rawList !== undefined) {
+      if (!Array.isArray(rawList) || !rawList.every(isObject)) {
+        throw new Error('توجد سجلات غير صالحة في القائمة: ' + optKey);
+      }
+      data[optKey] = rawList;
+    } else {
+      data[optKey] = [];
+    }
+  }
+
   const tenantIds = new Set([DEFAULT_TENANT_ID]);
   for (const list of Object.values(data)) {
     for (const row of list) tenantIds.add(tenantIdOf(row));
@@ -161,6 +173,7 @@ function countRows(database, table, tenantId) {
   const allowedTables = new Set([
     'branches', 'accounts', 'activities', 'products', 'product_batches',
     'parties', 'invoices', 'journal_entries', 'cash_boxes', 'vouchers',
+    'payment_allocations', 'party_advance_transactions', 'allocation_audits',
     'amanat_records', 'users', 'audit_logs', 'outbox_queue', 'sync_conflicts',
     'document_sequences',
   ]);
@@ -174,6 +187,7 @@ function assertEmptyDestination(database, tenantIds) {
     'accounts', 'activities', 'products', 'product_batches', 'parties',
     'invoices', 'invoice_items', 'invoice_stock_deductions',
     'journal_entries', 'journal_entry_lines', 'cash_boxes', 'vouchers',
+    'payment_allocations', 'party_advance_transactions', 'allocation_audits',
     'amanat_records', 'users', 'audit_logs', 'outbox_queue', 'sync_conflicts',
     'document_sequences',
   ];
@@ -216,6 +230,9 @@ export function sourceCounts(data) {
     journalEntryLines: data.journalEntries.reduce((n, row) => n + (Array.isArray(row.lines) ? row.lines.length : 0), 0),
     cashBoxes: data.cashBoxes.length,
     vouchers: data.vouchers.length,
+    paymentAllocations: (data.paymentAllocations || []).length,
+    partyAdvanceTransactions: (data.partyAdvanceTransactions || []).length,
+    allocationAudits: (data.allocationAudits || []).length,
     amanat: data.amanat.length,
     users: data.users.length,
     auditLogs: data.auditLogs.length,
@@ -341,10 +358,11 @@ export function insertRows(database, data, options = {}) {
 
   for (const row of data.parties) {
     if (!['CUSTOMER','SUPPLIER'].includes(row.type)) throw new Error('نوع طرف غير مدعوم.');
+    const normalizedParty = { ...row, advanceBalance: Number(row.advanceBalance ?? 0) };
     run(
-      'INSERT INTO parties (tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json) VALUES (?,?,?,?,?,?,?)',
+      'INSERT INTO parties (tenant_id,id,party_type,name_ar,phone,balance_decimal,advance_balance_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)',
       [tenantIdOf(row), requiredString(row.id,'party.id'), row.type, requiredString(row.nameAr,'party.nameAr'),
-       String(row.phone || ''), decimal(row.balance,'party.balance'), safeJson(row)]
+       String(row.phone || ''), decimal(row.balance,'party.balance'), decimal(row.advanceBalance ?? 0,'party.advanceBalance'), safeJson(normalizedParty)]
     );
   }
 
@@ -358,11 +376,12 @@ export function insertRows(database, data, options = {}) {
     const tenantId = tenantIdOf(row);
     const invoiceId = requiredString(row.id,'invoice.id');
     run(
-      'INSERT INTO invoices (tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      'INSERT INTO invoices (tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,due_date,payment_method,total_decimal,paid_amount_decimal,advance_applied_decimal,status,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [tenantId, invoiceId, row.branchId || null, requiredString(row.invoiceNumber,'invoice.invoiceNumber'),
        row.type, requiredString(row.activityId,'invoice.activityId'), row.partyId || null,
-       requiredString(row.date,'invoice.date'), row.paymentMethod, decimal(row.total,'invoice.total'),
-       decimal(row.paidAmount,'invoice.paidAmount'), row.status || (row.isPosted === false ? 'DRAFT' : 'POSTED'), safeJson(row)]
+       requiredString(row.date,'invoice.date'), row.dueDate || null, row.paymentMethod, decimal(row.total,'invoice.total'),
+       decimal(row.paidAmount,'invoice.paidAmount'), decimal(row.advanceAppliedAmount ?? 0,'invoice.advanceAppliedAmount'),
+       row.status || (row.isPosted === false ? 'DRAFT' : 'POSTED'), safeJson(row)]
     );
     for (const item of row.items || []) {
       run(
@@ -416,12 +435,46 @@ export function insertRows(database, data, options = {}) {
 
   for (const row of data.vouchers) {
     if (!['RECEIPT','PAYMENT'].includes(row.type)) throw new Error('نوع سند غير مدعوم.');
+    const normalizedVoucher = { ...row, status: row.status || 'POSTED' };
     run(
       'INSERT INTO vouchers (tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json) VALUES (?,?,?,?,?,?,?,?,?,?)',
       [tenantIdOf(row), requiredString(row.id,'voucher.id'), row.branchId || null,
        requiredString(row.voucherNumber,'voucher.voucherNumber'), row.type,
        requiredString(row.date,'voucher.date'), decimal(row.amount,'voucher.amount'),
-       requiredString(row.cashBoxId,'voucher.cashBoxId'), row.partyId || null, safeJson(row)]
+       requiredString(row.cashBoxId,'voucher.cashBoxId'), row.partyId || null, safeJson(normalizedVoucher)]
+    );
+  }
+
+  for (const row of data.paymentAllocations || []) {
+    run(
+      'INSERT INTO payment_allocations (tenant_id,id,branch_id,voucher_id,advance_transaction_id,party_id,invoice_id,allocated_decimal,allocation_method,status,created_at,created_by,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [tenantIdOf(row), requiredString(row.id,'paymentAllocation.id'), row.branchId || null,
+       row.voucherId || null, row.advanceTransactionId || null,
+       requiredString(row.partyId,'paymentAllocation.partyId'), requiredString(row.invoiceId,'paymentAllocation.invoiceId'),
+       decimal(row.allocatedAmount,'paymentAllocation.allocatedAmount'),
+       String(row.allocationMethod || 'FIFO'), String(row.status || 'ACTIVE'),
+       requiredString(row.createdAt,'paymentAllocation.createdAt'), row.createdBy || null, safeJson(row)]
+    );
+  }
+
+  for (const row of data.partyAdvanceTransactions || []) {
+    run(
+      'INSERT INTO party_advance_transactions (tenant_id,id,branch_id,party_id,party_type,tx_type,amount_decimal,balance_after_decimal,voucher_id,invoice_id,journal_entry_id,tx_date,created_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [tenantIdOf(row), requiredString(row.id,'partyAdvance.id'), row.branchId || null,
+       requiredString(row.partyId,'partyAdvance.partyId'), String(row.partyType || 'CUSTOMER'),
+       requiredString(row.type,'partyAdvance.type'), decimal(row.amount,'partyAdvance.amount'),
+       decimal(row.balanceAfter,'partyAdvance.balanceAfter'), row.voucherId || null, row.invoiceId || null,
+       row.journalEntryId || null, requiredString(row.date,'partyAdvance.date'),
+       requiredString(row.createdAt,'partyAdvance.createdAt'), safeJson(row)]
+    );
+  }
+
+  for (const row of data.allocationAudits || []) {
+    run(
+      'INSERT INTO allocation_audits (tenant_id,id,branch_id,voucher_id,party_id,user_id,audit_timestamp,data_json) VALUES (?,?,?,?,?,?,?,?)',
+      [tenantIdOf(row), requiredString(row.id,'allocationAudit.id'), row.branchId || null,
+       requiredString(row.voucherId,'allocationAudit.voucherId'), requiredString(row.partyId,'allocationAudit.partyId'),
+       requiredString(row.userId,'allocationAudit.userId'), requiredString(row.timestamp,'allocationAudit.timestamp'), safeJson(row)]
     );
   }
 
@@ -511,6 +564,9 @@ export function actualCounts(database, tenantIds) {
     journalEntries: 'journal_entries',
     cashBoxes: 'cash_boxes',
     vouchers: 'vouchers',
+    paymentAllocations: 'payment_allocations',
+    partyAdvanceTransactions: 'party_advance_transactions',
+    allocationAudits: 'allocation_audits',
     amanat: 'amanat_records',
     users: 'users',
     auditLogs: 'audit_logs',

@@ -15,6 +15,7 @@ import {
   CommercialActivityId,
   CompanyProfile,
   Account,
+  AccountType,
   Product,
   Party,
   Invoice,
@@ -23,6 +24,10 @@ import {
   StockDeductionRecorded,
   CashBox,
   PaymentVoucher,
+  PaymentAllocation,
+  PartyAdvanceTransaction,
+  AllocationAudit,
+  VoucherManualAllocationInput,
   AmanatRecord,
   SystemUser,
   SystemAuditLog,
@@ -40,6 +45,7 @@ import {
   assertPermission,
   filterAuditLogsForUser,
   filterRecordsByBranchScope,
+  hasPermission,
 } from '../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../config/currency';
 import {
@@ -52,6 +58,19 @@ import {
   validateSalesInvoiceInput,
   validateVoucherInput,
 } from './financialValidation';
+import {
+  SPECIAL_ACCOUNTS,
+  fromCents,
+  resolveVoucherAccountingPlan,
+  toCents,
+} from '../../electron/sqlite/payment-allocation-engine.mjs';
+
+function accountBalanceDeltaByType(type: AccountType, debit: number, credit: number): number {
+  if (type === 'LIABILITY' || type === 'EQUITY' || type === 'REVENUE') {
+    return roundMoney(credit - debit);
+  }
+  return roundMoney(debit - credit);
+}
 
 export type InitState = 'NOT_STARTED' | 'INITIALIZING' | 'READY' | 'FAILED';
 
@@ -458,6 +477,21 @@ export class DexieDataService implements IDataService {
   private async getValidAccountCodesSet(): Promise<Set<string>> {
     const accounts = await db.accounts.toArray();
     return new Set(accounts.map((a) => a.code));
+  }
+
+  private async getAccountsByCodeMap(): Promise<Map<string, Account>> {
+    const accounts = await db.accounts.toArray();
+    return new Map(accounts.map((a) => [a.code, a]));
+  }
+
+  private async ensureCanonicalAccountTx(code: string): Promise<Account | undefined> {
+    const existing = await db.accounts.get(code);
+    if (existing) return existing;
+    const template = INITIAL_CHART_OF_ACCOUNTS.find((a) => a.code === code);
+    if (!template) return undefined;
+    const created: Account = { ...template, balance: 0 };
+    await db.accounts.put(created);
+    return created;
   }
 
   /**
@@ -1006,14 +1040,24 @@ export class DexieDataService implements IDataService {
     }
 
     return await db.transaction('rw', [db.parties, db.outbox, db.auditLogs], async () => {
-      await db.parties.put(party);
+      const existing = await db.parties.get(party.id);
+      const persistedParty: Party = {
+        ...party,
+        nameAr: party.nameAr.trim(),
+        phone: String(party.phone || '').trim(),
+        balance: existing ? existing.balance : roundMoney(party.balance || 0),
+        advanceBalance: existing
+          ? roundMoney(existing.advanceBalance || 0)
+          : Math.max(0, roundMoney(party.advanceBalance || 0)),
+      };
+      await db.parties.put(persistedParty);
       await syncQueueService.enqueue({
         tenantId,
         branchId,
         entityType: 'PARTY',
-        entityId: party.id,
-        action: isUpdate ? 'UPDATE' : 'CREATE',
-        payload: party as unknown as Record<string, unknown>,
+        entityId: persistedParty.id,
+        action: existing || isUpdate ? 'UPDATE' : 'CREATE',
+        payload: persistedParty as unknown as Record<string, unknown>,
       });
       await db.auditLogs.put({
         id: storage.generateUUID(),
@@ -1022,10 +1066,10 @@ export class DexieDataService implements IDataService {
         userName: actor.fullName,
         tenantId,
         branchId,
-        action: `${isUpdate ? 'تعديل' : 'إضافة'} ${party.type === 'CUSTOMER' ? 'عميل' : 'مورد'}`,
-        details: `الطرف: ${party.nameAr}`,
+        action: `${existing || isUpdate ? 'تعديل' : 'إضافة'} ${persistedParty.type === 'CUSTOMER' ? 'عميل' : 'مورد'}`,
+        details: `الطرف: ${persistedParty.nameAr}`,
       });
-      return party;
+      return persistedParty;
     });
   }
 
@@ -1142,6 +1186,9 @@ export class DexieDataService implements IDataService {
       if (!account) {
         throw new FinancialValidationError(`الحساب المرتبط (${box.accountCode}) غير موجود في الدليل المحاسبي.`);
       }
+      if (account.isLeaf === false) {
+        throw new FinancialValidationError(`لا يجوز ربط الصندوق بالحساب التجميعي (${box.accountCode}).`);
+      }
       const cleanBox: CashBox = {
         ...box,
         branchId: box.branchId || branchId,
@@ -1187,18 +1234,510 @@ export class DexieDataService implements IDataService {
     });
   }
 
-  // --- السندات الذرية (FIN-02) ---
+  // --- السندات الذرية (FIN-02) ودورة السداد المعتمدة ---
   public async getVouchers(): Promise<PaymentVoucher[]> {
     await this.ensureReady();
     const { actor } = this.requireAuthorizedActor('vouchers:view');
     return filterRecordsByBranchScope(await db.vouchers.toCollection().reverse().sortBy('date'), actor);
   }
 
+  public async getPaymentAllocations(partyId?: string, voucherId?: string): Promise<PaymentAllocation[]> {
+    await this.ensureReady();
+    const { actor } = this.requireAuthorizedActor('vouchers:view');
+    let rows: PaymentAllocation[];
+    if (voucherId) {
+      rows = await db.paymentAllocations.where('voucherId').equals(voucherId).toArray();
+    } else if (partyId) {
+      rows = await db.paymentAllocations.where('partyId').equals(partyId).toArray();
+    } else {
+      rows = await db.paymentAllocations.toArray();
+    }
+    if (partyId && voucherId) {
+      rows = rows.filter((r) => r.partyId === partyId);
+    }
+    return filterRecordsByBranchScope(rows, actor).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  public async getPartyAdvanceTransactions(partyId?: string): Promise<PartyAdvanceTransaction[]> {
+    await this.ensureReady();
+    const { actor } = this.requireAuthorizedActor('party:view');
+    const rows = partyId
+      ? await db.partyAdvanceTransactions.where('partyId').equals(partyId).toArray()
+      : await db.partyAdvanceTransactions.toArray();
+    return filterRecordsByBranchScope(rows, actor).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+  }
+
+  public async getAllocationAudits(voucherId?: string): Promise<AllocationAudit[]> {
+    await this.ensureReady();
+    const { actor } = this.requireAuthorizedActor('audit:allocation:view');
+    const rows = voucherId
+      ? await db.allocationAudits.where('voucherId').equals(voucherId).toArray()
+      : await db.allocationAudits.toArray();
+    return filterRecordsByBranchScope(rows, actor).sort((a, b) => (a.timestamp < b.timestamp ? 1 : -1));
+  }
+
+  private async postVoucherCoreTx(params: {
+    voucher: PaymentVoucher;
+    actor: SystemUser;
+    tenantId: string;
+    branchId: string;
+    activeBranch: Branch;
+    terminalCode: string;
+    currencySymbol: string;
+    manualAllocations?: VoucherManualAllocationInput[];
+    overrideReason?: string;
+    isPromotingDraft?: boolean;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    journalEntry: JournalEntry;
+    allocations: PaymentAllocation[];
+    advanceTransaction?: PartyAdvanceTransaction;
+  }> {
+    const {
+      voucher,
+      actor,
+      tenantId,
+      branchId,
+      activeBranch,
+      terminalCode,
+      currencySymbol,
+      manualAllocations,
+      overrideReason,
+      isPromotingDraft = false,
+    } = params;
+
+    const nowIso = new Date().toISOString();
+    const cashBox = await db.cashBoxes.get(voucher.cashBoxId);
+    this.assertCashBoxBranchAccess(actor, cashBox, branchId);
+
+    const amount = roundMoney(voucher.amount);
+    if (!Number.isFinite(amount) || amount <= 0) {
+      throw new FinancialValidationError('مبلغ السند المالي يجب أن يكون رقماً موجباً أكبر من الصفر.');
+    }
+    if (!voucher.description || !voucher.description.trim()) {
+      throw new FinancialValidationError('وصف السند وسبب الحركة مطلوب محاسبياً.');
+    }
+
+    let party: Party | undefined;
+    if (voucher.partyId) {
+      party = await db.parties.get(voucher.partyId);
+      if (!party) {
+        throw new FinancialValidationError('العميل أو المورد المحدد غير موجود في قاعدة البيانات.');
+      }
+      if (voucher.voucherMode === 'CUSTOMER_RECEIPT' && (voucher.type !== 'RECEIPT' || party.type !== 'CUSTOMER')) {
+        throw new FinancialValidationError('وضع تحصيل العميل يقتصر على سند قبض مرتبط بسجل عميل.');
+      }
+      if (voucher.voucherMode === 'SUPPLIER_PAYMENT' && (voucher.type !== 'PAYMENT' || party.type !== 'SUPPLIER')) {
+        throw new FinancialValidationError('وضع سداد المورد يقتصر على سند صرف مرتبط بسجل مورد.');
+      }
+    } else if (voucher.voucherMode === 'CUSTOMER_RECEIPT' || voucher.voucherMode === 'SUPPLIER_PAYMENT') {
+      throw new FinancialValidationError('يجب اختيار سجل عميل أو مورد حقيقي لتنفيذ تسوية الذمم.');
+    }
+
+    const partyInvoices = party
+      ? filterRecordsByBranchScope(
+          await db.invoices.where('partyId').equals(party.id).toArray(),
+          actor
+        )
+      : [];
+
+    const requestedAcc = voucher.accountCode ? await db.accounts.get(voucher.accountCode) : undefined;
+    if (!party && !requestedAcc) {
+      throw new FinancialValidationError(
+        `الحساب المقابل (${voucher.accountCode || '-'}) غير موجود في الدليل المحاسبي.`
+      );
+    }
+
+    let plan;
+    try {
+      plan = resolveVoucherAccountingPlan({
+        voucherType: voucher.type,
+        voucherMode: voucher.voucherMode,
+        party,
+        requestedAccountCode: voucher.accountCode,
+        amount,
+        openInvoices: partyInvoices,
+        manualAllocations,
+        hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
+        overrideReason,
+        hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
+        targetAccountIsLeaf: requestedAcc ? requestedAcc.isLeaf !== false : false,
+      });
+    } catch (err) {
+      throw new FinancialValidationError(err instanceof Error ? err.message : 'تعذر اعتماد خطة السند المالي.');
+    }
+
+    if (voucher.type === 'PAYMENT' && roundMoney(cashBox!.balance) + 0.001 < amount) {
+      throw new FinancialValidationError(
+        `رصيد الصندوق (${cashBox!.nameAr}: ${roundMoney(cashBox!.balance)}) غير كافٍ لصرف مبلغ ${amount}.`
+      );
+    }
+
+    if (!voucher.voucherNumber || !voucher.voucherNumber.trim()) {
+      voucher.voucherNumber = await this.allocateSequenceNumberAtomic(
+        voucher.type === 'RECEIPT' ? 'RCT' : 'PAY',
+        activeBranch.code || 'BR01',
+        terminalCode,
+        tenantId
+      );
+    }
+
+    const voucherDate = voucher.date || nowIso.split('T')[0];
+    const cashBoxAccount = cashBox!.accountCode;
+    const cashBoxAccountRow = await db.accounts.get(cashBoxAccount);
+    if (!cashBoxAccountRow) {
+      throw new FinancialValidationError(`حساب الصندوق (${cashBoxAccount}) غير موجود في الدليل المحاسبي.`);
+    }
+
+    await this.ensureCanonicalAccountTx(SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES);
+    await this.ensureCanonicalAccountTx(SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES);
+
+    const lines: JournalEntryLine[] = [];
+    if (voucher.type === 'RECEIPT') {
+      lines.push({
+        id: storage.generateUUID(),
+        accountCode: cashBoxAccount,
+        accountName: cashBoxAccountRow.nameAr || cashBox!.nameAr,
+        debit: amount,
+        credit: 0,
+        costCenterId: voucher.costCenterId || 'general',
+        memo: `سند قبض ${voucher.voucherNumber} - ${voucher.description}`,
+      });
+      for (const cLine of plan.creditLines) {
+        const acc = await this.ensureCanonicalAccountTx(cLine.accountCode);
+        if (!acc) {
+          throw new FinancialValidationError(`الحساب المحاسبي (${cLine.accountCode}) غير معرف في الدليل المحاسبي.`);
+        }
+        lines.push({
+          id: storage.generateUUID(),
+          accountCode: cLine.accountCode,
+          accountName: acc.nameAr,
+          debit: 0,
+          credit: cLine.amount,
+          costCenterId: voucher.costCenterId || 'general',
+          memo:
+            cLine.accountCode === SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES
+              ? `دفعة مقدمة من العميل - سند ${voucher.voucherNumber}`
+              : voucher.description,
+        });
+      }
+    } else {
+      for (const dLine of plan.debitLines) {
+        const acc = await this.ensureCanonicalAccountTx(dLine.accountCode);
+        if (!acc) {
+          throw new FinancialValidationError(`الحساب المحاسبي (${dLine.accountCode}) غير معرف في الدليل المحاسبي.`);
+        }
+        lines.push({
+          id: storage.generateUUID(),
+          accountCode: dLine.accountCode,
+          accountName: acc.nameAr,
+          debit: dLine.amount,
+          credit: 0,
+          costCenterId: voucher.costCenterId || 'general',
+          memo:
+            dLine.accountCode === SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES
+              ? `دفعة مقدمة / سلفة مورد - سند ${voucher.voucherNumber}`
+              : voucher.description,
+        });
+      }
+      lines.push({
+        id: storage.generateUUID(),
+        accountCode: cashBoxAccount,
+        accountName: cashBoxAccountRow.nameAr || cashBox!.nameAr,
+        debit: 0,
+        credit: amount,
+        costCenterId: voucher.costCenterId || 'general',
+        memo: `سند صرف ${voucher.voucherNumber} - ${voucher.description}`,
+      });
+    }
+
+    const entryNumber = await this.allocateSequenceNumberAtomic(
+      'JV',
+      activeBranch.code || 'BR01',
+      terminalCode,
+      tenantId
+    );
+    const journalEntryId = storage.generateUUID();
+    const journalEntry: JournalEntry = {
+      id: journalEntryId,
+      entryNumber,
+      date: voucherDate,
+      description: `${voucher.type === 'RECEIPT' ? 'سند قبض' : 'سند صرف'} ${voucher.voucherNumber}: ${party?.nameAr || voucher.partyName || ''} - ${voucher.description}`,
+      costCenterId: voucher.costCenterId || 'general',
+      branchId,
+      lines,
+      status: 'POSTED',
+      referenceType: 'VOUCHER',
+      referenceId: voucher.id,
+      isAutoGenerated: true,
+    };
+
+    const accountsByCode = await this.getAccountsByCodeMap();
+    validateJournalEntryInput({ entry: journalEntry, accountsByCode });
+
+    // 1) تحديث الصندوق وأرصدة الحسابات حسب طبيعة الحساب
+    const cashDelta = voucher.type === 'RECEIPT' ? amount : -amount;
+    cashBox!.balance = roundMoney(cashBox!.balance + cashDelta);
+    await db.cashBoxes.put(cashBox!);
+
+    for (const line of journalEntry.lines) {
+      const acc = await db.accounts.get(line.accountCode);
+      if (acc) {
+        acc.balance = roundMoney(acc.balance + accountBalanceDeltaByType(acc.type, line.debit, line.credit));
+        await db.accounts.put(acc);
+      }
+    }
+
+    // 2) تحديث الفواتير وإنشاء سجلات التخصيص
+    const createdAllocations: PaymentAllocation[] = [];
+    for (const alloc of plan.allocations) {
+      const inv = await db.invoices.get(alloc.invoiceId);
+      if (!inv) {
+        throw new FinancialValidationError(`الفاتورة (${alloc.invoiceId}) غير موجودة أثناء التخصيص.`);
+      }
+      const nextPaid = fromCents(toCents(inv.paidAmount) + toCents(alloc.allocatedAmount));
+      if (toCents(nextPaid) > toCents(inv.total)) {
+        throw new FinancialValidationError(`تجاوز التخصيص إجمالي الفاتورة (${inv.invoiceNumber}).`);
+      }
+      inv.paidAmount = nextPaid;
+      await db.invoices.put(inv);
+
+      const allocRow: PaymentAllocation = {
+        id: storage.generateUUID(),
+        tenantId,
+        branchId,
+        voucherId: voucher.id,
+        partyId: party!.id,
+        invoiceId: inv.id,
+        invoiceNumber: inv.invoiceNumber,
+        invoiceDate: inv.date,
+        allocatedAmount: alloc.allocatedAmount,
+        allocationMethod: plan.manualOverride ? 'MANUAL' : 'FIFO',
+        status: 'ACTIVE',
+        createdAt: nowIso,
+        createdBy: actor.id,
+      };
+      createdAllocations.push(allocRow);
+      await db.paymentAllocations.put(allocRow);
+
+      await db.outbox.put({
+        id: storage.generateUUID(),
+        tenantId,
+        branchId,
+        entityType: 'PAYMENT_ALLOCATION',
+        entityId: allocRow.id,
+        action: 'CREATE',
+        payload: allocRow as unknown as Record<string, unknown>,
+        status: 'PENDING',
+        retryCount: 0,
+        priority: 4,
+        dependsOn: [voucher.id, inv.id],
+        createdAt: nowIso,
+        idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${allocRow.id}_CREATE`,
+      });
+    }
+
+    // 3) سجل تدقيق التعديل اليدوي إن وجد
+    if (plan.manualOverride && party) {
+      const auditRow: AllocationAudit = {
+        id: storage.generateUUID(),
+        tenantId,
+        branchId,
+        voucherId: voucher.id,
+        partyId: party.id,
+        userId: actor.id,
+        userName: actor.fullName,
+        reason: plan.overrideReason || '',
+        previousAllocations: plan.previousFifoAllocations.map((a) => ({
+          invoiceId: a.invoiceId,
+          invoiceNumber: a.invoiceNumber,
+          allocatedAmount: a.allocatedAmount,
+        })),
+        newAllocations: plan.allocations.map((a) => ({
+          invoiceId: a.invoiceId,
+          invoiceNumber: a.invoiceNumber,
+          allocatedAmount: a.allocatedAmount,
+        })),
+        timestamp: nowIso,
+      };
+      await db.allocationAudits.put(auditRow);
+      await db.outbox.put({
+        id: storage.generateUUID(),
+        tenantId,
+        branchId,
+        entityType: 'ALLOCATION_AUDIT',
+        entityId: auditRow.id,
+        action: 'CREATE',
+        payload: auditRow as unknown as Record<string, unknown>,
+        status: 'PENDING',
+        retryCount: 0,
+        priority: 4,
+        dependsOn: [voucher.id],
+        createdAt: nowIso,
+        idempotencyKey: `${tenantId}_ALLOCATION_AUDIT_${auditRow.id}_CREATE`,
+      });
+    }
+
+    // 4) حركة الرصيد المقدم (2103 / 1105) وتحديث رصيد الطرف
+    let createdAdvanceTx: PartyAdvanceTransaction | undefined;
+    if (party) {
+      const nextAdvanceBalance = roundMoney((party.advanceBalance || 0) + plan.partyAdvanceDelta);
+      if (nextAdvanceBalance < 0) {
+        throw new FinancialValidationError('لا يجوز أن يصبح الرصيد المقدم للطرف سالباً.');
+      }
+
+      if (plan.advanceDirection !== 'NONE' && plan.advanceAmount > 0) {
+        const txType: PartyAdvanceTransaction['type'] =
+          plan.advanceDirection === 'DEPOSIT_CUSTOMER'
+            ? 'OVERPAYMENT_DEPOSIT'
+            : plan.advanceDirection === 'DEPOSIT_SUPPLIER'
+            ? 'PREPAYMENT_DEPOSIT'
+            : 'REFUND';
+        const signedAmt =
+          plan.advanceDirection === 'REFUND_CUSTOMER' || plan.advanceDirection === 'REFUND_SUPPLIER'
+            ? -plan.advanceAmount
+            : plan.advanceAmount;
+
+        createdAdvanceTx = {
+          id: storage.generateUUID(),
+          tenantId,
+          branchId,
+          partyId: party.id,
+          partyType: party.type,
+          type: txType,
+          amount: signedAmt,
+          balanceAfter: nextAdvanceBalance,
+          voucherId: voucher.id,
+          journalEntryId,
+          date: voucherDate,
+          description: voucher.description,
+          createdBy: actor.id,
+          createdAt: nowIso,
+        };
+        await db.partyAdvanceTransactions.put(createdAdvanceTx);
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId,
+          entityType: 'PARTY_ADVANCE',
+          entityId: createdAdvanceTx.id,
+          action: 'CREATE',
+          payload: createdAdvanceTx as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 4,
+          dependsOn: [voucher.id],
+          createdAt: nowIso,
+          idempotencyKey: `${tenantId}_PARTY_ADVANCE_${createdAdvanceTx.id}_CREATE`,
+        });
+      }
+
+      party.balance = roundMoney(party.balance + plan.partyDebtDelta);
+      party.advanceBalance = nextAdvanceBalance;
+      await db.parties.put(party);
+    }
+
+    const persistedMode: PaymentVoucher['voucherMode'] =
+      plan.mode === 'GENERAL'
+        ? 'GENERAL'
+        : party?.type === 'CUSTOMER'
+        ? 'CUSTOMER_RECEIPT'
+        : 'SUPPLIER_PAYMENT';
+
+    const persistedVoucher: PaymentVoucher = {
+      ...voucher,
+      branchId,
+      amount,
+      date: voucherDate,
+      voucherMode: persistedMode,
+      partyType: party?.type,
+      partyName: party?.nameAr || voucher.partyName || '',
+      accountCode: plan.primaryContraAccountCode,
+      paymentMethod: voucher.paymentMethod || 'CASH',
+      journalEntryId,
+      status: 'POSTED',
+      appliedToDebtAmount: plan.appliedToDebtAmount,
+      advanceAmount: plan.advanceAmount,
+      allocations: createdAllocations,
+      manualOverride: plan.manualOverride,
+      overrideReason: plan.overrideReason,
+      createdBy: voucher.createdBy || actor.id,
+      createdByName: voucher.createdByName || actor.fullName,
+      createdAt: voucher.createdAt || nowIso,
+    };
+
+    await db.journalEntries.put(journalEntry);
+    await db.vouchers.put(persistedVoucher);
+
+    const deps: string[] = [cashBox!.id];
+    if (persistedVoucher.partyId) deps.push(persistedVoucher.partyId);
+
+    await db.outbox.put({
+      id: storage.generateUUID(),
+      tenantId,
+      branchId,
+      entityType: 'VOUCHER',
+      entityId: persistedVoucher.id,
+      action: isPromotingDraft ? 'UPDATE' : 'CREATE',
+      payload: persistedVoucher as unknown as Record<string, unknown>,
+      status: 'PENDING',
+      retryCount: 0,
+      priority: 3,
+      dependsOn: deps,
+      createdAt: nowIso,
+      idempotencyKey: `${tenantId}_VOUCHER_${persistedVoucher.id}_${isPromotingDraft ? 'POST' : 'CREATE'}`,
+    });
+
+    await db.outbox.put({
+      id: storage.generateUUID(),
+      tenantId,
+      branchId,
+      entityType: 'JOURNAL_ENTRY',
+      entityId: journalEntry.id,
+      action: 'CREATE',
+      payload: journalEntry as unknown as Record<string, unknown>,
+      status: 'PENDING',
+      retryCount: 0,
+      priority: 4,
+      dependsOn: [persistedVoucher.id],
+      createdAt: nowIso,
+      idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
+    });
+
+    await db.auditLogs.put({
+      id: storage.generateUUID(),
+      timestamp: nowIso,
+      userId: actor.id,
+      userName: actor.fullName,
+      tenantId,
+      branchId,
+      action: `سند ${persistedVoucher.type === 'RECEIPT' ? 'قبض' : 'صرف'} مرحل`,
+      details: `سند ${persistedVoucher.voucherNumber} بمبلغ ${amount} ${currencySymbol} وقيد ${journalEntry.entryNumber}${plan.advanceAmount > 0 ? ` (رصيد مقدم: ${plan.advanceAmount})` : ''}`,
+    });
+
+    return {
+      success: true,
+      voucher: persistedVoucher,
+      journalEntry,
+      allocations: createdAllocations,
+      advanceTransaction: createdAdvanceTx,
+    };
+  }
+
   public async createCashVoucherAtomic(params: {
     voucher: PaymentVoucher;
-  }): Promise<{ success: boolean; voucher: PaymentVoucher; journalEntry: JournalEntry }> {
+    manualAllocations?: VoucherManualAllocationInput[];
+    overrideReason?: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    journalEntry?: JournalEntry;
+    allocations?: PaymentAllocation[];
+    advanceTransaction?: PartyAdvanceTransaction;
+  }> {
     await this.ensureReady();
-    const { voucher } = params;
+    const { voucher, manualAllocations, overrideReason } = params;
     const perm: Permission = voucher.type === 'RECEIPT' ? 'voucher:receipt' : 'voucher:payment';
     const { actor, tenantId, branchId } = this.requireAuthorizedActor(perm, voucher.branchId);
 
@@ -1208,195 +1747,549 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.vouchers, db.journalEntries, db.cashBoxes, db.accounts, db.parties, db.outbox, db.auditLogs, db.sequences],
+      [
+        db.vouchers,
+        db.journalEntries,
+        db.cashBoxes,
+        db.accounts,
+        db.parties,
+        db.invoices,
+        db.paymentAllocations,
+        db.partyAdvanceTransactions,
+        db.allocationAudits,
+        db.outbox,
+        db.auditLogs,
+        db.sequences,
+      ],
       async () => {
         if (!voucher.id) voucher.id = storage.generateUUID();
 
         // منع التكرار Idempotency
         const existingVoucher = await db.vouchers.get(voucher.id);
-        if (existingVoucher && existingVoucher.journalEntryId) {
-          const existingJe = await db.journalEntries.get(existingVoucher.journalEntryId);
-          if (existingJe) {
-            return { success: true, voucher: existingVoucher, journalEntry: existingJe };
+        if (existingVoucher) {
+          const existingAllocs = await db.paymentAllocations.where('voucherId').equals(existingVoucher.id).toArray();
+          const existingAdv = await db.partyAdvanceTransactions.where('voucherId').equals(existingVoucher.id).first();
+          if (existingVoucher.journalEntryId) {
+            const existingJe = await db.journalEntries.get(existingVoucher.journalEntryId);
+            if (existingJe) {
+              return {
+                success: true,
+                voucher: existingVoucher,
+                journalEntry: existingJe,
+                allocations: existingAllocs,
+                advanceTransaction: existingAdv,
+              };
+            }
+          }
+          if (existingVoucher.status === 'DRAFT' && voucher.status === 'DRAFT') {
+            return { success: true, voucher: existingVoucher, allocations: [] };
           }
         }
 
-        const cashBox = await db.cashBoxes.get(voucher.cashBoxId);
-        this.assertCashBoxBranchAccess(actor, cashBox, branchId);
-        const targetAccount = await db.accounts.get(voucher.accountCode);
+        if (voucher.status === 'DRAFT') {
+          const cashBox = await db.cashBoxes.get(voucher.cashBoxId);
+          this.assertCashBoxBranchAccess(actor, cashBox, branchId);
+          const party = voucher.partyId ? await db.parties.get(voucher.partyId) : undefined;
+          if (voucher.partyId && !party) {
+            throw new FinancialValidationError('العميل أو المورد المحدد غير موجود.');
+          }
+          const targetAccount = voucher.accountCode ? await db.accounts.get(voucher.accountCode) : undefined;
+          const previewPlan = resolveVoucherAccountingPlan({
+            voucherType: voucher.type,
+            voucherMode: voucher.voucherMode,
+            party,
+            requestedAccountCode: voucher.accountCode,
+            amount: voucher.amount,
+            openInvoices: [],
+            hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
+            hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
+            targetAccountIsLeaf: targetAccount ? targetAccount.isLeaf !== false : false,
+          });
+          validateVoucherInput({
+            voucher: { ...voucher, accountCode: previewPlan.primaryContraAccountCode, status: 'DRAFT' },
+            cashBox,
+            accountExists: Boolean(party || targetAccount),
+            account: party ? undefined : targetAccount,
+          });
 
-        validateVoucherInput({
+          if (!voucher.voucherNumber || !voucher.voucherNumber.trim()) {
+            voucher.voucherNumber = await this.allocateSequenceNumberAtomic(
+              voucher.type === 'RECEIPT' ? 'RCT' : 'PAY',
+              activeBranch.code || 'BR01',
+              terminalCode,
+              tenantId
+            );
+          }
+          const nowIso = new Date().toISOString();
+          const draftVoucher: PaymentVoucher = {
+            ...voucher,
+            branchId,
+            amount: roundMoney(voucher.amount),
+            date: voucher.date || nowIso.split('T')[0],
+            status: 'DRAFT',
+            accountCode: previewPlan.primaryContraAccountCode,
+            partyType: party?.type,
+            partyName: party?.nameAr || voucher.partyName || '',
+            paymentMethod: voucher.paymentMethod || 'CASH',
+            createdBy: actor.id,
+            createdByName: actor.fullName,
+            createdAt: nowIso,
+          };
+          await db.vouchers.put(draftVoucher);
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            entityType: 'VOUCHER',
+            entityId: draftVoucher.id,
+            action: 'CREATE',
+            payload: draftVoucher as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 3,
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_VOUCHER_${draftVoucher.id}_DRAFT`,
+          });
+          await db.auditLogs.put({
+            id: storage.generateUUID(),
+            timestamp: nowIso,
+            userId: actor.id,
+            userName: actor.fullName,
+            tenantId,
+            branchId,
+            action: `إنشاء مسودة سند ${draftVoucher.type === 'RECEIPT' ? 'قبض' : 'صرف'}`,
+            details: `مسودة ${draftVoucher.voucherNumber} بمبلغ ${draftVoucher.amount} ${currencySymbol}`,
+          });
+          return { success: true, voucher: draftVoucher, allocations: [] };
+        }
+
+        return await this.postVoucherCoreTx({
           voucher,
-          cashBox,
-          accountExists: Boolean(targetAccount),
+          actor,
+          tenantId,
+          branchId,
+          activeBranch,
+          terminalCode,
+          currencySymbol,
+          manualAllocations,
+          overrideReason,
+          isPromotingDraft: false,
         });
+      }
+    );
+  }
 
-        // تعيين رقم سند فريد ذرياً إذا لم يُحدد أو عند التعارض
-        if (!voucher.voucherNumber || !voucher.voucherNumber.trim()) {
-          voucher.voucherNumber = await this.allocateSequenceNumberAtomic(
-            voucher.type === 'RECEIPT' ? 'RCT' : 'PAY',
-            activeBranch.code || 'BR01',
-            terminalCode,
-            tenantId
+  public async postDraftCashVoucherAtomic(params: {
+    voucherId: string;
+    manualAllocations?: VoucherManualAllocationInput[];
+    overrideReason?: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    journalEntry: JournalEntry;
+    allocations: PaymentAllocation[];
+    advanceTransaction?: PartyAdvanceTransaction;
+  }> {
+    await this.ensureReady();
+    const { voucherId, manualAllocations, overrideReason } = params;
+    const pre = await db.vouchers.get(voucherId);
+    if (!pre) {
+      throw new FinancialValidationError('السند المطلوب ترحيله غير موجود.');
+    }
+    const perm: Permission = pre.type === 'RECEIPT' ? 'voucher:receipt' : 'voucher:payment';
+    const { actor, tenantId } = this.requireAuthorizedActor(perm, pre.branchId);
+    const voucherBranchId = pre.branchId?.trim() || storage.getActiveBranchId();
+    assertBranchAccess(actor, voucherBranchId, { requireTarget: true });
+    const activeBranch = (await db.branches.get(voucherBranchId)) || (await this.getActiveBranch());
+    const terminalCode = storage.getTerminalCode();
+    const currencySymbol = getActiveCurrencyConfig().symbol;
+
+    return await db.transaction(
+      'rw',
+      [
+        db.vouchers,
+        db.journalEntries,
+        db.cashBoxes,
+        db.accounts,
+        db.parties,
+        db.invoices,
+        db.paymentAllocations,
+        db.partyAdvanceTransactions,
+        db.allocationAudits,
+        db.outbox,
+        db.auditLogs,
+        db.sequences,
+      ],
+      async () => {
+        const draft = await db.vouchers.get(voucherId);
+        if (!draft) throw new FinancialValidationError('السند غير موجود.');
+        if (draft.status !== 'DRAFT') {
+          throw new FinancialValidationError('يمكن ترحيل السندات التي في حالة المسودة فقط.');
+        }
+        return await this.postVoucherCoreTx({
+          voucher: { ...draft, status: 'POSTED' },
+          actor,
+          tenantId,
+          branchId: voucherBranchId,
+          activeBranch,
+          terminalCode,
+          currencySymbol,
+          manualAllocations,
+          overrideReason,
+          isPromotingDraft: true,
+        });
+      }
+    );
+  }
+
+  public async cancelCashVoucherAtomic(params: {
+    voucherId: string;
+    reason: string;
+  }): Promise<PaymentVoucher> {
+    await this.ensureReady();
+    const reason = String(params.reason || '').trim();
+    if (!reason) {
+      throw new FinancialValidationError('سبب إلغاء مسودة السند مطلوب.');
+    }
+    const pre = await db.vouchers.get(params.voucherId);
+    if (!pre) {
+      throw new FinancialValidationError('السند غير موجود.');
+    }
+    const { actor, tenantId } = this.requireAuthorizedActor('voucher:cancel', pre.branchId);
+
+    return await db.transaction('rw', [db.vouchers, db.outbox, db.auditLogs], async () => {
+      const voucher = await db.vouchers.get(params.voucherId);
+      if (!voucher) throw new FinancialValidationError('السند غير موجود.');
+      const targetBranch = voucher.branchId?.trim() || actor.branchId || storage.getActiveBranchId();
+      assertBranchAccess(actor, targetBranch, { requireTarget: true });
+      if ((voucher.status || 'POSTED') !== 'DRAFT') {
+        throw new FinancialValidationError(
+          'لا يجوز إلغاء أو حذف سند مالي مرحّل نهائياً؛ استخدم إجراء العكس المحاسبي الموثق.'
+        );
+      }
+
+      const nowIso = new Date().toISOString();
+      const cancelled: PaymentVoucher = {
+        ...voucher,
+        status: 'CANCELLED',
+        cancelledReason: reason,
+      };
+      await db.vouchers.put(cancelled);
+      await db.outbox.put({
+        id: storage.generateUUID(),
+        tenantId,
+        branchId: targetBranch,
+        entityType: 'VOUCHER',
+        entityId: cancelled.id,
+        action: 'UPDATE',
+        payload: cancelled as unknown as Record<string, unknown>,
+        status: 'PENDING',
+        retryCount: 0,
+        priority: 3,
+        createdAt: nowIso,
+        idempotencyKey: `${tenantId}_VOUCHER_${cancelled.id}_CANCEL`,
+      });
+      await db.auditLogs.put({
+        id: storage.generateUUID(),
+        timestamp: nowIso,
+        userId: actor.id,
+        userName: actor.fullName,
+        tenantId,
+        branchId: targetBranch,
+        action: 'إلغاء مسودة سند',
+        details: `إلغاء مسودة ${cancelled.voucherNumber} - السبب: ${reason}`,
+      });
+      return cancelled;
+    });
+  }
+
+  public async reverseCashVoucherAtomic(params: {
+    voucherId: string;
+    reversalReason: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    reversalJournalEntry: JournalEntry;
+  }> {
+    await this.ensureReady();
+    const reason = String(params.reversalReason || '').trim();
+    if (!reason) {
+      throw new FinancialValidationError('سبب عكس السند المالي مطلوب لتوثيق سجل التدقيق.');
+    }
+    const pre = await db.vouchers.get(params.voucherId);
+    if (!pre) {
+      throw new FinancialValidationError('السند المطلوب عكسه غير موجود.');
+    }
+    const { actor, tenantId } = this.requireAuthorizedActor('voucher:reverse', pre.branchId);
+    const terminalCode = storage.getTerminalCode();
+
+    return await db.transaction(
+      'rw',
+      [
+        db.vouchers,
+        db.journalEntries,
+        db.cashBoxes,
+        db.accounts,
+        db.parties,
+        db.invoices,
+        db.paymentAllocations,
+        db.partyAdvanceTransactions,
+        db.outbox,
+        db.auditLogs,
+        db.sequences,
+        db.branches,
+      ],
+      async () => {
+        const voucher = await db.vouchers.get(params.voucherId);
+        if (!voucher) throw new FinancialValidationError('السند غير موجود.');
+        const voucherBranchId = voucher.branchId?.trim() || '';
+        assertBranchAccess(actor, voucherBranchId, { requireTarget: true });
+        if (!voucherBranchId) {
+          throw new FinancialValidationError('السند غير مربوط بفرع؛ لا يمكن عكسه بأمان.');
+        }
+        const status = voucher.status || 'POSTED';
+        if (status !== 'POSTED') {
+          throw new FinancialValidationError('يمكن عكس السندات المرحّلة (POSTED) فقط.');
+        }
+        if (!voucher.journalEntryId) {
+          throw new FinancialValidationError('السند لا يرتبط بقيد محاسبي مرحّل.');
+        }
+
+        const originalJe = await db.journalEntries.get(voucher.journalEntryId);
+        if (!originalJe || originalJe.status === 'REVERSED') {
+          throw new FinancialValidationError('تم عكس القيد المرتبط بهذا السند مسبقاً أو أنه غير موجود.');
+        }
+
+        const cashBox = await db.cashBoxes.get(voucher.cashBoxId);
+        this.assertCashBoxBranchAccess(actor, cashBox, voucherBranchId);
+        const amount = roundMoney(voucher.amount);
+        if (voucher.type === 'RECEIPT' && roundMoney(cashBox!.balance) + 0.001 < amount) {
+          throw new FinancialValidationError(
+            `رصيد الصندوق (${cashBox!.nameAr}) غير كافٍ لعكس سند القبض بمبلغ ${amount}.`
           );
         }
 
-        const amount = roundMoney(voucher.amount);
-        const cashBoxAccount = cashBox!.accountCode;
-        const cashBoxAccountRow = await db.accounts.get(cashBoxAccount);
-        const voucherDate = voucher.date || new Date().toISOString().split('T')[0];
-
-        const lines: JournalEntryLine[] =
-          voucher.type === 'RECEIPT'
-            ? [
-                {
-                  id: storage.generateUUID(),
-                  accountCode: cashBoxAccount,
-                  accountName: cashBoxAccountRow?.nameAr || cashBox!.nameAr,
-                  debit: amount,
-                  credit: 0,
-                  costCenterId: voucher.costCenterId,
-                  memo: `سند قبض ${voucher.voucherNumber} - ${voucher.description}`,
-                },
-                {
-                  id: storage.generateUUID(),
-                  accountCode: voucher.accountCode,
-                  accountName: targetAccount!.nameAr,
-                  debit: 0,
-                  credit: amount,
-                  costCenterId: voucher.costCenterId,
-                  memo: voucher.description,
-                },
-              ]
-            : [
-                {
-                  id: storage.generateUUID(),
-                  accountCode: voucher.accountCode,
-                  accountName: targetAccount!.nameAr,
-                  debit: amount,
-                  credit: 0,
-                  costCenterId: voucher.costCenterId,
-                  memo: voucher.description,
-                },
-                {
-                  id: storage.generateUUID(),
-                  accountCode: cashBoxAccount,
-                  accountName: cashBoxAccountRow?.nameAr || cashBox!.nameAr,
-                  debit: 0,
-                  credit: amount,
-                  costCenterId: voucher.costCenterId,
-                  memo: `سند صرف ${voucher.voucherNumber} - ${voucher.description}`,
-                },
-              ];
-
-        const entryNumber = await this.allocateSequenceNumberAtomic(
-          'JV',
-          activeBranch.code || 'BR01',
+        const origBranch = (await db.branches.get(voucherBranchId)) || (await this.getActiveBranch());
+        const reversalNumber = await this.allocateSequenceNumberAtomic(
+          'REV',
+          origBranch.code || 'BR01',
           terminalCode,
           tenantId
         );
-        const journalEntryId = storage.generateUUID();
+        const nowIso = new Date().toISOString();
+        const reversalDate = nowIso.split('T')[0];
+        const reversalId = storage.generateUUID();
 
-        const journalEntry: JournalEntry = {
-          id: journalEntryId,
-          entryNumber,
-          date: voucherDate,
-          description: `${voucher.type === 'RECEIPT' ? 'سند قبض' : 'سند صرف'} ${voucher.voucherNumber}: ${voucher.partyName || ''} - ${voucher.description}`,
-          costCenterId: voucher.costCenterId,
-          branchId,
-          lines,
+        const reversedLines: JournalEntryLine[] = originalJe.lines.map((l) => ({
+          id: storage.generateUUID(),
+          accountCode: l.accountCode,
+          accountName: l.accountName,
+          debit: roundMoney(l.credit),
+          credit: roundMoney(l.debit),
+          costCenterId: l.costCenterId,
+          memo: `عكس سند ${voucher.voucherNumber}: ${reason}`,
+        }));
+
+        const reversalEntry: JournalEntry = {
+          id: reversalId,
+          entryNumber: reversalNumber,
+          date: reversalDate,
+          description: `قيد عكسي للسند ${voucher.voucherNumber} (${originalJe.entryNumber}) - السبب: ${reason}`,
+          costCenterId: originalJe.costCenterId,
+          branchId: voucherBranchId,
+          lines: reversedLines,
           status: 'POSTED',
-          referenceType: 'VOUCHER',
+          referenceType: 'VOUCHER_REVERSAL',
           referenceId: voucher.id,
           isAutoGenerated: true,
+          reversedEntryId: originalJe.id,
+          reversalReason: reason,
         };
 
-        const validCodes = await this.getValidAccountCodesSet();
-        validateJournalEntryInput({ entry: journalEntry, validAccountCodes: validCodes });
+        const accountsByCode = await this.getAccountsByCodeMap();
+        validateJournalEntryInput({ entry: reversalEntry, accountsByCode });
 
-        // تحديث الصندوق والحسابات والذمة
-        const cashDelta = voucher.type === 'RECEIPT' ? amount : -amount;
+        // 1) تحديث الصندوق وأرصدة الحسابات
+        const cashDelta = voucher.type === 'RECEIPT' ? -amount : amount;
         cashBox!.balance = roundMoney(cashBox!.balance + cashDelta);
         await db.cashBoxes.put(cashBox!);
 
-        if (cashBoxAccountRow) {
-          cashBoxAccountRow.balance = roundMoney(cashBoxAccountRow.balance + cashDelta);
-          await db.accounts.put(cashBoxAccountRow);
+        for (const line of reversalEntry.lines) {
+          const acc = await db.accounts.get(line.accountCode);
+          if (acc) {
+            acc.balance = roundMoney(acc.balance + accountBalanceDeltaByType(acc.type, line.debit, line.credit));
+            await db.accounts.put(acc);
+          }
         }
 
-        targetAccount!.balance = roundMoney(
-          targetAccount!.balance + (voucher.type === 'RECEIPT' ? -amount : amount)
+        // 2) عكس تخصيصات الفواتير النشطة
+        const activeAllocs = (await db.paymentAllocations.where('voucherId').equals(voucher.id).toArray()).filter(
+          (a) => a.status === 'ACTIVE'
         );
-        await db.accounts.put(targetAccount!);
+        for (const alloc of activeAllocs) {
+          const inv = await db.invoices.get(alloc.invoiceId);
+          if (inv) {
+            inv.paidAmount = fromCents(Math.max(0, toCents(inv.paidAmount) - toCents(alloc.allocatedAmount)));
+            await db.invoices.put(inv);
+          }
+          alloc.status = 'REVERSED';
+          await db.paymentAllocations.put(alloc);
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: voucherBranchId,
+            entityType: 'PAYMENT_ALLOCATION',
+            entityId: alloc.id,
+            action: 'UPDATE',
+            payload: alloc as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${alloc.id}_REVERSED`,
+          });
+        }
 
+        // 3) عكس حركات الأرصدة المقدمة ورصيد الطرف
+        const advTxs = (await db.partyAdvanceTransactions.where('voucherId').equals(voucher.id).toArray()).filter(
+          (t) => t.type !== 'REVERSAL'
+        );
         if (voucher.partyId) {
           const party = await db.parties.get(voucher.partyId);
           if (party) {
-            party.balance = roundMoney(
-              party.balance + (voucher.type === 'RECEIPT' ? -amount : amount)
-            );
+            const netOrigAdv = roundMoney(advTxs.reduce((s, t) => s + Number(t.amount || 0), 0));
+            const currentAdv = roundMoney(party.advanceBalance || 0);
+            const nextAdv = roundMoney(currentAdv - netOrigAdv);
+            if (nextAdv < -0.001) {
+              throw new FinancialValidationError(
+                'لا يمكن عكس هذا السند لأن الرصيد المقدم الناتج عنه قد استُخدم بالفعل في فواتير أو رد نقدي لاحق.'
+              );
+            }
+            const cleanNextAdv = Math.max(0, nextAdv);
+            if (Math.abs(netOrigAdv) > 0.001) {
+              const revAdvTx: PartyAdvanceTransaction = {
+                id: storage.generateUUID(),
+                tenantId,
+                branchId: voucherBranchId,
+                partyId: party.id,
+                partyType: party.type,
+                type: 'REVERSAL',
+                amount: roundMoney(-netOrigAdv),
+                balanceAfter: cleanNextAdv,
+                voucherId: voucher.id,
+                journalEntryId: reversalEntry.id,
+                date: reversalDate,
+                description: `عكس رصيد مقدم لسند ${voucher.voucherNumber}: ${reason}`,
+                createdBy: actor.id,
+                createdAt: nowIso,
+              };
+              await db.partyAdvanceTransactions.put(revAdvTx);
+              await db.outbox.put({
+                id: storage.generateUUID(),
+                tenantId,
+                branchId: voucherBranchId,
+                entityType: 'PARTY_ADVANCE',
+                entityId: revAdvTx.id,
+                action: 'CREATE',
+                payload: revAdvTx as unknown as Record<string, unknown>,
+                status: 'PENDING',
+                retryCount: 0,
+                priority: 4,
+                createdAt: nowIso,
+                idempotencyKey: `${tenantId}_PARTY_ADVANCE_${revAdvTx.id}_CREATE`,
+              });
+            }
+
+            let debtRestoreDelta = 0;
+            if (voucher.appliedToDebtAmount !== undefined) {
+              debtRestoreDelta =
+                party.type === 'CUSTOMER' && voucher.type === 'RECEIPT'
+                  ? voucher.appliedToDebtAmount
+                  : party.type === 'SUPPLIER' && voucher.type === 'PAYMENT'
+                  ? -voucher.appliedToDebtAmount
+                  : 0;
+            } else if (activeAllocs.length === 0 && advTxs.length === 0) {
+              debtRestoreDelta = voucher.type === 'RECEIPT' ? amount : -amount;
+            }
+
+            party.balance = roundMoney(party.balance + debtRestoreDelta);
+            party.advanceBalance = cleanNextAdv;
             await db.parties.put(party);
           }
         }
 
-        const persistedVoucher: PaymentVoucher = {
+        originalJe.status = 'REVERSED';
+        originalJe.reversalReason = reason;
+        originalJe.reversedEntryId = reversalEntry.id;
+        await db.journalEntries.put(originalJe);
+        await db.journalEntries.put(reversalEntry);
+
+        const reversedVoucher: PaymentVoucher = {
           ...voucher,
-          branchId,
-          amount,
-          date: voucherDate,
-          journalEntryId,
+          status: 'REVERSED',
+          reversedByJournalId: reversalEntry.id,
+          reversalReason: reason,
         };
-
-        await db.journalEntries.put(journalEntry);
-        await db.vouchers.put(persistedVoucher);
-
-        const deps: string[] = [cashBox!.id];
-        if (persistedVoucher.partyId) deps.push(persistedVoucher.partyId);
+        await db.vouchers.put(reversedVoucher);
 
         await db.outbox.put({
           id: storage.generateUUID(),
           tenantId,
-          branchId,
+          branchId: voucherBranchId,
           entityType: 'VOUCHER',
-          entityId: persistedVoucher.id,
-          action: 'CREATE',
-          payload: persistedVoucher as unknown as Record<string, unknown>,
+          entityId: reversedVoucher.id,
+          action: 'UPDATE',
+          payload: reversedVoucher as unknown as Record<string, unknown>,
           status: 'PENDING',
           retryCount: 0,
           priority: 3,
-          dependsOn: deps,
-          createdAt: new Date().toISOString(),
-          idempotencyKey: `${tenantId}_VOUCHER_${persistedVoucher.id}_CREATE`,
+          createdAt: nowIso,
+          idempotencyKey: `${tenantId}_VOUCHER_${reversedVoucher.id}_REVERSED`,
         });
-
         await db.outbox.put({
           id: storage.generateUUID(),
           tenantId,
-          branchId,
+          branchId: voucherBranchId,
           entityType: 'JOURNAL_ENTRY',
-          entityId: journalEntry.id,
+          entityId: reversalEntry.id,
           action: 'CREATE',
-          payload: journalEntry as unknown as Record<string, unknown>,
+          payload: reversalEntry as unknown as Record<string, unknown>,
           status: 'PENDING',
           retryCount: 0,
           priority: 4,
-          dependsOn: [persistedVoucher.id],
-          createdAt: new Date().toISOString(),
-          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
+          createdAt: nowIso,
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${reversalEntry.id}_CREATE`,
         });
-
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId: voucherBranchId,
+          entityType: 'JOURNAL_ENTRY',
+          entityId: originalJe.id,
+          action: 'UPDATE',
+          payload: originalJe as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 4,
+          createdAt: nowIso,
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${originalJe.id}_REVERSED`,
+        });
         await db.auditLogs.put({
           id: storage.generateUUID(),
-          timestamp: new Date().toISOString(),
+          timestamp: nowIso,
           userId: actor.id,
           userName: actor.fullName,
           tenantId,
-          branchId,
-          action: `سند ${persistedVoucher.type === 'RECEIPT' ? 'قبض' : 'صرف'} ذري`,
-          details: `سند ${persistedVoucher.voucherNumber} بمبلغ ${amount} ${currencySymbol} وقيد ${journalEntry.entryNumber}`,
+          branchId: voucherBranchId,
+          action: 'عكس سند مالي',
+          details: `عكس السند ${reversedVoucher.voucherNumber} بقيد ${reversalEntry.entryNumber} - السبب: ${reason}`,
         });
 
-        return { success: true, voucher: persistedVoucher, journalEntry };
+        return {
+          success: true,
+          voucher: reversedVoucher,
+          reversalJournalEntry: reversalEntry,
+        };
       }
     );
   }
@@ -1960,6 +2853,9 @@ export class DexieDataService implements IDataService {
       journalEntries: await db.journalEntries.toArray(),
       cashBoxes: await db.cashBoxes.toArray(),
       vouchers: await db.vouchers.toArray(),
+      paymentAllocations: await db.paymentAllocations.toArray(),
+      partyAdvanceTransactions: await db.partyAdvanceTransactions.toArray(),
+      allocationAudits: await db.allocationAudits.toArray(),
       amanat: await db.amanatRecords.toArray(),
       users: await db.users.toArray(),
       auditLogs: await db.auditLogs.toArray(),
@@ -2039,6 +2935,9 @@ export class DexieDataService implements IDataService {
           db.journalEntries,
           db.cashBoxes,
           db.vouchers,
+          db.paymentAllocations,
+          db.partyAdvanceTransactions,
+          db.allocationAudits,
           db.amanatRecords,
           db.users,
           db.auditLogs,
@@ -2069,7 +2968,11 @@ export class DexieDataService implements IDataService {
           }
           if (Array.isArray(d.parties)) {
             await db.parties.clear();
-            if (d.parties.length > 0) await db.parties.bulkPut(d.parties);
+            if (d.parties.length > 0) {
+              await db.parties.bulkPut(
+                d.parties.map((p: Party) => ({ ...p, advanceBalance: p.advanceBalance ?? 0 }))
+              );
+            }
           }
           if (Array.isArray(d.invoices)) {
             await db.invoices.clear();
@@ -2085,7 +2988,23 @@ export class DexieDataService implements IDataService {
           }
           if (Array.isArray(d.vouchers)) {
             await db.vouchers.clear();
-            if (d.vouchers.length > 0) await db.vouchers.bulkPut(d.vouchers);
+            if (d.vouchers.length > 0) {
+              await db.vouchers.bulkPut(
+                d.vouchers.map((v: PaymentVoucher) => ({ ...v, status: v.status || 'POSTED' }))
+              );
+            }
+          }
+          await db.paymentAllocations.clear();
+          if (Array.isArray(d.paymentAllocations) && d.paymentAllocations.length > 0) {
+            await db.paymentAllocations.bulkPut(d.paymentAllocations);
+          }
+          await db.partyAdvanceTransactions.clear();
+          if (Array.isArray(d.partyAdvanceTransactions) && d.partyAdvanceTransactions.length > 0) {
+            await db.partyAdvanceTransactions.bulkPut(d.partyAdvanceTransactions);
+          }
+          await db.allocationAudits.clear();
+          if (Array.isArray(d.allocationAudits) && d.allocationAudits.length > 0) {
+            await db.allocationAudits.bulkPut(d.allocationAudits);
           }
           if (Array.isArray(d.amanat)) {
             await db.amanatRecords.clear();
@@ -2130,14 +3049,49 @@ export class DexieDataService implements IDataService {
 
     await db.transaction(
       'rw',
-      [db.invoices, db.journalEntries, db.vouchers, db.amanatRecords, db.outbox, db.auditLogs, db.sequences],
+      [
+        db.invoices,
+        db.journalEntries,
+        db.vouchers,
+        db.paymentAllocations,
+        db.partyAdvanceTransactions,
+        db.allocationAudits,
+        db.amanatRecords,
+        db.accounts,
+        db.cashBoxes,
+        db.parties,
+        db.outbox,
+        db.auditLogs,
+        db.sequences,
+      ],
       async () => {
         await db.invoices.clear();
         await db.journalEntries.clear();
         await db.vouchers.clear();
+        await db.paymentAllocations.clear();
+        await db.partyAdvanceTransactions.clear();
+        await db.allocationAudits.clear();
         await db.amanatRecords.clear();
         await db.outbox.clear();
         await db.sequences.clear();
+        const accounts = await db.accounts.toArray();
+        for (const acc of accounts) {
+          if (acc.balance !== 0) {
+            await db.accounts.put({ ...acc, balance: 0 });
+          }
+        }
+        const boxes = await db.cashBoxes.toArray();
+        for (const box of boxes) {
+          if (box.balance !== 0) {
+            await db.cashBoxes.put({ ...box, balance: 0 });
+          }
+        }
+        const parties = await db.parties.toArray();
+        for (const p of parties) {
+          if (p.balance !== 0 || (p.advanceBalance || 0) !== 0) {
+            await db.parties.put({ ...p, balance: 0, advanceBalance: 0 });
+          }
+        }
         await db.auditLogs.put({
           id: storage.generateUUID(),
           timestamp: new Date().toISOString(),
@@ -2146,7 +3100,7 @@ export class DexieDataService implements IDataService {
           tenantId,
           branchId,
           action: 'تصفير الدفاتر التشغيلية',
-          details: 'تم بدء سنة مالية / دفتر نظيف مع الاحتفاظ بالحسابات والأصناف والمستخدمين.',
+          details: 'تم بدء سنة مالية / دفتر نظيف مع الاحتفاظ بالحسابات والأصناف والمستخدمين وتصفير الأرصدة.',
         });
       }
     );
@@ -2161,11 +3115,16 @@ export class DexieDataService implements IDataService {
     invoice: Invoice;
     totalCogs: number;
     stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    applyAdvanceAmount?: number;
     clientRequestId?: string;
-  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }> {
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }> {
     await this.ensureReady();
     const { invoice, totalCogs, stockDeductions, clientRequestId } = params;
+    const applyAdvance = roundMoney(params.applyAdvanceAmount ?? 0);
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('pos:sale', invoice.branchId);
+    if (applyAdvance > 0) {
+      assertPermission(actor, 'party:advance:use');
+    }
     const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
     const terminalCode = storage.getTerminalCode();
     const currencySymbol = getActiveCurrencyConfig().symbol;
@@ -2179,6 +3138,8 @@ export class DexieDataService implements IDataService {
         db.cashBoxes,
         db.accounts,
         db.parties,
+        db.paymentAllocations,
+        db.partyAdvanceTransactions,
         db.outbox,
         db.auditLogs,
         db.sequences,
@@ -2218,7 +3179,26 @@ export class DexieDataService implements IDataService {
           totalCogs,
           stockDeductions,
           cashBox: targetCashBox,
+          applyAdvanceAmount: applyAdvance,
         });
+
+        let customer: Party | undefined;
+        if (invoice.partyId) {
+          customer = await db.parties.get(invoice.partyId);
+          if (!customer) {
+            throw new FinancialValidationError('العميل المحدد غير موجود في قاعدة البيانات.');
+          }
+        }
+        if (applyAdvance > 0) {
+          if (!customer || customer.type !== 'CUSTOMER') {
+            throw new FinancialValidationError('تسوية الرصيد المقدم متاحة للعملاء المسجلين فقط.');
+          }
+          if (toCents(customer.advanceBalance ?? 0) < toCents(applyAdvance)) {
+            throw new FinancialValidationError(
+              `الرصيد المقدم المتاح للعميل (${roundMoney(customer.advanceBalance || 0)}) غير كافٍ لخصم ${applyAdvance}.`
+            );
+          }
+        }
 
         // ب. التحقق من المخزون وتطبيق خصم التشغيلات وFEFO مع احتساب التكلفة من المصدر الفعلي
         const todayStr = new Date().toISOString().split('T')[0];
@@ -2373,50 +3353,47 @@ export class DexieDataService implements IDataService {
         const cogsCode = activityCogsAccounts[invoice.activityId] || '5101';
 
         const normalizedTotal = roundMoney(invoice.total);
-        const normalizedPaid = roundMoney(invoice.paidAmount);
-        if (normalizedPaid > 0 && targetCashBox) {
+        const cashPaid = roundMoney(invoice.paidAmount);
+        if (cashPaid > 0 && targetCashBox) {
           const boxAccount = targetCashBox.accountCode;
           const acc = await db.accounts.get(boxAccount);
           journalLines.push({
             id: storage.generateUUID(),
             accountCode: boxAccount,
             accountName: acc?.nameAr || targetCashBox.nameAr,
-            debit: normalizedPaid,
+            debit: cashPaid,
             credit: 0,
             costCenterId: invoice.activityId,
             memo: `تحصيل نقدي فاتورة مبيعات ${invoice.invoiceNumber}`,
           });
 
-          targetCashBox.balance = roundMoney(targetCashBox.balance + normalizedPaid);
+          targetCashBox.balance = roundMoney(targetCashBox.balance + cashPaid);
           await db.cashBoxes.put(targetCashBox);
           if (acc) {
-            acc.balance = roundMoney(acc.balance + normalizedPaid);
+            acc.balance = roundMoney(acc.balance + cashPaid);
             await db.accounts.put(acc);
           }
         }
 
-        const unpaid = roundMoney(normalizedTotal - normalizedPaid);
-        if (unpaid > 0) {
+        const grossCredit = roundMoney(normalizedTotal - cashPaid);
+        if (grossCredit > 0) {
           const arAcc = await db.accounts.get('1103');
           journalLines.push({
             id: storage.generateUUID(),
             accountCode: '1103',
             accountName: `${arAcc?.nameAr || 'العملاء والمدينون'} - ${invoice.partyName}`,
-            debit: unpaid,
+            debit: grossCredit,
             credit: 0,
             costCenterId: invoice.activityId,
-            memo: `مبيعات آجلة فاتورة ${invoice.invoiceNumber}`,
+            memo: `ذمة فاتورة مبيعات ${invoice.invoiceNumber}`,
           });
 
-          if (invoice.partyId) {
-            const customer = await db.parties.get(invoice.partyId);
-            if (customer) {
-              customer.balance = roundMoney(customer.balance + unpaid);
-              await db.parties.put(customer);
-            }
+          if (customer) {
+            customer.balance = roundMoney(customer.balance + grossCredit);
+            await db.parties.put(customer);
           }
           if (arAcc) {
-            arAcc.balance = roundMoney(arAcc.balance + unpaid);
+            arAcc.balance = roundMoney(arAcc.balance + grossCredit);
             await db.accounts.put(arAcc);
           }
         }
@@ -2490,12 +3467,160 @@ export class DexieDataService implements IDataService {
           isAutoGenerated: true,
         };
 
-        const validCodes = await this.getValidAccountCodesSet();
-        validateJournalEntryInput({ entry: journalEntry, validAccountCodes: validCodes });
+        const accountsByCode = await this.getAccountsByCodeMap();
+        validateJournalEntryInput({ entry: journalEntry, accountsByCode });
+
+        // هـ. تسوية الرصيد المقدم المستقلة إن وُجدت (Dr 2103 / Cr 1103)
+        let advanceJournalEntry: JournalEntry | undefined;
+        const nowIso = new Date().toISOString();
+        if (applyAdvance > 0 && customer) {
+          const advAcc = await this.ensureCanonicalAccountTx(SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES);
+          const arAcc = await db.accounts.get(SPECIAL_ACCOUNTS.CUSTOMERS_AR);
+          if (!advAcc || !arAcc) {
+            throw new FinancialValidationError('حساب دفعات العملاء المقدمة (2103) أو العملاء (1103) غير معرف.');
+          }
+
+          const advEntryNumber = await this.allocateSequenceNumberAtomic(
+            'JV',
+            activeBranch.code || 'BR01',
+            terminalCode,
+            tenantId
+          );
+          const advEntryId = storage.generateUUID();
+          advanceJournalEntry = {
+            id: advEntryId,
+            entryNumber: advEntryNumber,
+            date: invoice.date,
+            description: `تسوية رصيد مقدم للعميل ${customer.nameAr} على فاتورة ${invoice.invoiceNumber}`,
+            costCenterId: invoice.activityId,
+            branchId,
+            lines: [
+              {
+                id: storage.generateUUID(),
+                accountCode: SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES,
+                accountName: advAcc.nameAr,
+                debit: applyAdvance,
+                credit: 0,
+                costCenterId: invoice.activityId,
+                memo: `استخدام رصيد مقدم لفاتورة ${invoice.invoiceNumber}`,
+              },
+              {
+                id: storage.generateUUID(),
+                accountCode: SPECIAL_ACCOUNTS.CUSTOMERS_AR,
+                accountName: arAcc.nameAr,
+                debit: 0,
+                credit: applyAdvance,
+                costCenterId: invoice.activityId,
+                memo: `تخفيض ذمة العميل ${customer.nameAr} لفاتورة ${invoice.invoiceNumber}`,
+              },
+            ],
+            status: 'POSTED',
+            referenceType: 'ADVANCE_SETTLEMENT',
+            referenceId: invoice.id,
+            isAutoGenerated: true,
+          };
+
+          const advAccountsMap = await this.getAccountsByCodeMap();
+          validateJournalEntryInput({ entry: advanceJournalEntry, accountsByCode: advAccountsMap });
+
+          advAcc.balance = roundMoney(advAcc.balance + accountBalanceDeltaByType(advAcc.type, applyAdvance, 0));
+          await db.accounts.put(advAcc);
+          arAcc.balance = roundMoney(arAcc.balance + accountBalanceDeltaByType(arAcc.type, 0, applyAdvance));
+          await db.accounts.put(arAcc);
+
+          const nextAdvBal = roundMoney((customer.advanceBalance || 0) - applyAdvance);
+          customer.advanceBalance = nextAdvBal;
+          customer.balance = roundMoney(customer.balance - applyAdvance);
+          await db.parties.put(customer);
+
+          const advTx: PartyAdvanceTransaction = {
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            partyId: customer.id,
+            partyType: 'CUSTOMER',
+            type: 'APPLY_TO_INVOICE',
+            amount: -applyAdvance,
+            balanceAfter: nextAdvBal,
+            invoiceId: invoice.id,
+            journalEntryId: advanceJournalEntry.id,
+            date: invoice.date,
+            description: `تسوية رصيد مقدم على الفاتورة ${invoice.invoiceNumber}`,
+            createdBy: actor.id,
+            createdAt: nowIso,
+          };
+          await db.partyAdvanceTransactions.put(advTx);
+
+          const advAlloc: PaymentAllocation = {
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            advanceTransactionId: advTx.id,
+            partyId: customer.id,
+            invoiceId: invoice.id,
+            invoiceNumber: invoice.invoiceNumber,
+            invoiceDate: invoice.date,
+            allocatedAmount: applyAdvance,
+            allocationMethod: 'ADVANCE_SETTLEMENT',
+            status: 'ACTIVE',
+            createdAt: nowIso,
+            createdBy: actor.id,
+          };
+          await db.paymentAllocations.put(advAlloc);
+          await db.journalEntries.put(advanceJournalEntry);
+
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            entityType: 'PARTY_ADVANCE',
+            entityId: advTx.id,
+            action: 'CREATE',
+            payload: advTx as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [invoice.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_PARTY_ADVANCE_${advTx.id}_CREATE`,
+          });
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            entityType: 'PAYMENT_ALLOCATION',
+            entityId: advAlloc.id,
+            action: 'CREATE',
+            payload: advAlloc as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [invoice.id, advTx.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_PAYMENT_ALLOCATION_${advAlloc.id}_CREATE`,
+          });
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId,
+            entityType: 'JOURNAL_ENTRY',
+            entityId: advanceJournalEntry.id,
+            action: 'CREATE',
+            payload: advanceJournalEntry as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [invoice.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${advanceJournalEntry.id}_CREATE`,
+          });
+        }
 
         invoice.branchId = branchId;
         invoice.journalEntryId = journalEntryId;
         invoice.isPosted = true;
+        invoice.advanceAppliedAmount = applyAdvance;
+        invoice.paidAmount = roundMoney(cashPaid + applyAdvance);
 
         await db.journalEntries.put(journalEntry);
         await db.invoices.put(invoice);
@@ -2526,7 +3651,7 @@ export class DexieDataService implements IDataService {
           retryCount: 0,
           priority: 3,
           dependsOn: invoiceDependencies.length > 0 ? invoiceDependencies : undefined,
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
           idempotencyKey: idemInvoiceKey,
         });
 
@@ -2542,22 +3667,22 @@ export class DexieDataService implements IDataService {
           retryCount: 0,
           priority: 4,
           dependsOn: [invoice.id],
-          createdAt: new Date().toISOString(),
+          createdAt: nowIso,
           idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${journalEntry.id}_CREATE`,
         });
 
         await db.auditLogs.put({
           id: storage.generateUUID(),
-          timestamp: new Date().toISOString(),
+          timestamp: nowIso,
           userId: actor.id,
           userName: actor.fullName,
           tenantId,
           branchId,
           action: 'إصدار فاتورة مبيعات ذرية',
-          details: `فاتورة ${invoice.invoiceNumber} بقيمة ${invoice.total} ${currencySymbol} وقيد ${journalEntry.entryNumber}`,
+          details: `فاتورة ${invoice.invoiceNumber} بقيمة ${invoice.total} ${currencySymbol} وقيد ${journalEntry.entryNumber}${applyAdvance > 0 ? ` (تسوية رصيد مقدم: ${applyAdvance})` : ''}`,
         });
 
-        return { success: true, invoice, journalEntry };
+        return { success: true, invoice, journalEntry, advanceJournalEntry };
       }
     );
   }
@@ -2915,8 +4040,8 @@ export class DexieDataService implements IDataService {
       'rw',
       [db.journalEntries, db.accounts, db.outbox, db.auditLogs, db.sequences],
       async () => {
-        const validCodes = await this.getValidAccountCodesSet();
-        validateJournalEntryInput({ entry, validAccountCodes: validCodes });
+        const accountsByCode = await this.getAccountsByCodeMap();
+        validateJournalEntryInput({ entry, accountsByCode });
 
         if (!entry.id) entry.id = storage.generateUUID();
         if (!entry.entryNumber || !entry.entryNumber.trim()) {
@@ -2937,7 +4062,7 @@ export class DexieDataService implements IDataService {
         for (const line of persistedEntry.lines) {
           const acc = await db.accounts.get(line.accountCode);
           if (acc) {
-            const delta = roundMoney((Number(line.debit) || 0) - (Number(line.credit) || 0));
+            const delta = accountBalanceDeltaByType(acc.type, Number(line.debit) || 0, Number(line.credit) || 0);
             acc.balance = roundMoney(acc.balance + delta);
             await db.accounts.put(acc);
           }
@@ -3049,14 +4174,15 @@ export class DexieDataService implements IDataService {
           reversalReason: reversalReason.trim(),
         };
 
-        const validCodes = await this.getValidAccountCodesSet();
-        validateJournalEntryInput({ entry: reversalEntry, validAccountCodes: validCodes });
+        const accountsByCode = await this.getAccountsByCodeMap();
+        validateJournalEntryInput({ entry: reversalEntry, accountsByCode });
 
         for (const line of reversedLines) {
           const acc = await db.accounts.get(line.accountCode);
-          const delta = roundMoney((Number(line.debit) || 0) - (Number(line.credit) || 0));
+          const cashFlowDelta = roundMoney((Number(line.debit) || 0) - (Number(line.credit) || 0));
           if (acc) {
-            acc.balance = roundMoney(acc.balance + delta);
+            const glDelta = accountBalanceDeltaByType(acc.type, Number(line.debit) || 0, Number(line.credit) || 0);
+            acc.balance = roundMoney(acc.balance + glDelta);
             await db.accounts.put(acc);
           }
 
@@ -3070,7 +4196,7 @@ export class DexieDataService implements IDataService {
             }
             const linkedBox = branchBoxes[0];
             if (linkedBox.isCentral) assertPermission(actor, 'cashbox:central_access');
-            const nextCashBalance = roundMoney(linkedBox.balance + delta);
+            const nextCashBalance = roundMoney(linkedBox.balance + cashFlowDelta);
             if (nextCashBalance < 0) {
               throw new FinancialValidationError(
                 `سيؤدي عكس القيد إلى جعل رصيد الصندوق (${linkedBox.nameAr}) سالباً؛ أُلغيت العملية بالكامل.`

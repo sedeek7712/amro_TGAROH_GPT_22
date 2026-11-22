@@ -67,6 +67,9 @@ function getDefaultPriority(entityType) {
     case 'AMANAT':
       return 3;
     case 'JOURNAL_ENTRY':
+    case 'PAYMENT_ALLOCATION':
+    case 'PARTY_ADVANCE':
+    case 'ALLOCATION_AUDIT':
       return 4;
     default:
       return 3;
@@ -362,7 +365,7 @@ export function createBackupSyncService(database, backupDirectory) {
       }));
 
       const parties = database.prepare(
-        'SELECT id, party_type, name_ar, phone, balance_decimal, data_json FROM parties WHERE tenant_id = ? ORDER BY name_ar'
+        'SELECT id, party_type, name_ar, phone, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? ORDER BY name_ar'
       ).all(tenantId).map((row) => ({
         ...parseRowJson(row),
         id: row.id,
@@ -371,25 +374,39 @@ export function createBackupSyncService(database, backupDirectory) {
         nameAr: row.name_ar,
         phone: row.phone || '',
         balance: unitsToNumber(parseScaledInt(row.balance_decimal, MONEY_SCALE, 'partyBalance'), MONEY_SCALE),
+        advanceBalance: unitsToNumber(
+          parseScaledInt(row.advance_balance_decimal ?? '0', MONEY_SCALE, 'partyAdvance'),
+          MONEY_SCALE
+        ),
       }));
 
       const invoices = database.prepare(
-        'SELECT id, branch_id, invoice_number, invoice_type, activity_id, party_id, invoice_date, payment_method, total_decimal, paid_amount_decimal, status, data_json FROM invoices WHERE tenant_id = ? ORDER BY invoice_date, id'
-      ).all(tenantId).map((row) => ({
-        ...parseRowJson(row),
-        id: row.id,
-        tenantId,
-        branchId: row.branch_id || undefined,
-        invoiceNumber: row.invoice_number,
-        type: row.invoice_type,
-        activityId: row.activity_id,
-        partyId: row.party_id || undefined,
-        date: row.invoice_date,
-        paymentMethod: row.payment_method,
-        total: unitsToNumber(parseScaledInt(row.total_decimal, MONEY_SCALE, 'invoiceTotal'), MONEY_SCALE),
-        paidAmount: unitsToNumber(parseScaledInt(row.paid_amount_decimal, MONEY_SCALE, 'invoicePaid'), MONEY_SCALE),
-        status: row.status,
-      }));
+        'SELECT id, branch_id, invoice_number, invoice_type, activity_id, party_id, invoice_date, due_date, payment_method, total_decimal, paid_amount_decimal, advance_applied_decimal, status, data_json FROM invoices WHERE tenant_id = ? ORDER BY invoice_date, id'
+      ).all(tenantId).map((row) => {
+        const parsed = parseRowJson(row);
+        const dueDate = row.due_date || parsed.dueDate || undefined;
+        const advanceAppliedAmount = unitsToNumber(
+          parseScaledInt(row.advance_applied_decimal ?? '0', MONEY_SCALE, 'invoiceAdvApplied'),
+          MONEY_SCALE
+        );
+        return {
+          ...parsed,
+          id: row.id,
+          tenantId,
+          branchId: row.branch_id || undefined,
+          invoiceNumber: row.invoice_number,
+          type: row.invoice_type,
+          activityId: row.activity_id,
+          partyId: row.party_id || undefined,
+          date: row.invoice_date,
+          ...(dueDate ? { dueDate } : {}),
+          paymentMethod: row.payment_method,
+          total: unitsToNumber(parseScaledInt(row.total_decimal, MONEY_SCALE, 'invoiceTotal'), MONEY_SCALE),
+          paidAmount: unitsToNumber(parseScaledInt(row.paid_amount_decimal, MONEY_SCALE, 'invoicePaid'), MONEY_SCALE),
+          advanceAppliedAmount,
+          status: row.status,
+        };
+      });
 
       const journalEntries = database.prepare(
         'SELECT id, branch_id, entry_number, entry_date, cost_center_id, status, reference_type, reference_id, data_json FROM journal_entries WHERE tenant_id = ? ORDER BY entry_date, id'
@@ -420,17 +437,71 @@ export function createBackupSyncService(database, backupDirectory) {
 
       const vouchers = database.prepare(
         'SELECT id, branch_id, voucher_number, voucher_type, voucher_date, amount_decimal, cash_box_id, party_id, data_json FROM vouchers WHERE tenant_id = ? ORDER BY voucher_date, id'
+      ).all(tenantId).map((row) => {
+        const parsed = parseRowJson(row);
+        return {
+          ...parsed,
+          id: row.id,
+          tenantId,
+          branchId: row.branch_id || undefined,
+          voucherNumber: row.voucher_number,
+          type: row.voucher_type,
+          date: row.voucher_date,
+          amount: unitsToNumber(parseScaledInt(row.amount_decimal, MONEY_SCALE, 'voucherAmount'), MONEY_SCALE),
+          cashBoxId: row.cash_box_id,
+          partyId: row.party_id || undefined,
+          status: parsed.status || 'POSTED',
+        };
+      });
+
+      const paymentAllocations = database.prepare(
+        'SELECT tenant_id, id, branch_id, voucher_id, advance_transaction_id, party_id, invoice_id, allocated_decimal, allocation_method, status, created_at, created_by, data_json FROM payment_allocations WHERE tenant_id = ? ORDER BY created_at, id'
       ).all(tenantId).map((row) => ({
         ...parseRowJson(row),
         id: row.id,
         tenantId,
         branchId: row.branch_id || undefined,
-        voucherNumber: row.voucher_number,
-        type: row.voucher_type,
-        date: row.voucher_date,
-        amount: unitsToNumber(parseScaledInt(row.amount_decimal, MONEY_SCALE, 'voucherAmount'), MONEY_SCALE),
-        cashBoxId: row.cash_box_id,
-        partyId: row.party_id || undefined,
+        voucherId: row.voucher_id || undefined,
+        advanceTransactionId: row.advance_transaction_id || undefined,
+        partyId: row.party_id,
+        invoiceId: row.invoice_id,
+        allocatedAmount: unitsToNumber(parseScaledInt(row.allocated_decimal, MONEY_SCALE, 'allocAmount'), MONEY_SCALE),
+        allocationMethod: row.allocation_method,
+        status: row.status,
+        createdAt: row.created_at,
+        createdBy: row.created_by || undefined,
+      }));
+
+      const partyAdvanceTransactions = database.prepare(
+        'SELECT tenant_id, id, branch_id, party_id, party_type, tx_type, amount_decimal, balance_after_decimal, voucher_id, invoice_id, journal_entry_id, tx_date, created_at, data_json FROM party_advance_transactions WHERE tenant_id = ? ORDER BY created_at, id'
+      ).all(tenantId).map((row) => ({
+        ...parseRowJson(row),
+        id: row.id,
+        tenantId,
+        branchId: row.branch_id || undefined,
+        partyId: row.party_id,
+        partyType: row.party_type,
+        type: row.tx_type,
+        amount: unitsToNumber(parseScaledInt(row.amount_decimal, MONEY_SCALE, 'advAmount'), MONEY_SCALE),
+        balanceAfter: unitsToNumber(parseScaledInt(row.balance_after_decimal, MONEY_SCALE, 'advAfter'), MONEY_SCALE),
+        voucherId: row.voucher_id || undefined,
+        invoiceId: row.invoice_id || undefined,
+        journalEntryId: row.journal_entry_id || undefined,
+        date: row.tx_date,
+        createdAt: row.created_at,
+      }));
+
+      const allocationAudits = database.prepare(
+        'SELECT tenant_id, id, branch_id, voucher_id, party_id, user_id, audit_timestamp, data_json FROM allocation_audits WHERE tenant_id = ? ORDER BY audit_timestamp, id'
+      ).all(tenantId).map((row) => ({
+        ...parseRowJson(row),
+        id: row.id,
+        tenantId,
+        branchId: row.branch_id || undefined,
+        voucherId: row.voucher_id,
+        partyId: row.party_id,
+        userId: row.user_id,
+        timestamp: row.audit_timestamp,
       }));
 
       const amanat = database.prepare(
@@ -505,6 +576,9 @@ export function createBackupSyncService(database, backupDirectory) {
         journalEntries,
         cashBoxes,
         vouchers,
+        paymentAllocations,
+        partyAdvanceTransactions,
+        allocationAudits,
         amanat,
         users,
         auditLogs,
@@ -584,6 +658,9 @@ export function createBackupSyncService(database, backupDirectory) {
         database.exec('BEGIN IMMEDIATE');
         try {
           // Clear tenant operational tables in strict FK-dependency order
+          database.prepare('DELETE FROM payment_allocations WHERE tenant_id = ?').run(tenantId);
+          database.prepare('DELETE FROM party_advance_transactions WHERE tenant_id = ?').run(tenantId);
+          database.prepare('DELETE FROM allocation_audits WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM invoice_stock_deductions WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM invoice_items WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM invoices WHERE tenant_id = ?').run(tenantId);

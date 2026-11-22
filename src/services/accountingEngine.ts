@@ -15,7 +15,13 @@ import {
   CommercialActivityId,
   CostCenterId,
   Account,
+  Party,
+  PartyType,
 } from '../types/erp';
+import {
+  SPECIAL_ACCOUNTS,
+  getInvoiceRemainingAmount,
+} from '../../electron/sqlite/payment-allocation-engine.mjs';
 
 class AccountingEngine {
   // توليد رقم قيد تسلسلي جديد
@@ -516,6 +522,7 @@ class AccountingEngine {
       let creditTotal = 0;
 
       journalEntries.forEach((entry) => {
+        if (entry.status === 'DRAFT') return;
         entry.lines.forEach((line) => {
           if (line.accountCode === account.code) {
             debitTotal += Number(line.debit) || 0;
@@ -524,7 +531,7 @@ class AccountingEngine {
         });
       });
 
-      const net = debitTotal - creditTotal;
+      const net = roundMoney(debitTotal - creditTotal);
       const debitBalance = net > 0 ? net : 0;
       const creditBalance = net < 0 ? Math.abs(net) : 0;
 
@@ -532,10 +539,10 @@ class AccountingEngine {
         code: account.code,
         nameAr: account.nameAr,
         type: account.type,
-        debitTotal: Number(debitTotal.toFixed(2)),
-        creditTotal: Number(creditTotal.toFixed(2)),
-        debitBalance: Number(debitBalance.toFixed(2)),
-        creditBalance: Number(creditBalance.toFixed(2)),
+        debitTotal: roundMoney(debitTotal),
+        creditTotal: roundMoney(creditTotal),
+        debitBalance: roundMoney(debitBalance),
+        creditBalance: roundMoney(creditBalance),
       };
     });
   }
@@ -555,6 +562,7 @@ class AccountingEngine {
     const expenseMap: Record<string, { nameAr: string; amount: number }> = {};
 
     journalEntries.forEach((entry) => {
+      if (entry.status === 'DRAFT') return;
       if (costCenterId && entry.costCenterId !== costCenterId && entry.costCenterId !== 'general') {
         return;
       }
@@ -582,20 +590,269 @@ class AccountingEngine {
     const revenues = Object.entries(revenueMap).map(([code, val]) => ({
       code,
       nameAr: val.nameAr,
-      amount: Number(val.amount.toFixed(2)),
+      amount: roundMoney(val.amount),
     }));
 
     const expenses = Object.entries(expenseMap).map(([code, val]) => ({
       code,
       nameAr: val.nameAr,
-      amount: Number(val.amount.toFixed(2)),
+      amount: roundMoney(val.amount),
     }));
 
-    const totalRevenue = Number(revenues.reduce((s, r) => s + r.amount, 0).toFixed(2));
-    const totalExpenses = Number(expenses.reduce((s, e) => s + e.amount, 0).toFixed(2));
-    const netProfit = Number((totalRevenue - totalExpenses).toFixed(2));
+    const totalRevenue = roundMoney(revenues.reduce((s, r) => s + r.amount, 0));
+    const totalExpenses = roundMoney(expenses.reduce((s, e) => s + e.amount, 0));
+    const netProfit = roundMoney(totalRevenue - totalExpenses);
 
     return { revenues, totalRevenue, expenses, totalExpenses, netProfit };
+  }
+
+  // استخراج الميزانية العمومية (Balance Sheet) من القيود المرحلة وصافي ربح الفترة
+  public getBalanceSheet(params: {
+    accounts: Account[];
+    entries: JournalEntry[];
+  }): {
+    assets: Array<{ code: string; nameAr: string; amount: number }>;
+    liabilities: Array<{ code: string; nameAr: string; amount: number }>;
+    equity: Array<{ code: string; nameAr: string; amount: number }>;
+    netProfit: number;
+    totalAssets: number;
+    totalLiabilities: number;
+    totalEquity: number;
+    totalLiabilitiesAndEquity: number;
+    isBalanced: boolean;
+    diff: number;
+  } {
+    const leafAccounts = params.accounts.filter((a) => a.isLeaf);
+    const ledgerNet = new Map<string, number>();
+
+    for (const acc of leafAccounts) {
+      ledgerNet.set(acc.code, 0);
+    }
+
+    for (const entry of params.entries) {
+      if (entry.status === 'DRAFT') continue;
+      for (const line of entry.lines) {
+        const prev = ledgerNet.get(line.accountCode) || 0;
+        const acc = leafAccounts.find((a) => a.code === line.accountCode);
+        if (!acc) continue;
+        const delta =
+          acc.type === 'LIABILITY' || acc.type === 'EQUITY' || acc.type === 'REVENUE'
+            ? (Number(line.credit) || 0) - (Number(line.debit) || 0)
+            : (Number(line.debit) || 0) - (Number(line.credit) || 0);
+        ledgerNet.set(acc.code, roundMoney(prev + delta));
+      }
+    }
+
+    const assets: Array<{ code: string; nameAr: string; amount: number }> = [];
+    const liabilities: Array<{ code: string; nameAr: string; amount: number }> = [];
+    const equity: Array<{ code: string; nameAr: string; amount: number }> = [];
+    let totalRevenue = 0;
+    let totalExpenses = 0;
+
+    for (const acc of leafAccounts) {
+      const amount = roundMoney(ledgerNet.get(acc.code) || 0);
+      if (acc.type === 'ASSET') {
+        if (Math.abs(amount) > 0.001) assets.push({ code: acc.code, nameAr: acc.nameAr, amount });
+      } else if (acc.type === 'LIABILITY') {
+        if (Math.abs(amount) > 0.001) liabilities.push({ code: acc.code, nameAr: acc.nameAr, amount });
+      } else if (acc.type === 'EQUITY') {
+        if (Math.abs(amount) > 0.001) equity.push({ code: acc.code, nameAr: acc.nameAr, amount });
+      } else if (acc.type === 'REVENUE') {
+        totalRevenue = roundMoney(totalRevenue + amount);
+      } else if (acc.type === 'EXPENSE') {
+        totalExpenses = roundMoney(totalExpenses + amount);
+      }
+    }
+
+    const netProfit = roundMoney(totalRevenue - totalExpenses);
+    const totalAssets = roundMoney(assets.reduce((s, a) => s + a.amount, 0));
+    const totalLiabilities = roundMoney(liabilities.reduce((s, l) => s + l.amount, 0));
+    const totalEquity = roundMoney(equity.reduce((s, e) => s + e.amount, 0) + netProfit);
+    const totalLiabilitiesAndEquity = roundMoney(totalLiabilities + totalEquity);
+    const diff = roundMoney(Math.abs(totalAssets - totalLiabilitiesAndEquity));
+
+    return {
+      assets,
+      liabilities,
+      equity,
+      netProfit,
+      totalAssets,
+      totalLiabilities,
+      totalEquity,
+      totalLiabilitiesAndEquity,
+      isBalanced: diff <= 0.02,
+      diff,
+    };
+  }
+
+  // استخراج تقرير أعمار الديون والمستحقات والأرصدة المقدمة (Aging & Advances Report)
+  public getAgingReport(params: {
+    parties: Party[];
+    invoices: Invoice[];
+    partyType: PartyType;
+    asOfDate?: string;
+  }): {
+    rows: Array<{
+      partyId: string;
+      partyName: string;
+      phone: string;
+      openInvoicesCount: number;
+      current0to30: number;
+      days31to60: number;
+      days61to90: number;
+      over90: number;
+      totalOpenBalance: number;
+      partyLedgerBalance: number;
+      advanceBalance: number;
+    }>;
+    totals: {
+      current0to30: number;
+      days31to60: number;
+      days61to90: number;
+      over90: number;
+      totalOpenBalance: number;
+      totalAdvanceBalance: number;
+    };
+  } {
+    const refDateStr = params.asOfDate || new Date().toISOString().split('T')[0];
+    const refMs = Date.parse(refDateStr) || Date.now();
+    const targetInvoiceType = params.partyType === 'CUSTOMER' ? 'SALE' : 'PURCHASE';
+
+    const targetParties = params.parties.filter((p) => p.type === params.partyType);
+    const rows = targetParties.map((party) => {
+      const openInvoices = params.invoices.filter(
+        (inv) =>
+          inv.partyId === party.id &&
+          inv.type === targetInvoiceType &&
+          inv.status !== 'REVERSED' &&
+          getInvoiceRemainingAmount(inv) > 0
+      );
+
+      let current0to30 = 0;
+      let days31to60 = 0;
+      let days61to90 = 0;
+      let over90 = 0;
+
+      for (const inv of openInvoices) {
+        const rem = getInvoiceRemainingAmount(inv);
+        const anchorStr = inv.dueDate || inv.date || refDateStr;
+        const anchorMs = Date.parse(anchorStr) || refMs;
+        const ageDays = Math.max(0, Math.floor((refMs - anchorMs) / (1000 * 60 * 60 * 24)));
+
+        if (ageDays <= 30) current0to30 = roundMoney(current0to30 + rem);
+        else if (ageDays <= 60) days31to60 = roundMoney(days31to60 + rem);
+        else if (ageDays <= 90) days61to90 = roundMoney(days61to90 + rem);
+        else over90 = roundMoney(over90 + rem);
+      }
+
+      const totalOpenBalance = roundMoney(current0to30 + days31to60 + days61to90 + over90);
+      const partyLedgerBalance =
+        params.partyType === 'CUSTOMER'
+          ? roundMoney(Math.max(0, party.balance))
+          : roundMoney(Math.max(0, -party.balance));
+
+      return {
+        partyId: party.id,
+        partyName: party.nameAr,
+        phone: party.phone || '-',
+        openInvoicesCount: openInvoices.length,
+        current0to30,
+        days31to60,
+        days61to90,
+        over90,
+        totalOpenBalance,
+        partyLedgerBalance,
+        advanceBalance: roundMoney(party.advanceBalance || 0),
+      };
+    });
+
+    const totals = rows.reduce(
+      (acc, r) => ({
+        current0to30: roundMoney(acc.current0to30 + r.current0to30),
+        days31to60: roundMoney(acc.days31to60 + r.days31to60),
+        days61to90: roundMoney(acc.days61to90 + r.days61to90),
+        over90: roundMoney(acc.over90 + r.over90),
+        totalOpenBalance: roundMoney(acc.totalOpenBalance + r.totalOpenBalance),
+        totalAdvanceBalance: roundMoney(acc.totalAdvanceBalance + r.advanceBalance),
+      }),
+      {
+        current0to30: 0,
+        days31to60: 0,
+        days61to90: 0,
+        over90: 0,
+        totalOpenBalance: 0,
+        totalAdvanceBalance: 0,
+      }
+    );
+
+    return { rows, totals };
+  }
+
+  // تقرير المطابقة بين أرصدة الأطراف التفصيلية وحسابات الرقابة في دفتر الأستاذ
+  public getControlReconciliation(params: {
+    parties: Party[];
+    accounts: Account[];
+  }): Array<{
+    key: string;
+    label: string;
+    controlAccountCode: string;
+    controlAccountName: string;
+    subledgerTotal: number;
+    glAccountBalance: number;
+    diff: number;
+    isMatched: boolean;
+  }> {
+    const findAcc = (code: string) => params.accounts.find((a) => a.code === code);
+    const customers = params.parties.filter((p) => p.type === 'CUSTOMER');
+    const suppliers = params.parties.filter((p) => p.type === 'SUPPLIER');
+
+    const customersArSub = roundMoney(customers.reduce((s, c) => s + Math.max(0, c.balance || 0), 0));
+    const suppliersApSub = roundMoney(suppliers.reduce((s, sup) => s + Math.max(0, -(sup.balance || 0)), 0));
+    const customerAdvSub = roundMoney(customers.reduce((s, c) => s + Math.max(0, c.advanceBalance || 0), 0));
+    const supplierAdvSub = roundMoney(suppliers.reduce((s, sup) => s + Math.max(0, sup.advanceBalance || 0), 0));
+
+    const checks = [
+      {
+        key: 'CUSTOMERS_AR',
+        label: 'ذمم العملاء المدينة (مقابل حساب الرقابة 1103)',
+        controlAccountCode: SPECIAL_ACCOUNTS.CUSTOMERS_AR,
+        subledgerTotal: customersArSub,
+      },
+      {
+        key: 'SUPPLIERS_AP',
+        label: 'ذمم الموردين الدائنة (مقابل حساب الرقابة 2101)',
+        controlAccountCode: SPECIAL_ACCOUNTS.SUPPLIERS_AP,
+        subledgerTotal: suppliersApSub,
+      },
+      {
+        key: 'CUSTOMER_ADVANCES',
+        label: 'دفعات مقدمة من العملاء (مقابل حساب الرقابة 2103)',
+        controlAccountCode: SPECIAL_ACCOUNTS.CUSTOMER_ADVANCES,
+        subledgerTotal: customerAdvSub,
+      },
+      {
+        key: 'SUPPLIER_ADVANCES',
+        label: 'سلف الموردين المقدمة (مقابل حساب الرقابة 1105)',
+        controlAccountCode: SPECIAL_ACCOUNTS.SUPPLIER_ADVANCES,
+        subledgerTotal: supplierAdvSub,
+      },
+    ];
+
+    return checks.map((c) => {
+      const acc = findAcc(c.controlAccountCode);
+      const glAccountBalance = roundMoney(acc?.balance || 0);
+      const diff = roundMoney(c.subledgerTotal - glAccountBalance);
+      return {
+        key: c.key,
+        label: c.label,
+        controlAccountCode: c.controlAccountCode,
+        controlAccountName: acc?.nameAr || c.controlAccountCode,
+        subledgerTotal: c.subledgerTotal,
+        glAccountBalance,
+        diff,
+        isMatched: Math.abs(diff) <= 0.02,
+      };
+    });
   }
 }
 

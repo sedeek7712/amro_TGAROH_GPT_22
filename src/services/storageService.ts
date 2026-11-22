@@ -82,6 +82,7 @@ export const INITIAL_CHART_OF_ACCOUNTS: Account[] = [
   { code: '11042', nameAr: 'مخزون المواد الغذائية والبقالة', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'grocery' },
   { code: '11043', nameAr: 'مخزون قطع غيار الدراجات النارية', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
   { code: '11044', nameAr: 'مخزون قطع غيار المعدات', type: 'ASSET', parentCode: '1104', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
+  { code: '1105', nameAr: 'سلف الموردين (دفعات مقدمة للموردين)', type: 'ASSET', parentCode: '11', isLeaf: true, balance: 0 },
   { code: '1106', nameAr: 'ضريبة القيمة المضافة - مدخلات', type: 'ASSET', parentCode: '11', isLeaf: true, balance: 0 },
 
   // 2. الخصوم (Liabilities)
@@ -89,6 +90,7 @@ export const INITIAL_CHART_OF_ACCOUNTS: Account[] = [
   { code: '21', nameAr: 'الخصوم المتداولة', type: 'LIABILITY', parentCode: '2', isLeaf: false, balance: 0 },
   { code: '2101', nameAr: 'الموردون والدائنون', type: 'LIABILITY', parentCode: '21', isLeaf: true, balance: 0 },
   { code: '2102', nameAr: 'أمانات نقدية للغير (التزام معزول)', type: 'LIABILITY', parentCode: '21', isLeaf: true, balance: 0 },
+  { code: '2103', nameAr: 'دفعات مقدمة من العملاء', type: 'LIABILITY', parentCode: '21', isLeaf: true, balance: 0 },
 
   // 3. حقوق الملكية (Equity)
   { code: '3', nameAr: 'حقوق الملكية', type: 'EQUITY', parentCode: null, isLeaf: false, balance: 0 },
@@ -101,6 +103,11 @@ export const INITIAL_CHART_OF_ACCOUNTS: Account[] = [
   { code: '4102', nameAr: 'إيرادات مبيعات المواد الغذائية والبقالة', type: 'REVENUE', parentCode: '4', isLeaf: true, balance: 0, costCenterId: 'grocery' },
   { code: '4103', nameAr: 'إيرادات مبيعات قطع غيار الدراجات', type: 'REVENUE', parentCode: '4', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
   { code: '4104', nameAr: 'إيرادات مبيعات قطع غيار المعدات', type: 'REVENUE', parentCode: '4', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
+  { code: '42', nameAr: 'مردودات ومسموحات المبيعات', type: 'REVENUE', parentCode: '4', isLeaf: false, balance: 0 },
+  { code: '4201', nameAr: 'مردودات مبيعات الصيدلية', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'pharmacy' },
+  { code: '4202', nameAr: 'مردودات مبيعات المواد الغذائية والبقالة', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'grocery' },
+  { code: '4203', nameAr: 'مردودات مبيعات قطع غيار الدراجات', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'bike_parts' },
+  { code: '4204', nameAr: 'مردودات مبيعات قطع غيار المعدات', type: 'REVENUE', parentCode: '42', isLeaf: true, balance: 0, costCenterId: 'equipment_parts' },
 
   // 5. المصروفات وتكلفة المبيعات (Expenses & COGS)
   { code: '5', nameAr: 'المصروفات', type: 'EXPENSE', parentCode: null, isLeaf: false, balance: 0 },

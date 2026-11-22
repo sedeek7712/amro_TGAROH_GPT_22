@@ -1,5 +1,6 @@
 import {
   Account,
+  AllocationAudit,
   AmanatRecord,
   Branch,
   CashBox,
@@ -11,10 +12,13 @@ import {
   JournalEntry,
   OutboxQueueItem,
   Party,
+  PartyAdvanceTransaction,
+  PaymentAllocation,
   PaymentVoucher,
   Product,
   SystemAuditLog,
   SystemUser,
+  VoucherManualAllocationInput,
 } from '../types/erp';
 import { IDataService } from './dataService';
 import { desktopSession } from './desktopSession';
@@ -147,10 +151,22 @@ export class SqliteDataService implements IDataService {
     invoice: Invoice;
     totalCogs: number;
     stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    applyAdvanceAmount?: number;
     clientRequestId?: string;
-  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry }> {
+  }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }> {
     const res = await bridge().createSalesInvoiceAtomic({ token: token(), params });
-    desktopSession.notifyChanged(['invoices', 'products', 'parties', 'cashBoxes', 'accounts', 'journalEntries', 'outbox', 'auditLogs']);
+    desktopSession.notifyChanged([
+      'invoices',
+      'products',
+      'parties',
+      'cashBoxes',
+      'accounts',
+      'journalEntries',
+      'paymentAllocations',
+      'partyAdvances',
+      'outbox',
+      'auditLogs',
+    ]);
     return res;
   }
   public async createPurchaseInvoiceAtomic(params: {
@@ -197,10 +213,103 @@ export class SqliteDataService implements IDataService {
   }
   public async createCashVoucherAtomic(params: {
     voucher: PaymentVoucher;
-  }): Promise<{ success: boolean; voucher: PaymentVoucher; journalEntry: JournalEntry }> {
+    manualAllocations?: VoucherManualAllocationInput[];
+    overrideReason?: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    journalEntry?: JournalEntry;
+    allocations?: PaymentAllocation[];
+    advanceTransaction?: PartyAdvanceTransaction;
+  }> {
     const res = await bridge().createCashVoucherAtomic({ token: token(), params });
-    desktopSession.notifyChanged(['vouchers', 'cashBoxes', 'accounts', 'parties', 'journalEntries', 'outbox', 'auditLogs']);
+    desktopSession.notifyChanged([
+      'vouchers',
+      'invoices',
+      'cashBoxes',
+      'accounts',
+      'parties',
+      'journalEntries',
+      'paymentAllocations',
+      'partyAdvances',
+      'allocationAudits',
+      'outbox',
+      'auditLogs',
+    ]);
     return res;
+  }
+
+  public async postDraftCashVoucherAtomic(params: {
+    voucherId: string;
+    manualAllocations?: VoucherManualAllocationInput[];
+    overrideReason?: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    journalEntry: JournalEntry;
+    allocations: PaymentAllocation[];
+    advanceTransaction?: PartyAdvanceTransaction;
+  }> {
+    const res = await bridge().postDraftCashVoucherAtomic({ token: token(), params });
+    desktopSession.notifyChanged([
+      'vouchers',
+      'invoices',
+      'cashBoxes',
+      'accounts',
+      'parties',
+      'journalEntries',
+      'paymentAllocations',
+      'partyAdvances',
+      'allocationAudits',
+      'outbox',
+      'auditLogs',
+    ]);
+    return res;
+  }
+
+  public async cancelCashVoucherAtomic(params: {
+    voucherId: string;
+    reason: string;
+  }): Promise<PaymentVoucher> {
+    const res = await bridge().cancelCashVoucherAtomic({ token: token(), params });
+    desktopSession.notifyChanged(['vouchers', 'outbox', 'auditLogs']);
+    return res;
+  }
+
+  public async reverseCashVoucherAtomic(params: {
+    voucherId: string;
+    reversalReason: string;
+  }): Promise<{
+    success: boolean;
+    voucher: PaymentVoucher;
+    reversalJournalEntry: JournalEntry;
+  }> {
+    const res = await bridge().reverseCashVoucherAtomic({ token: token(), params });
+    desktopSession.notifyChanged([
+      'vouchers',
+      'invoices',
+      'cashBoxes',
+      'accounts',
+      'parties',
+      'journalEntries',
+      'paymentAllocations',
+      'partyAdvances',
+      'outbox',
+      'auditLogs',
+    ]);
+    return res;
+  }
+
+  public async getPaymentAllocations(partyId?: string, voucherId?: string): Promise<PaymentAllocation[]> {
+    return await bridge().getPaymentAllocations({ token: token(), partyId, voucherId });
+  }
+
+  public async getPartyAdvanceTransactions(partyId?: string): Promise<PartyAdvanceTransaction[]> {
+    return await bridge().getPartyAdvanceTransactions({ token: token(), partyId });
+  }
+
+  public async getAllocationAudits(voucherId?: string): Promise<AllocationAudit[]> {
+    return await bridge().getAllocationAudits({ token: token(), voucherId });
   }
   public async getAmanatRecords(): Promise<AmanatRecord[]> {
     return await bridge().getAmanatRecords({ token: token() });

@@ -481,6 +481,9 @@ export class SupabaseSyncService {
       AMANAT: 'erp_amanat_items',
       CASHBOX: 'erp_cash_boxes',
       ACCOUNT: 'erp_accounts',
+      PAYMENT_ALLOCATION: 'erp_payment_allocations',
+      PARTY_ADVANCE: 'erp_party_advances',
+      ALLOCATION_AUDIT: 'erp_allocation_audits',
     };
 
     const immutableFinancialTypes = new Set<OutboxQueueItem['entityType']>([
@@ -488,6 +491,9 @@ export class SupabaseSyncService {
       'JOURNAL_ENTRY',
       'VOUCHER',
       'AMANAT',
+      'PAYMENT_ALLOCATION',
+      'PARTY_ADVANCE',
+      'ALLOCATION_AUDIT',
     ]);
 
     for (const item of items) {

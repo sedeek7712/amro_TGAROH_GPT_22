@@ -250,7 +250,7 @@ export default function App() {
   }
 
   return (
-    <div className="flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none" dir="rtl">
+    <div className="app-shell-root flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none" dir="rtl">
       {/* Sidebar Navigation (Drawer on Mobile, Fixed on Desktop) */}
       <Sidebar
         activeView={activeView}
@@ -265,7 +265,7 @@ export default function App() {
       />
 
       {/* Main Content Area */}
-      <div className="flex-1 flex flex-col min-w-0 overflow-hidden relative">
+      <div className="app-shell-content flex-1 flex flex-col min-w-0 overflow-hidden relative">
         {/* Top Header Bar */}
         <TopBar
           activeView={activeView}
@@ -279,7 +279,7 @@ export default function App() {
 
         {/* Mobile Install Promotion Banner */}
         {!isDesktopRuntime && showMobileBanner && (
-          <div className="lg:hidden bg-gradient-to-r from-emerald-800 via-teal-800 to-emerald-900 text-white px-3 py-2 flex items-center justify-between gap-2 text-xs shadow-md shrink-0 border-b border-emerald-700/50 select-none animate-fadeIn">
+          <div className="app-chrome-only lg:hidden bg-gradient-to-r from-emerald-800 via-teal-800 to-emerald-900 text-white px-3 py-2 flex items-center justify-between gap-2 text-xs shadow-md shrink-0 border-b border-emerald-700/50 select-none animate-fadeIn">
             <div
               onClick={() => setIsInstallModalOpen(true)}
               className="flex items-center gap-2 cursor-pointer flex-1 min-w-0"
@@ -315,7 +315,7 @@ export default function App() {
         )}
 
         {/* Viewport Content with RBAC Protection */}
-        <main className="flex-1 overflow-y-auto bg-slate-50/60 pb-20 lg:pb-6">
+        <main className="app-shell-main flex-1 overflow-y-auto bg-slate-50/60 pb-20 lg:pb-6">
           {!isViewAllowed ? (
             <div className="p-8 max-w-xl mx-auto my-12 bg-white rounded-2xl border border-rose-200 shadow-sm text-center space-y-4">
               <div className="w-12 h-12 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
@@ -402,7 +402,7 @@ export default function App() {
         </main>
 
         {/* Mobile Bottom Navigation Bar (Barre inférieure pour mobile) */}
-        <nav className="lg:hidden fixed bottom-0 inset-x-0 bg-slate-950 text-slate-300 border-t border-slate-800 z-30 flex items-center justify-around py-1.5 px-2 shadow-2xl">
+        <nav className="app-chrome-only lg:hidden fixed bottom-0 inset-x-0 bg-slate-950 text-slate-300 border-t border-slate-800 z-30 flex items-center justify-around py-1.5 px-2 shadow-2xl">
           <button
             onClick={() => setActiveView('dashboard')}
             className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${

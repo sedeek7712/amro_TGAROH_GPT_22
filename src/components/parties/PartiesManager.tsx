@@ -43,6 +43,11 @@ import {
   getInvoiceRemainingAmount,
 } from '../../../electron/sqlite/payment-allocation-engine.mjs';
 import { buildPartyStatement } from '../../utils/partyStatement';
+import { formatLocalDate } from '../../utils/localDate';
+import { useDocumentContext } from '../../hooks/useDocumentContext';
+import { DocumentPrintShell } from '../documents/DocumentPrintShell';
+import { PartyStatementDocument } from '../documents/PartyStatementDocument';
+import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
 
 interface PartiesManagerProps {
   onRefresh: () => void;
@@ -67,7 +72,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
 
   // حقول نموذج تسجيل السداد / التحصيل
   const [settleAmount, setSettleAmount] = useState('');
-  const [settleDate, setSettleDate] = useState(new Date().toISOString().split('T')[0]);
+  const [settleDate, setSettleDate] = useState(() => formatLocalDate());
   const [settleCashBoxId, setSettleCashBoxId] = useState('');
   const [settlePaymentMethod, setSettlePaymentMethod] = useState<VoucherPaymentMethod>('CASH');
   const [settleExternalRef, setSettleExternalRef] = useState('');
@@ -77,6 +82,8 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
   const [manualAmounts, setManualAmounts] = useState<Record<string, string>>({});
   const [overrideReason, setOverrideReason] = useState('');
   const [settleError, setSettleError] = useState<string | null>(null);
+  const [isStatementNotifyOpen, setIsStatementNotifyOpen] = useState(false);
+  const { resolveMeta } = useDocumentContext();
 
   const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const actor =
@@ -186,7 +193,7 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
 
     setSettlementParty(party);
     setSettleAmount(suggested > 0 ? String(roundMoney(suggested)) : '');
-    setSettleDate(new Date().toISOString().split('T')[0]);
+    setSettleDate(formatLocalDate());
     setSettleCashBoxId(defaultCashBoxId);
     setSettlePaymentMethod('CASH');
     setSettleExternalRef('');
@@ -348,26 +355,23 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
     }
   };
 
-  // استخراج حركات كشف الحساب المفصل للطرف المحدد من المصدر الموحد دون تكرار احتساب السداد
-  const getPartyTransactions = (party: Party) => {
-    const statement = buildPartyStatement({
-      party,
+  // استخراج كشف الحساب الموحد للطرف المحدد
+  const selectedPartyStatement = useMemo(() => {
+    if (!selectedPartyForStatement) return null;
+    return buildPartyStatement({
+      party: selectedPartyForStatement,
       invoices: allInvoices,
       vouchers: allVouchers,
       paymentAllocations: statementAllocations,
       partyAdvances: statementAdvances,
     });
-    return statement.transactions.map((row) => ({
-      date: row.date,
-      sortKey: row.sortKey,
-      docNumber: row.docNumber,
-      description: row.memo,
-      debit: row.debit,
-      credit: row.credit,
-      extraBadge: row.extraBadge,
-      runningBalance: row.balanceAfter,
-    }));
-  };
+  }, [
+    selectedPartyForStatement,
+    allInvoices,
+    allVouchers,
+    statementAllocations,
+    statementAdvances,
+  ]);
 
   return (
     <div className="p-6 space-y-6 max-w-7xl mx-auto">
@@ -934,127 +938,40 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
         </div>
       )}
 
-      {/* Statement of Account Modal (كشف الحساب التفصيلي) */}
+      {/* Statement of Account Modal (Unified DocumentPrintShell + PartyStatementDocument) */}
+      {selectedPartyForStatement && selectedPartyStatement && (
+        <DocumentPrintShell
+          title={`كشف حساب: ${selectedPartyForStatement.nameAr}`}
+          subtitle={selectedPartyForStatement.type === 'CUSTOMER' ? 'حساب عميل' : 'حساب مورد'}
+          pdfTitle={`STATEMENT_${selectedPartyForStatement.id.slice(0, 8)}`}
+          defaultSize="A4"
+          allowThermal={true}
+          onClose={() => setSelectedPartyForStatement(null)}
+          onNotify={() => setIsStatementNotifyOpen(true)}
+          notifyLabel="إرسال واتساب"
+        >
+          {(paperSize) => (
+            <PartyStatementDocument
+              statement={selectedPartyStatement}
+              meta={resolveMeta()}
+              paperSize={paperSize}
+            />
+          )}
+        </DocumentPrintShell>
+      )}
+
       {selectedPartyForStatement && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto no-print">
-          <div className="relative w-full max-w-4xl bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-200">
-            <div className="flex items-center justify-between px-6 py-4 bg-slate-900 text-white no-print">
-              <div className="flex items-center gap-2">
-                <FileText className="w-5 h-5 text-emerald-400" />
-                <span className="font-bold text-sm">
-                  كشف حساب: {selectedPartyForStatement.nameAr}
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <button
-                  onClick={() => window.print()}
-                  className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-semibold rounded-lg transition-colors"
-                >
-                  <Printer className="w-4 h-4" />
-                  <span>طباعة الكشف</span>
-                </button>
-                <button
-                  onClick={() => setSelectedPartyForStatement(null)}
-                  className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-            </div>
-
-            <div className="p-8 text-xs printable-area bg-white text-slate-800">
-              <div className="text-center border-b border-slate-200 pb-4 mb-4">
-                <h2 className="text-lg font-extrabold text-slate-900">
-                  نظام عمرو النماري للإدارة التجارية والمحاسبية المتكامل
-                </h2>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  كشف حساب تفصيلي لـ (
-                  {selectedPartyForStatement.type === 'CUSTOMER' ? 'العميل' : 'المورد'})
-                </p>
-                <div className="text-sm font-bold text-slate-900 mt-2">
-                  {selectedPartyForStatement.nameAr}
-                </div>
-                <div className="text-xs text-slate-500 font-mono">
-                  هاتف: {selectedPartyForStatement.phone} | المعرف: {selectedPartyForStatement.id.slice(0, 8)}
-                </div>
-              </div>
-
-              <div className="border border-slate-200 rounded-lg overflow-hidden mb-4">
-                <table className="w-full text-right text-xs">
-                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
-                    <tr>
-                      <th className="py-2.5 px-3">التاريخ</th>
-                      <th className="py-2.5 px-3">رقم المستند</th>
-                      <th className="py-2.5 px-3">البيان وتفاصيل التخصيص</th>
-                      <th className="py-2.5 px-3 text-center">مدين</th>
-                      <th className="py-2.5 px-3 text-center">دائن</th>
-                      <th className="py-2.5 px-3 text-center">الرصيد بعد الحركة</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {getPartyTransactions(selectedPartyForStatement).length === 0 ? (
-                      <tr>
-                        <td colSpan={6} className="py-8 text-center text-slate-400">
-                          لا توجد حركات أو فواتير مسجلة لهذا الحساب
-                        </td>
-                      </tr>
-                    ) : (
-                      getPartyTransactions(selectedPartyForStatement).map((item, idx) => (
-                        <tr key={idx} className="hover:bg-slate-50">
-                          <td className="py-2 px-3 font-mono text-slate-600">{item.date}</td>
-                          <td className="py-2 px-3 font-mono font-bold text-slate-900">
-                            {item.docNumber}
-                          </td>
-                          <td className="py-2 px-3">
-                            <div>{item.description}</div>
-                            {item.extraBadge && (
-                              <div className="text-[10px] text-indigo-700 font-mono mt-0.5">
-                                {item.extraBadge}
-                              </div>
-                            )}
-                          </td>
-                          <td className="py-2 px-3 text-center font-mono tabular-nums font-semibold">
-                            {item.debit > 0 ? item.debit.toFixed(2) : '-'}
-                          </td>
-                          <td className="py-2 px-3 text-center font-mono tabular-nums font-semibold">
-                            {item.credit > 0 ? item.credit.toFixed(2) : '-'}
-                          </td>
-                          <td className="py-2 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
-                            {item.runningBalance.toFixed(2)} {currencySymbol}
-                          </td>
-                        </tr>
-                      ))
-                    )}
-                  </tbody>
-                </table>
-              </div>
-
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 p-4 bg-slate-50 rounded-lg border border-slate-200 text-sm font-bold">
-                <div className="flex justify-between items-center">
-                  <span>رصيد الذمة الختامي:</span>
-                  <span className="font-mono tabular-nums text-base text-emerald-800">
-                    {selectedPartyForStatement.balance.toFixed(2)} {currencySymbol}
-                  </span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span>الرصيد المقدم المتاح:</span>
-                  <span className="font-mono tabular-nums text-base text-indigo-700">
-                    {Number(selectedPartyForStatement.advanceBalance || 0).toFixed(2)} {currencySymbol}
-                  </span>
-                </div>
-              </div>
-            </div>
-
-            <div className="p-4 bg-slate-50 border-t border-slate-200 flex justify-end no-print">
-              <button
-                onClick={() => setSelectedPartyForStatement(null)}
-                className="px-4 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-semibold"
-              >
-                إغلاق
-              </button>
-            </div>
-          </div>
-        </div>
+        <CustomerNotificationModal
+          isOpen={isStatementNotifyOpen}
+          onClose={() => setIsStatementNotifyOpen(false)}
+          recipientName={selectedPartyForStatement.nameAr}
+          recipientPhone={selectedPartyForStatement.phone || ''}
+          documentType="STATEMENT"
+          documentNumber={`STMT-${selectedPartyForStatement.id.slice(0, 8).toUpperCase()}`}
+          amount={Math.abs(selectedPartyForStatement.balance)}
+          balanceRemaining={selectedPartyForStatement.balance}
+          notes={`كشف حساب مالي صادر من ${resolveMeta().branchName}`}
+        />
       )}
     </div>
   );

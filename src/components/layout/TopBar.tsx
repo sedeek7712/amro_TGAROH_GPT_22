@@ -99,7 +99,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   });
 
   return (
-    <header className="h-14 lg:h-16 bg-white border-b border-slate-200 px-3 lg:px-6 flex items-center justify-between gap-2 lg:gap-6 shrink-0 z-10 select-none">
+    <header className="app-chrome-only h-14 lg:h-16 bg-white border-b border-slate-200 px-3 lg:px-6 flex items-center justify-between gap-2 lg:gap-6 shrink-0 z-10 select-none">
       {/* Right / Start: Mobile Menu Toggle & Title */}
       <div className="flex items-center gap-2 min-w-0">
         <button

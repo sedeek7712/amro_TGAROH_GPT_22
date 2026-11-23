@@ -28,6 +28,7 @@ import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveAmanatRecords, useLiveCashBoxes } from '../../hooks/useLiveDexie';
 import { AmanatRecord, AmanatType, AmanatStatus } from '../../types/erp';
 import { AmanatReceiptModal } from '../common/AmanatReceiptModal';
+import { formatLocalDate } from '../../utils/localDate';
 
 interface AmanatManagerProps {
   onRefresh: () => void;
@@ -143,7 +144,7 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
       itemDescription: depositType === 'ITEM' ? itemDescription.trim() : undefined,
       itemSerial: depositType === 'ITEM' ? itemSerial.trim() || undefined : undefined,
       status: 'HELD',
-      receivedDate: new Date().toISOString().split('T')[0],
+      receivedDate: formatLocalDate(),
       receivedBy: currentUser?.fullName || 'الموظف المختص',
       cashBoxId: targetBox,
       notes: notes.trim() || undefined,

@@ -243,7 +243,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
     <>
       {/* 1. Mobile Overlay Drawer (Only rendered when open on mobile) */}
       {isMobileOpen && (
-        <div className="fixed inset-0 z-50 lg:hidden">
+        <div className="fixed inset-0 z-50 lg:hidden app-chrome-only">
           {/* Backdrop */}
           <div
             onClick={() => setIsMobileOpen(false)}
@@ -258,7 +258,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* 2. Desktop Permanent Sidebar (Hidden on screens < 1024px) */}
-      <aside className="hidden lg:flex w-64 bg-slate-950 text-slate-200 border-l border-slate-800 flex-col shrink-0">
+      <aside className="hidden lg:flex w-64 bg-slate-950 text-slate-200 border-l border-slate-800 flex-col shrink-0 app-chrome-only">
         {renderSidebarContent(false)}
       </aside>
     </>

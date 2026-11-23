@@ -21,6 +21,7 @@ import {
   DollarSign,
   ArrowRightLeft,
   Building2,
+  Printer,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { desktopSession } from '../../services/desktopSession';
@@ -31,6 +32,10 @@ import { hasPermission } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveAccounts, useLiveCashBoxes, useLiveJournalEntries } from '../../hooks/useLiveDexie';
 import { Account, JournalEntry, JournalEntryLine, ActivityId, AccountType } from '../../types/erp';
+import { formatLocalDate } from '../../utils/localDate';
+import { useDocumentContext } from '../../hooks/useDocumentContext';
+import { DocumentPrintShell } from '../documents/DocumentPrintShell';
+import { JournalVoucherDocument } from '../documents/JournalVoucherDocument';
 
 interface AccountingModuleProps {
   onRefresh: () => void;
@@ -47,7 +52,9 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
   const [reversalError, setReversalError] = useState<string | null>(null);
 
   // نموذج قيد يدوي مركب
-  const [entryDate, setEntryDate] = useState(new Date().toISOString().split('T')[0]);
+  const [entryDate, setEntryDate] = useState(() => formatLocalDate());
+  const [printableEntry, setPrintableEntry] = useState<JournalEntry | null>(null);
+  const { resolveMeta } = useDocumentContext();
   const [entryDescription, setEntryDescription] = useState('');
   const [entryCostCenter, setEntryCostCenter] = useState<ActivityId | 'general'>('general');
   const [entryLines, setEntryLines] = useState<
@@ -508,6 +515,14 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
                         <span className="font-mono tabular-nums font-bold text-emerald-800 bg-emerald-50 px-2 py-0.5 rounded">
                           {entryTotal.toFixed(2)} {currencySymbol}
                         </span>
+                        <button
+                          type="button"
+                          onClick={() => setPrintableEntry(entry)}
+                          className="p-1.5 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 transition-colors"
+                          title="طباعة القيد المحاسبي وتصديره PDF"
+                        >
+                          <Printer className="w-3.5 h-3.5" />
+                        </button>
                         {entry.status === 'POSTED' && (
                           <button
                             onClick={() => {
@@ -1124,6 +1139,25 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
             </form>
           </div>
         </div>
+      )}
+
+      {printableEntry && (
+        <DocumentPrintShell
+          title={`سند قيد محاسبي (${printableEntry.entryNumber})`}
+          subtitle={`${printableEntry.description} — ${printableEntry.date}`}
+          pdfTitle={`JOURNAL_${printableEntry.entryNumber}`}
+          defaultSize="A4"
+          allowThermal={true}
+          onClose={() => setPrintableEntry(null)}
+        >
+          {(paperSize) => (
+            <JournalVoucherDocument
+              entry={printableEntry}
+              meta={resolveMeta({ branchId: printableEntry.branchId })}
+              paperSize={paperSize}
+            />
+          )}
+        </DocumentPrintShell>
       )}
     </div>
   );

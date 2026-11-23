@@ -43,6 +43,10 @@ import {
   CostCenterId,
 } from '../../types/erp';
 import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
+import { useDocumentContext } from '../../hooks/useDocumentContext';
+import { DocumentPrintShell } from '../documents/DocumentPrintShell';
+import { CashVoucherDocument } from '../documents/CashVoucherDocument';
+import { formatLocalDate } from '../../utils/localDate';
 import {
   PARTY_CONTROL_ACCOUNTS,
   SPECIAL_ACCOUNTS,
@@ -93,9 +97,10 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [printableVoucher, setPrintableVoucher] = useState<PaymentVoucher | null>(null);
 
+  const { resolveMeta } = useDocumentContext();
   // حقول نموذج السند
   const [voucherAmount, setVoucherAmount] = useState('');
-  const [voucherDate, setVoucherDate] = useState(new Date().toISOString().split('T')[0]);
+  const [voucherDate, setVoucherDate] = useState(() => formatLocalDate());
   const [voucherCashBoxId, setVoucherCashBoxId] = useState('');
   const [voucherAccountCode, setVoucherAccountCode] = useState('5204');
   const [voucherPartyId, setVoucherPartyId] = useState('');
@@ -125,6 +130,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
     documentType: 'RECEIPT_VOUCHER' | 'PAYMENT_VOUCHER';
     documentNumber: string;
     amount?: number;
+    date?: string;
     notes?: string;
   }>({
     isOpen: false,
@@ -263,6 +269,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
 
   const handleOpenVoucherModal = (type: VoucherType, presetCashBoxId?: string) => {
     setVoucherType(type);
+    setVoucherDate(formatLocalDate());
     setVoucherAmount('');
     setVoucherDescription('');
     setVoucherPartyId('');
@@ -316,6 +323,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
       documentType: isReceipt ? 'RECEIPT_VOUCHER' : 'PAYMENT_VOUCHER',
       documentNumber: v.voucherNumber,
       amount: v.amount,
+      date: v.date,
       notes: `${v.description} - حساب: ${box?.nameAr || 'الخزينة'}`,
     });
   };
@@ -1461,165 +1469,33 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
         </div>
       )}
 
-      {/* Printable Voucher Preview Modal (No window.open) */}
+      {/* Printable Voucher Preview Modal (Unified Enterprise Print Shell) */}
       {printableVoucher && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto no-print">
-          <div className="relative w-full max-w-lg bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-200">
-            <div className="flex items-center justify-between px-5 py-3.5 bg-slate-900 text-white no-print">
-              <span className="font-bold text-xs">
-                {printableVoucher.type === 'RECEIPT' ? 'سند قبض مالي' : 'سند صرف مالي'} —{' '}
-                {printableVoucher.voucherNumber}
-              </span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => window.print()}
-                  className="flex items-center gap-1 px-3 py-1 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded"
-                >
-                  <Printer className="w-3.5 h-3.5" />
-                  <span>طباعة</span>
-                </button>
-                <button
-                  onClick={() => setPrintableVoucher(null)}
-                  className="text-slate-400 hover:text-white"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-            <div className="p-6 text-xs text-slate-800 space-y-4 printable-area bg-white">
-              <div className="text-center border-b-2 border-slate-900 pb-3">
-                <h2 className="text-base font-extrabold text-slate-900">
-                  نظام عمرو النماري للإدارة التجارية المتعددة الأنشطة
-                </h2>
-                <div className="flex items-center justify-center gap-2 mt-2">
-                  <span
-                    className={`px-3 py-1 rounded font-bold ${
-                      printableVoucher.type === 'RECEIPT'
-                        ? 'bg-emerald-100 text-emerald-800'
-                        : 'bg-rose-100 text-rose-800'
-                    }`}
-                  >
-                    {printableVoucher.type === 'RECEIPT' ? 'سند قبض مالي رسمي' : 'سند صرف مالي رسمي'}
-                  </span>
-                  {renderStatusBadge(printableVoucher.status)}
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-lg border border-slate-200">
-                <div>
-                  <strong>رقم السند:</strong>{' '}
-                  <span className="font-mono">{printableVoucher.voucherNumber}</span>
-                </div>
-                <div>
-                  <strong>التاريخ:</strong>{' '}
-                  <span className="font-mono">{printableVoucher.date}</span>
-                </div>
-                <div>
-                  <strong>{printableVoucher.type === 'RECEIPT' ? 'المستلم منه:' : 'المصروف له:'}</strong>{' '}
-                  {printableVoucher.partyName}
-                </div>
-                <div>
-                  <strong>معرف الطرف:</strong>{' '}
-                  <span className="font-mono text-[10px]">{printableVoucher.partyId || 'عام'}</span>
-                </div>
-                <div>
-                  <strong>الصندوق:</strong>{' '}
-                  {cashBoxes.find((b) => b.id === printableVoucher.cashBoxId)?.nameAr || '-'}
-                </div>
-                <div>
-                  <strong>طريقة الدفع:</strong>{' '}
-                  {VOUCHER_PAYMENT_METHOD_LABELS[printableVoucher.paymentMethod || 'CASH']}
-                  {printableVoucher.externalRef ? ` (${printableVoucher.externalRef})` : ''}
-                </div>
-                <div>
-                  <strong>الفرع:</strong>{' '}
-                  {branches.find((br) => br.id === printableVoucher.branchId)?.nameAr ||
-                    printableVoucher.branchId ||
-                    '-'}
-                </div>
-                <div>
-                  <strong>الموظف:</strong> {printableVoucher.createdByName || '-'}
-                </div>
-                <div>
-                  <strong>القيد المحاسبي:</strong>{' '}
-                  <span className="font-mono text-[10px]">
-                    {printableVoucher.journalEntryId || 'غير مرحل بعد'}
-                  </span>
-                </div>
-                <div>
-                  <strong>الحساب المقابل:</strong>{' '}
-                  <span className="font-mono">{printableVoucher.accountCode}</span>
-                </div>
-                <div className="col-span-2">
-                  <strong>البيان:</strong> {printableVoucher.description}
-                </div>
-              </div>
-
-              <div className="text-center bg-slate-900 text-white py-3 px-4 rounded-lg space-y-1">
-                <div className="text-base font-extrabold font-mono">
-                  المبلغ: {printableVoucher.amount.toFixed(2)} {currencySymbol}
-                </div>
-                <div className="text-[11px] text-emerald-300 font-semibold">
-                  {numberToArabicWords(printableVoucher.amount, currencyConfig.nameAr)}
-                </div>
-              </div>
-
-              {((printableVoucher.appliedToDebtAmount || 0) > 0 ||
-                (printableVoucher.advanceAmount || 0) > 0) && (
-                <div className="grid grid-cols-2 gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-[11px]">
-                  <div>
-                    <strong>المخصص لتسوية الذمم:</strong>{' '}
-                    <span className="font-mono font-bold">
-                      {Number(printableVoucher.appliedToDebtAmount || 0).toFixed(2)} {currencySymbol}
-                    </span>
-                  </div>
-                  <div>
-                    <strong>الرصيد المقدم الناتج:</strong>{' '}
-                    <span className="font-mono font-bold text-indigo-700">
-                      {Number(printableVoucher.advanceAmount || 0).toFixed(2)} {currencySymbol}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {printableAllocations.length > 0 && (
-                <div className="border border-slate-200 rounded-lg overflow-hidden">
-                  <div className="bg-slate-100 px-3 py-1.5 font-bold text-slate-700 text-[11px]">
-                    تفاصيل تخصيص الفواتير
-                  </div>
-                  <table className="w-full text-right text-[11px]">
-                    <thead className="bg-slate-50 border-b border-slate-200">
-                      <tr>
-                        <th className="py-1.5 px-2">رقم الفاتورة</th>
-                        <th className="py-1.5 px-2">التاريخ</th>
-                        <th className="py-1.5 px-2">الطريقة</th>
-                        <th className="py-1.5 px-2 text-center">المخصص</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-slate-100">
-                      {printableAllocations.map((alloc) => (
-                        <tr key={alloc.id}>
-                          <td className="py-1.5 px-2 font-mono font-bold">
-                            {alloc.invoiceNumber || alloc.invoiceId}
-                          </td>
-                          <td className="py-1.5 px-2 font-mono">{alloc.invoiceDate || '-'}</td>
-                          <td className="py-1.5 px-2">
-                            {alloc.allocationMethod === 'MANUAL' ? 'يدوي' : 'FIFO'}
-                            {alloc.status === 'REVERSED' ? ' (معكوس)' : ''}
-                          </td>
-                          <td className="py-1.5 px-2 text-center font-mono font-bold">
-                            {alloc.allocatedAmount.toFixed(2)} {currencySymbol}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
+        <DocumentPrintShell
+          title={`${printableVoucher.type === 'RECEIPT' ? 'سند قبض مالي' : 'سند صرف مالي'} (${
+            printableVoucher.voucherNumber || 'مسودة'
+          })`}
+          subtitle={`${printableVoucher.partyName} — ${printableVoucher.date}`}
+          pdfTitle={`VOUCHER_${printableVoucher.voucherNumber || printableVoucher.id.slice(0, 8)}`}
+          defaultSize="A4"
+          allowThermal={true}
+          onClose={() => setPrintableVoucher(null)}
+          onNotify={() => handleNotifyVoucher(printableVoucher)}
+          notifyLabel="إشعار المستفيد"
+        >
+          {(paperSize) => (
+            <CashVoucherDocument
+              voucher={printableVoucher}
+              meta={resolveMeta({
+                branchId: printableVoucher.branchId,
+                issuerName: printableVoucher.createdByName || actor?.fullName,
+              })}
+              paperSize={paperSize}
+              cashBoxName={cashBoxes.find((b) => b.id === printableVoucher.cashBoxId)?.nameAr}
+              allocations={printableAllocations}
+            />
+          )}
+        </DocumentPrintShell>
       )}
 
       {/* Customer Notification Modal for WhatsApp, Print & Native Share */}
@@ -1631,6 +1507,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
         documentType={notificationData.documentType}
         documentNumber={notificationData.documentNumber}
         amount={notificationData.amount}
+        date={notificationData.date}
         notes={notificationData.notes}
       />
     </div>

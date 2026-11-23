@@ -34,6 +34,7 @@ import { getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId } from '../../types/erp';
+import { formatLocalDate } from '../../utils/localDate';
 
 interface InventoryManagerProps {
   selectedActivity: ActivityId | 'all';
@@ -211,7 +212,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     const sell = Number(formSellPrice) || 0;
     const minAlert = Number(formMinAlert) || 0;
     const initialQty = Math.max(0, Number(formInitialQty) || 0);
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = formatLocalDate();
 
     // الفحص الصارم لبيانات تشغيلات وصلاحية الأدوية بالصيدلية
     if (activeTab === 'pharmacy' && !editingProduct) {
@@ -892,7 +893,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                       <input
                         type="date"
                         required={activeTab === 'pharmacy'}
-                        min={activeTab === 'pharmacy' ? new Date().toISOString().split('T')[0] : undefined}
+                        min={activeTab === 'pharmacy' ? formatLocalDate() : undefined}
                         value={formExpiryDate}
                         onChange={(e) => setFormExpiryDate(e.target.value)}
                         className={`w-full px-3 py-1.5 border rounded bg-white font-mono text-slate-900 focus:outline-none focus:ring-1 ${

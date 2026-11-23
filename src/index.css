@@ -30,30 +30,91 @@
   background: #475569;
 }
 
-/* Print Styles for Reports, Invoices, Vouchers and Thermal Receipts */
+/* TOOFAN SOFT - Enterprise Document Design System Print Architecture */
 @media print {
   @page {
-    margin: 10mm;
-    size: auto;
-  }
-  
-  html, body {
-    direction: rtl !important;
-    background: #ffffff !important;
-    color: #000000 !important;
-    font-size: 12pt;
-    margin: 0 !important;
-    padding: 0 !important;
+    size: A4 portrait;
+    margin: 10mm 11mm 12mm 11mm;
   }
 
-  /* Hide everything outside printable container when printing */
-  .no-print,
-  nav,
-  aside,
-  header,
-  footer,
-  button {
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+    transition: none !important;
+    animation: none !important;
+  }
+
+  html,
+  body,
+  #root {
+    direction: rtl !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    display: block !important;
+  }
+
+  /* Release viewport lock on the application shell so multi-page documents paginate cleanly */
+  .app-shell-root,
+  .app-shell-content,
+  .app-shell-main {
+    display: block !important;
+    width: 100% !important;
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+  }
+
+  /* Hide interactive shell chrome and controls without breaking semantic <header>/<footer> inside documents */
+  .app-chrome-only,
+  .no-print {
     display: none !important;
+  }
+
+  /* When a portal document modal is open, hide the background app root completely */
+  body.has-doc-print-modal #root {
+    display: none !important;
+  }
+
+  /* If multiple portal layers exist, only print the topmost active document */
+  #doc-print-portal > .doc-modal-layer:not(:last-child) {
+    display: none !important;
+  }
+
+  .doc-modal-layer {
+    position: static !important;
+    inset: auto !important;
+    display: block !important;
+    background: #ffffff !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: visible !important;
+    width: 100% !important;
+    height: auto !important;
+  }
+
+  .doc-modal-card {
+    position: static !important;
+    display: block !important;
+    width: 100% !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    overflow: visible !important;
+    box-shadow: none !important;
+    border: none !important;
+    border-radius: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
   }
 
   .printable-area {
@@ -64,29 +125,54 @@
     padding: 0 !important;
     box-shadow: none !important;
     border: none !important;
+    border-radius: 0 !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
   }
 
-  /* 80mm Thermal Receipt Print Format */
+  /* 80mm Thermal Roll Print Mode */
+  .doc-sheet-80mm,
   .thermal-80mm {
-    width: 78mm !important;
-    max-width: 78mm !important;
+    width: 75mm !important;
+    max-width: 75mm !important;
     margin: 0 auto !important;
-    font-size: 10pt !important;
-    line-height: 1.3 !important;
+    padding: 1mm 0 !important;
+    font-size: 9.5pt !important;
+    line-height: 1.35 !important;
   }
 
-  /* Prevent page breaks inside cards, tables, signatures */
-  table, tr, td, th, .break-inside-avoid {
+  .doc-sheet-a4 {
+    width: 100% !important;
+    max-width: 100% !important;
+    font-size: 10.5pt !important;
+    line-height: 1.45 !important;
+  }
+
+  /* Multi-page table pagination: repeat thead, never block multi-page table breaks */
+  table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+    page-break-inside: auto !important;
+    break-inside: auto !important;
+  }
+
+  thead {
+    display: table-header-group !important;
+  }
+
+  tfoot {
+    display: table-row-group !important;
+  }
+
+  tr,
+  .doc-break-inside-avoid,
+  .break-inside-avoid {
     break-inside: avoid !important;
     page-break-inside: avoid !important;
   }
 
-  /* Ensure borders and table headers print clearly */
-  table {
-    border-collapse: collapse !important;
-    width: 100% !important;
-  }
-  th, td {
+  th,
+  td {
     border-color: #cbd5e1 !important;
   }
 }

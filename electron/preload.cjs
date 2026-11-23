@@ -104,9 +104,10 @@ const desktopBridge = Object.freeze({
   resolveConflict: (input) => ipcRenderer.invoke('erp:sync:resolve-conflict', input),
   applyRemoteSyncEntity: (input) => ipcRenderer.invoke('erp:sync:apply-remote', input),
 
-  // --- Diagnostics ---
+  // --- Diagnostics & Print ---
   getDiagnosticLog: (input) => ipcRenderer.invoke('erp:diagnostics:get-log', input),
   exportDiagnosticLogDialog: (input) => ipcRenderer.invoke('erp:diagnostics:export-dialog', input),
+  exportDocumentPdf: (input) => ipcRenderer.invoke('erp:print:export-pdf', input),
 
   onDataChanged: (callback) => {
     if (typeof callback !== 'function') return () => {};

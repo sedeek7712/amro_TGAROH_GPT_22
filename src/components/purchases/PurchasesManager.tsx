@@ -18,6 +18,7 @@ import {
   AlertCircle,
   Building2,
   RotateCcw,
+  Printer,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { desktopSession } from '../../services/desktopSession';
@@ -27,6 +28,8 @@ import { hasPermission, getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveInvoices, useLiveParties, useLiveCashBoxes, useLiveProducts } from '../../hooks/useLiveDexie';
 import { Invoice, InvoiceItem, ActivityId, PaymentMethod } from '../../types/erp';
+import { ReceiptModal } from '../common/ReceiptModal';
+import { formatLocalDate } from '../../utils/localDate';
 
 interface PurchasesManagerProps {
   onRefresh: () => void;
@@ -60,8 +63,9 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
   const [supplierName, setSupplierName] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH');
   const [cashBoxId, setCashBoxId] = useState('');
-  const [invoiceDate, setInvoiceDate] = useState(new Date().toISOString().split('T')[0]);
+  const [invoiceDate, setInvoiceDate] = useState(() => formatLocalDate());
   const [dueDate, setDueDate] = useState('');
+  const [printableInvoice, setPrintableInvoice] = useState<Invoice | null>(null);
   const [paidAmountInput, setPaidAmountInput] = useState('');
   const [applyAdvanceInput, setApplyAdvanceInput] = useState('');
   const [items, setItems] = useState<
@@ -139,7 +143,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
     const qty = Number(itemQty) || 1;
     const cost = Number(itemCost) || product.purchasePrice;
-    const todayStr = new Date().toISOString().split('T')[0];
+    const todayStr = formatLocalDate();
 
     // الفحص الصارم للأدوية بالصيدلية
     if (activityId === 'pharmacy') {
@@ -214,7 +218,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
     // تدقيق إضافي صارم لكافة بنود الأدوية بالصيدلية
     if (activityId === 'pharmacy') {
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = formatLocalDate();
       for (const item of items) {
         if (!item.batchNumber || !item.batchNumber.trim()) {
           setFormError(`الدواء (${item.productName}) يفتقر إلى رقم تشغيلة إلزامي.`);
@@ -286,7 +290,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
     setIsSubmitting(true);
     try {
       // 3. التنفيذ الذري المركب عبر مزود البيانات الموحد (تحديث المخزون والتشغيلات والقيد المزدوج ومنع التكرار)
-      await dataService.createPurchaseInvoiceAtomic({
+      const created = await dataService.createPurchaseInvoiceAtomic({
         invoice: newInvoice,
         itemsWithBatches: items.map((item) => ({
           productId: item.productId,
@@ -300,6 +304,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
       });
 
       setIsAddModalOpen(false);
+      setPrintableInvoice(created.invoice);
       setItems([]);
       setSupplierId('');
       setSupplierName('');
@@ -418,7 +423,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
     setIsSubmitting(true);
     try {
-      await dataService.createPurchaseReturnAtomic({
+      const createdReturn = await dataService.createPurchaseReturnAtomic({
         originalInvoiceId: returnSourceInvoice.id,
         items: itemsPayload.map(({ productId, quantity, batchNumber }) => ({
           productId,
@@ -434,6 +439,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
         clientRequestId: returnRequestId,
       });
       setReturnSourceInvoice(null);
+      setPrintableInvoice(createdReturn.invoice);
       setReturnQuantities({});
       setReturnReason('');
       setReturnRequestId(storage.generateUUID());
@@ -561,18 +567,26 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                         {openRemaining.toFixed(2)} {currencySymbol}
                       </td>
                       <td className="py-3 px-4 text-center">
-                        {!isReturn && inv.status !== 'REVERSED' && canReturnPurchase ? (
+                        <div className="flex items-center justify-center gap-1.5 flex-wrap">
                           <button
                             type="button"
-                            onClick={() => openPurchaseReturnModal(inv)}
-                            className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded font-bold text-[11px] inline-flex items-center gap-1 transition-colors"
+                            onClick={() => setPrintableInvoice(inv)}
+                            className="p-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded transition-colors"
+                            title="طباعة وتصدير PDF"
                           >
-                            <RotateCcw className="w-3 h-3" />
-                            <span>مرتجع مشتريات</span>
+                            <Printer className="w-3.5 h-3.5" />
                           </button>
-                        ) : (
-                          <span className="text-slate-400 text-[11px]">-</span>
-                        )}
+                          {!isReturn && inv.status !== 'REVERSED' && canReturnPurchase && (
+                            <button
+                              type="button"
+                              onClick={() => openPurchaseReturnModal(inv)}
+                              className="px-2.5 py-1 bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 rounded font-bold text-[11px] inline-flex items-center gap-1 transition-colors"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>مرتجع مشتريات</span>
+                            </button>
+                          )}
+                        </div>
                       </td>
                     </tr>
                   );
@@ -744,7 +758,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                         <input
                           type="date"
                           required
-                          min={new Date().toISOString().split('T')[0]}
+                          min={formatLocalDate()}
                           value={itemExpiry}
                           onChange={(e) => setItemExpiry(e.target.value)}
                           className="w-full px-3 py-1.5 border border-emerald-400 rounded bg-white font-mono text-slate-900 text-xs focus:ring-1 focus:ring-emerald-500 focus:outline-none"
@@ -1145,6 +1159,12 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
           </div>
         </div>
       )}
+
+      <ReceiptModal
+        invoice={printableInvoice}
+        defaultSize="A4"
+        onClose={() => setPrintableInvoice(null)}
+      />
     </div>
   );
 };

@@ -289,28 +289,54 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
         ))}
       </div>
 
-      {/* معاينة رأس الفاتورة */}
+      {/* معاينة رأس المستند الرسمي */}
       <div className="bg-slate-50 rounded-2xl border border-slate-200 p-5">
-        <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">معاينة رأس الفاتورة</h2>
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-sm">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <div className="font-bold text-slate-900 text-base">{profile.nameAr || 'اسم الشركة'}</div>
-              {profile.nameEn && <div className="text-xs text-slate-500">{profile.nameEn}</div>}
-              {profile.address && <div className="text-xs text-slate-500 mt-1">📍 {profile.address}</div>}
-              {profile.phone && <div className="text-xs text-slate-500">📞 {profile.phone}</div>}
-              {profile.taxNumber && <div className="text-xs text-slate-500">الرقم الضريبي: {profile.taxNumber}</div>}
-            </div>
-            {logoPreview ? (
-              <img src={logoPreview} alt="logo" className="w-16 h-16 object-contain rounded-lg border border-slate-100 shrink-0" />
-            ) : (
-              <div className="w-16 h-16 rounded-lg bg-emerald-100 flex items-center justify-center shrink-0">
-                <Building2 className="w-8 h-8 text-emerald-600" />
+        <h2 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-4">
+          معاينة ترويسة المستندات الرسمية
+        </h2>
+        <div className="bg-white rounded-xl border border-slate-200 p-5 shadow-sm">
+          <div className="flex items-start justify-between gap-4 border-b-2 border-slate-900 pb-4">
+            <div className="flex items-start gap-3.5">
+              {logoPreview && (
+                <img
+                  src={logoPreview}
+                  alt={profile.nameAr || 'شعار المنشأة'}
+                  className="w-16 h-16 object-contain rounded-lg border border-slate-200 p-1 shrink-0"
+                />
+              )}
+              <div className="space-y-1">
+                <div className="font-black text-slate-900 text-base">
+                  {profile.nameAr || 'المؤسسة التجارية'}
+                </div>
+                {profile.nameEn && (
+                  <div className="text-[11px] font-bold text-slate-500">{profile.nameEn}</div>
+                )}
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] text-slate-600">
+                  {profile.phone && <span className="font-mono">هاتف: {profile.phone}</span>}
+                  {profile.taxNumber && (
+                    <span className="font-mono">الرقم الضريبي: {profile.taxNumber}</span>
+                  )}
+                </div>
+                {(profile.address || profile.email || profile.website) && (
+                  <div className="text-[10px] text-slate-500">
+                    {[profile.address, profile.email, profile.website].filter(Boolean).join(' | ')}
+                  </div>
+                )}
               </div>
-            )}
+            </div>
+            <div className="px-3 py-1 bg-slate-900 text-white rounded text-[11px] font-extrabold shrink-0">
+              نموذج الترويسة المعتمدة
+            </div>
           </div>
           {profile.headerNote && (
-            <div className="mt-3 pt-3 border-t border-slate-100 text-xs text-slate-600 italic">{profile.headerNote}</div>
+            <div className="mt-3 text-xs text-slate-600 font-semibold text-center">
+              {profile.headerNote}
+            </div>
+          )}
+          {profile.footerNote && (
+            <div className="mt-3 pt-2 border-t border-dashed border-slate-200 text-[11px] text-slate-500 text-center">
+              {profile.footerNote}
+            </div>
           )}
         </div>
       </div>

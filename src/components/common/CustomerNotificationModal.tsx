@@ -1,14 +1,15 @@
 /**
  * نظام الإدارة التجارية والمحاسبية المتكامل
- * نافذة إرسال ومشاركة إشعارات السندات والفواتير للعملاء
+ * نافذة إرسال ومشاركة إشعارات السندات والفواتير للعملاء والموردين والمودعين
  * تدعم:
  * 1. الإرسال المباشر عبر واتساب (WhatsApp Web / App)
  * 2. نسخ نص السند للحافظة بصياغة عربية مؤسسية منسقة
  * 3. المشاركة السريعة عبر تطبيقات الهاتف (Web Share API)
- * 4. الطباعة والحفظ كملف PDF
+ * 4. الطباعة المباشرة لبطاقة الإشعار وتصديرها PDF
  */
 
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
   MessageSquare,
   Share2,
@@ -19,16 +20,13 @@ import {
   Phone,
   User,
   FileText,
-  DollarSign,
-  Calendar,
   Send,
-  Building2,
-  Download,
+  FileDown,
 } from 'lucide-react';
-import { storage } from '../../services/storageService';
-import { desktopSession } from '../../services/desktopSession';
-import { useLiveBranches } from '../../hooks/useLiveDexie';
-import { getActiveCurrencyConfig } from '../../config/currency';
+import { useDocumentContext } from '../../hooks/useDocumentContext';
+import { formatLocalDate } from '../../utils/localDate';
+import { exportDocumentPdf, triggerNativePrint } from '../../utils/printDocument';
+import { DocumentFooter, DocumentHeader, DocumentMetaGrid } from '../documents/DocumentPrimitives';
 
 export interface CustomerNotificationModalProps {
   isOpen: boolean;
@@ -51,6 +49,19 @@ export interface CustomerNotificationModalProps {
   itemsSummary?: string;
 }
 
+const PORTAL_ROOT_ID = 'doc-print-portal';
+
+function ensurePortalRoot(): HTMLElement | null {
+  if (typeof document === 'undefined') return null;
+  let root = document.getElementById(PORTAL_ROOT_ID);
+  if (!root) {
+    root = document.createElement('div');
+    root.id = PORTAL_ROOT_ID;
+    document.body.appendChild(root);
+  }
+  return root;
+}
+
 export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps> = ({
   isOpen,
   onClose,
@@ -69,22 +80,16 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   const [customMessage, setCustomMessage] = useState('');
   const [copied, setCopied] = useState(false);
   const [canShare, setCanShare] = useState(false);
+  const [isExporting, setIsExporting] = useState(false);
 
-  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
-  const liveBranches = useLiveBranches();
-  const activeBranchId = isDesktop ? desktopSession.getActiveBranchId() : storage.getActiveBranchId();
-  const activeBranch =
-    liveBranches.find((b) => b.id === activeBranchId) ||
-    liveBranches[0] ||
-    (isDesktop ? desktopSession.getActiveBranch() : storage.getBranches().find((b) => b.id === activeBranchId));
-  const companyName =
-    (isDesktop ? desktopSession.getCompanyProfile()?.nameAr : storage.getCompanyProfile().nameAr) ||
-    'نظام الإدارة التجارية والمحاسبية المتكامل';
-  const branchName = activeBranch ? activeBranch.nameAr : 'الفرع الرئيسي';
-  const currencySymbol = getActiveCurrencyConfig().symbol;
+  const { resolveMeta } = useDocumentContext();
+  const docMeta = resolveMeta();
+  const companyName = docMeta.companyNameAr;
+  const branchName = docMeta.branchName;
+  const currencySymbol = docMeta.currency.symbol;
 
   const docTypeLabels: Record<CustomerNotificationModalProps['documentType'], string> = {
-    INVOICE: 'فاتورة مبيعات ضريبية',
+    INVOICE: 'فاتورة / مستند تجاري',
     RECEIPT_VOUCHER: 'سند قبض نقدية رسمي',
     PAYMENT_VOUCHER: 'سند صرف نقدية',
     AMANAT_RECEIPT: 'سند إيداع أمانة رسمي',
@@ -93,41 +98,43 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   };
 
   const generateDefaultMessage = (): string => {
-    const formattedDate = date || new Date().toISOString().split('T')[0];
+    const formattedDate = date || formatLocalDate();
     const typeLabel = docTypeLabels[documentType];
 
-    let lines: string[] = [
+    const lines: string[] = [
       `السلام عليكم ورحمة الله وبركاته،`,
-      `عزيزنا العميل: *${recipientName.trim()}* المحترم،`,
+      `عزيزنا: *${recipientName.trim()}* المحترم،`,
       ``,
       `نحيطكم علماً بصدور *${typeLabel}* برقم: *${documentNumber}*`,
-      `📅 التاريخ: ${formattedDate}`,
-      `🏢 المنشأة: ${companyName} - ${branchName}`,
+      `التاريخ: ${formattedDate}`,
+      `المنشأة: ${companyName} - ${branchName}`,
     ];
 
     if (activityName) {
-      lines.push(`🏷️ النشاط / القسم: ${activityName}`);
+      lines.push(`النشاط / القسم: ${activityName}`);
     }
 
     if (amount !== undefined && amount !== null) {
-      lines.push(`💰 المبلغ: *${amount.toFixed(2)} ${currencySymbol}*`);
+      lines.push(`المبلغ: *${amount.toFixed(2)} ${currencySymbol}*`);
     }
 
     if (itemsSummary) {
-      lines.push(`📦 البيان: ${itemsSummary}`);
+      lines.push(`البيان: ${itemsSummary}`);
     }
 
     if (balanceRemaining !== undefined && balanceRemaining !== null) {
-      lines.push(`📊 الرصيد المتبقي بذمتكم: *${balanceRemaining.toFixed(2)} ${currencySymbol}*`);
+      lines.push(`الرصيد المتبقي: *${balanceRemaining.toFixed(2)} ${currencySymbol}*`);
     }
 
     if (notes && notes.trim()) {
-      lines.push(`📝 ملاحظات: ${notes.trim()}`);
+      lines.push(`ملاحظات: ${notes.trim()}`);
     }
 
     lines.push(``);
     lines.push(`نشكركم على ثقتكم وحسن تعاملكم معنا.`);
-    lines.push(`لأي استفسار أو مراجعة، يسعدنا تواصلكم على هاتف الفرع.`);
+    if (docMeta.phone || docMeta.branchPhone) {
+      lines.push(`للتواصل: ${docMeta.phone || docMeta.branchPhone}`);
+    }
 
     return lines.join('\n');
   };
@@ -138,21 +145,39 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
       setCustomMessage(generateDefaultMessage());
       setCopied(false);
       setCanShare(typeof navigator !== 'undefined' && !!navigator.share);
+      document.body.classList.add('has-doc-print-modal');
+
+      const onKeyDown = (e: KeyboardEvent) => {
+        if (e.key === 'Escape') onClose();
+      };
+      window.addEventListener('keydown', onKeyDown);
+
+      return () => {
+        window.removeEventListener('keydown', onKeyDown);
+        const portal = document.getElementById(PORTAL_ROOT_ID);
+        // Only remove body lock if no other portal modal remains mounted after unmount tick
+        requestAnimationFrame(() => {
+          if (!portal || portal.childElementCount === 0) {
+            document.body.classList.remove('has-doc-print-modal');
+          }
+        });
+      };
     }
-  }, [isOpen, recipientName, recipientPhone, documentNumber, amount, date]);
+  }, [isOpen, recipientName, recipientPhone, documentType, documentNumber, amount, date, notes]);
 
   if (!isOpen) return null;
+
+  const portalRoot = ensurePortalRoot();
+  if (!portalRoot) return null;
 
   const handleCopy = async () => {
     try {
       await navigator.clipboard.writeText(customMessage);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
     } catch {
-      // Fallback
-      setCopied(true);
-      setTimeout(() => setCopied(false), 3000);
+      // Fallback ignored
     }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 3000);
   };
 
   const buildWhatsAppUrl = (): string => {
@@ -183,41 +208,80 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   };
 
   const handlePrint = () => {
-    window.print();
+    triggerNativePrint('A4');
   };
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 overflow-y-auto no-print">
-      <div className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl overflow-hidden border border-slate-200">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 py-4 bg-slate-900 text-white">
+  const handleExportPdf = async () => {
+    if (isExporting) return;
+    setIsExporting(true);
+    try {
+      await exportDocumentPdf({
+        title: `NOTIFY_${documentNumber}`,
+        pageSize: 'A4',
+      });
+    } finally {
+      setIsExporting(false);
+    }
+  };
+
+  const modalContent = (
+    <div
+      className="doc-modal-layer fixed inset-0 z-[60] flex items-start justify-center bg-slate-950/70 backdrop-blur-[1px] p-3 sm:p-5 overflow-y-auto"
+      dir="rtl"
+      role="dialog"
+      aria-modal="true"
+      aria-label="إرسال إشعار المستند"
+    >
+      <div className="doc-modal-card relative w-full max-w-xl bg-white rounded-2xl shadow-2xl overflow-hidden border border-slate-200 my-4">
+        {/* Interactive Modal Header (Hidden on print) */}
+        <div className="no-print flex items-center justify-between px-5 py-3.5 bg-slate-900 text-white">
           <div className="flex items-center gap-2.5">
             <div className="p-2 bg-emerald-500/20 text-emerald-400 rounded-lg">
-              <MessageSquare className="w-5 h-5" />
+              <MessageSquare className="w-4 h-4" />
             </div>
             <div>
-              <h3 className="font-bold text-sm">إرسال إشعار السند للعميل</h3>
+              <h3 className="font-bold text-sm">إرسال وطباعة إشعار المستند</h3>
               <p className="text-[11px] text-slate-400">
                 {docTypeLabels[documentType]} رقم ({documentNumber})
               </p>
             </div>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
-          >
-            <X className="w-5 h-5" />
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={handleExportPdf}
+              disabled={isExporting}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-[11px] font-bold rounded-lg transition-colors"
+            >
+              <FileDown className="w-3.5 h-3.5" />
+              <span>PDF</span>
+            </button>
+            <button
+              type="button"
+              onClick={handlePrint}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-white hover:bg-slate-100 text-slate-900 text-[11px] font-extrabold rounded-lg transition-colors"
+            >
+              <Printer className="w-3.5 h-3.5" />
+              <span>طباعة</span>
+            </button>
+            <button
+              type="button"
+              onClick={onClose}
+              className="p-1.5 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800 transition-colors"
+              aria-label="إغلاق"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
 
-        {/* Content Body */}
-        <div className="p-6 space-y-4 text-xs">
-          {/* Recipient Meta Inputs */}
+        {/* Interactive Form Controls (Hidden on print) */}
+        <div className="no-print p-5 space-y-4 text-xs border-b border-slate-200">
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <div>
               <label className="block font-semibold text-slate-700 mb-1 flex items-center gap-1">
                 <User className="w-3.5 h-3.5 text-slate-500" />
-                <span>اسم العميل / المستلم</span>
+                <span>اسم المستلم</span>
               </label>
               <input
                 type="text"
@@ -236,30 +300,34 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
                 type="tel"
                 value={phone}
                 onChange={(e) => setPhone(e.target.value)}
-                placeholder="05XXXXXXXX / 9665XXXXXXX"
+                placeholder="77XXXXXXX / 05XXXXXXXX"
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
               />
             </div>
           </div>
 
-          {/* Quick Metrics Badge */}
           <div className="flex items-center justify-between p-3 bg-slate-50 rounded-xl border border-slate-200 text-xs">
             <div className="flex items-center gap-1.5 text-slate-600">
-              <FileText className="w-4 h-4 text-blue-600" />
-              <span>المستند: <strong className="text-slate-900 font-mono">{documentNumber}</strong></span>
+              <FileText className="w-4 h-4 text-slate-700" />
+              <span>
+                المستند: <strong className="text-slate-900 font-mono">{documentNumber}</strong>
+              </span>
             </div>
             {amount !== undefined && (
               <div className="flex items-center gap-1 text-emerald-800 font-bold">
                 <span>المبلغ:</span>
-                <span className="font-mono text-sm tabular-nums">{amount.toFixed(2)} {currencySymbol}</span>
+                <span className="font-mono text-sm tabular-nums">
+                  {amount.toFixed(2)} {currencySymbol}
+                </span>
               </div>
             )}
           </div>
 
-          {/* Message Textarea */}
           <div>
             <div className="flex items-center justify-between mb-1">
-              <label className="font-semibold text-slate-700">نص الرسالة والإشعار الرسمي (قابل للتعديل قبل الإرسال):</label>
+              <label className="font-semibold text-slate-700">
+                نص الإشعار الرسمي (قابل للتعديل):
+              </label>
               <button
                 type="button"
                 onClick={() => setCustomMessage(generateDefaultMessage())}
@@ -269,16 +337,14 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
               </button>
             </div>
             <textarea
-              rows={8}
+              rows={7}
               value={customMessage}
               onChange={(e) => setCustomMessage(e.target.value)}
               className="w-full p-3 border border-slate-200 rounded-xl text-slate-800 font-sans leading-relaxed focus:outline-none focus:ring-2 focus:ring-emerald-500 text-xs"
             />
           </div>
 
-          {/* Action Buttons */}
           <div className="space-y-2 pt-2 border-t border-slate-100">
-            {/* Primary Action: WhatsApp */}
             <a
               href={buildWhatsAppUrl()}
               target="_blank"
@@ -286,10 +352,9 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
               className="w-full py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition-all shadow-sm flex items-center justify-center gap-2 text-sm"
             >
               <Send className="w-4 h-4" />
-              <span>إرسال إشعار عبر واتساب مباشرة (WhatsApp)</span>
+              <span>إرسال إشعار عبر واتساب مباشرة</span>
             </a>
 
-            {/* Secondary Actions: Copy & Native Share & Print */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
               <button
                 type="button"
@@ -297,7 +362,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
                 className="py-2 px-3 border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
               >
                 {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
-                <span>{copied ? 'تم النسخ بنجاح!' : 'نسخ نص السند'}</span>
+                <span>{copied ? 'تم النسخ!' : 'نسخ النص'}</span>
               </button>
 
               {canShare ? (
@@ -307,7 +372,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
                   className="py-2 px-3 border border-slate-300 hover:bg-slate-50 text-slate-700 font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
                 >
                   <Share2 className="w-4 h-4 text-blue-600" />
-                  <span>مشاركة عبر الجهاز</span>
+                  <span>مشاركة</span>
                 </button>
               ) : (
                 <button
@@ -330,7 +395,48 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
             </div>
           </div>
         </div>
+
+        {/* Dedicated Printable Official Slip (Visible in print, cleanly hidden inside screen modal via hidden print:block) */}
+        <div className="hidden print:block printable-area doc-sheet-a4 p-6 bg-white text-slate-900">
+          <DocumentHeader
+            meta={docMeta}
+            paperSize="A4"
+            documentTitle="إشعار معاملة مالية رسمي"
+            documentSubtitle={docTypeLabels[documentType]}
+            documentNumber={documentNumber}
+            documentDate={date || formatLocalDate()}
+          />
+          <DocumentMetaGrid
+            paperSize="A4"
+            columns={3}
+            fields={[
+              { label: 'الطرف / المستلم', value: recipientName },
+              { label: 'رقم الهاتف', value: phone || '-', mono: true },
+              {
+                label: 'المبلغ',
+                value:
+                  amount !== undefined ? `${amount.toFixed(2)} ${currencySymbol}` : undefined,
+                mono: true,
+              },
+              {
+                label: 'الرصيد المتبقي',
+                value:
+                  balanceRemaining !== undefined
+                    ? `${balanceRemaining.toFixed(2)} ${currencySymbol}`
+                    : undefined,
+                mono: true,
+              },
+              { label: 'القسم / النشاط', value: activityName },
+            ]}
+          />
+          <div className="border border-slate-300 rounded-lg p-4 bg-slate-50 text-xs leading-loose whitespace-pre-wrap text-slate-900 mb-4">
+            {customMessage.replace(/\*/g, '')}
+          </div>
+          <DocumentFooter meta={docMeta} paperSize="A4" referenceText={`NOTIFY: ${documentNumber}`} />
+        </div>
       </div>
     </div>
   );
+
+  return createPortal(modalContent, portalRoot);
 };

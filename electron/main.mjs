@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu } from 'electron';
-import { existsSync, mkdirSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -890,6 +890,38 @@ if (!hasSingleInstance) {
         entryCount: exported.entryCount,
       });
       return { canceled: false, ...exported };
+    });
+
+    handleTrustedIpc('erp:print:export-pdf', async (_event, input) => {
+      const actor = desktopBackend.requireActor(input?.token);
+      const rawTitle = String(input?.title || 'document').trim() || 'document';
+      const safeTitle = rawTitle.replace(/[\\/:*?"<>|]+/g, '-').slice(0, 80);
+      const pageSizeMode = input?.pageSize === '80mm' ? '80mm' : 'A4';
+      const res = await dialog.showSaveDialog(mainWindow, {
+        title: 'تصدير المستند بصيغة PDF',
+        defaultPath: `${safeTitle}.pdf`,
+        filters: [{ name: 'PDF Documents', extensions: ['pdf'] }],
+      });
+      if (res.canceled || !res.filePath) {
+        return { canceled: true };
+      }
+
+      const pdfBuffer = await mainWindow.webContents.printToPDF({
+        printBackground: true,
+        preferCSSPageSize: true,
+        pageSize: pageSizeMode === '80mm' ? { width: 3.15, height: 11.69 } : 'A4',
+      });
+      writeFileSync(res.filePath, pdfBuffer);
+      diagnosticLogger.log('INFO', 'print', 'Document exported as PDF', {
+        filename: path.basename(res.filePath),
+        pageSize: pageSizeMode,
+        exportedBy: actor.username,
+      });
+      return {
+        canceled: false,
+        path: res.filePath,
+        filename: path.basename(res.filePath),
+      };
     });
   }
 

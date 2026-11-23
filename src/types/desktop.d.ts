@@ -451,6 +451,15 @@ declare global {
         filename?: string;
         entryCount?: number;
       }>;
+      exportDocumentPdf(input: {
+        token: string;
+        title?: string;
+        pageSize?: 'A4' | '80mm';
+      }): Promise<{
+        canceled: boolean;
+        path?: string;
+        filename?: string;
+      }>;
 
       onDataChanged(callback: (domains: string[]) => void): () => void;
       onAuthInvalidated(callback: (reason: string) => void): () => void;

@@ -32,6 +32,7 @@ import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes, useLiveInvoices } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
+import { formatLocalDate } from '../../utils/localDate';
 
 interface POSProps {
   selectedActivity: ActivityId | 'all';
@@ -315,7 +316,7 @@ export const PointOfSale: React.FC<POSProps> = ({
       branchId: activeBranchId,
       partyId: selectedCustomerId || undefined,
       partyName: finalPartyName,
-      date: new Date().toISOString().split('T')[0],
+      date: formatLocalDate(),
       dueDate: paymentMethod === 'CREDIT' && dueDate ? dueDate : undefined,
       items: cart,
       subtotal,

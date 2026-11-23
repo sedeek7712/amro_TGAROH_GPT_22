@@ -45,7 +45,15 @@ const DEFAULT_BACKUP_SETTINGS = Object.freeze({
   customBackupDirectory: '',
 });
 
-const IMMUTABLE_SYNC_ENTITIES = new Set(['INVOICE', 'JOURNAL_ENTRY', 'VOUCHER', 'AMANAT']);
+const IMMUTABLE_SYNC_ENTITIES = new Set([
+  'INVOICE',
+  'JOURNAL_ENTRY',
+  'VOUCHER',
+  'AMANAT',
+  'PAYMENT_ALLOCATION',
+  'PARTY_ADVANCE',
+  'ALLOCATION_AUDIT',
+]);
 const VALID_CONFLICT_STATUSES = new Set([
   'PENDING_REVIEW',
   'RESOLVED_LOCAL',
@@ -1315,6 +1323,7 @@ export function createBackupSyncService(database, backupDirectory) {
                 storageLocation: row.storage_location ? String(row.storage_location) : undefined,
                 trackExpiry: Boolean(row.track_expiry ?? row.trackExpiry),
                 oemNumber: row.oem_number ? String(row.oem_number) : undefined,
+                isActive: row.is_active !== false && row.isActive !== false,
                 batches,
               };
               database.prepare(
@@ -1344,6 +1353,8 @@ export function createBackupSyncService(database, backupDirectory) {
             } else {
               const balUnits = parseScaledInt(row.balance ?? 0, MONEY_SCALE, 'remotePartyBalance');
               const balDec = formatScaledInt(balUnits, MONEY_SCALE);
+              const advUnits = parseScaledInt(row.advance_balance ?? row.advanceBalance ?? 0, MONEY_SCALE, 'remotePartyAdvance');
+              const advDec = formatScaledInt(advUnits, MONEY_SCALE);
               const party = {
                 id,
                 tenantId,
@@ -1353,14 +1364,15 @@ export function createBackupSyncService(database, backupDirectory) {
                 address: row.address ? String(row.address) : undefined,
                 taxNumber: row.tax_number ? String(row.tax_number) : undefined,
                 balance: unitsToNumber(balUnits, MONEY_SCALE),
+                advanceBalance: unitsToNumber(advUnits, MONEY_SCALE),
                 creditLimit: row.credit_limit ? Number(row.credit_limit) : undefined,
                 notes: row.notes ? String(row.notes) : undefined,
               };
               database.prepare(
-                `INSERT INTO parties (tenant_id,id,party_type,name_ar,phone,balance_decimal,data_json)
-                 VALUES (?,?,?,?,?,?,?)
-                 ON CONFLICT(tenant_id,id) DO UPDATE SET party_type=excluded.party_type, name_ar=excluded.name_ar, phone=excluded.phone, balance_decimal=excluded.balance_decimal, data_json=excluded.data_json`
-              ).run(tenantId, party.id, party.type, party.nameAr, party.phone, balDec, JSON.stringify(party));
+                `INSERT INTO parties (tenant_id,id,party_type,name_ar,phone,balance_decimal,advance_balance_decimal,data_json)
+                 VALUES (?,?,?,?,?,?,?,?)
+                 ON CONFLICT(tenant_id,id) DO UPDATE SET party_type=excluded.party_type, name_ar=excluded.name_ar, phone=excluded.phone, balance_decimal=excluded.balance_decimal, advance_balance_decimal=excluded.advance_balance_decimal, data_json=excluded.data_json`
+              ).run(tenantId, party.id, party.type, party.nameAr, party.phone, balDec, advDec, JSON.stringify(party));
             }
             break;
           }
@@ -1370,6 +1382,12 @@ export function createBackupSyncService(database, backupDirectory) {
             if (!id) throw new Error('معرف الفاتورة مفقود.');
             const totalUnits = parseScaledInt(row.total ?? 0, MONEY_SCALE, 'remoteInvTotal');
             const paidUnits = parseScaledInt(row.paid_amount ?? row.paidAmount ?? 0, MONEY_SCALE, 'remoteInvPaid');
+            const advAppliedUnits = parseScaledInt(
+              row.advance_applied_amount ?? row.advanceAppliedAmount ?? 0,
+              MONEY_SCALE,
+              'remoteInvAdvApplied'
+            );
+            const dueDate = row.due_date ? String(row.due_date) : row.dueDate ? String(row.dueDate) : undefined;
             const inv = {
               id,
               tenantId,
@@ -1380,12 +1398,15 @@ export function createBackupSyncService(database, backupDirectory) {
               partyId: row.party_id ? String(row.party_id) : (row.partyId ? String(row.partyId) : undefined),
               partyName: String(row.party_name || row.partyName || 'نقدي'),
               date: String(row.date || new Date().toISOString().split('T')[0]),
+              ...(dueDate ? { dueDate } : {}),
               items: Array.isArray(row.items) ? row.items : [],
               subtotal: Number(row.subtotal || 0),
               discount: Number(row.discount || 0),
               tax: Number(row.tax || 0),
               total: unitsToNumber(totalUnits, MONEY_SCALE),
               paidAmount: unitsToNumber(paidUnits, MONEY_SCALE),
+              returnedAmount: Number(row.returned_amount ?? row.returnedAmount ?? 0),
+              advanceAppliedAmount: unitsToNumber(advAppliedUnits, MONEY_SCALE),
               paymentMethod: String(row.payment_method || row.paymentMethod || 'CASH'),
               cashBoxId: String(row.cash_box_id || row.cashBoxId || 'cb-1'),
               journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : undefined,
@@ -1394,14 +1415,14 @@ export function createBackupSyncService(database, backupDirectory) {
               notes: row.notes ? String(row.notes) : undefined,
             };
             database.prepare(
-              `INSERT INTO invoices (tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,payment_method,total_decimal,paid_amount_decimal,status,data_json)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-               ON CONFLICT(tenant_id,id) DO UPDATE SET status=excluded.status, data_json=excluded.data_json`
+              `INSERT INTO invoices (tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,due_date,payment_method,total_decimal,paid_amount_decimal,advance_applied_decimal,status,data_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(tenant_id,id) DO UPDATE SET due_date=excluded.due_date, paid_amount_decimal=excluded.paid_amount_decimal, advance_applied_decimal=excluded.advance_applied_decimal, status=excluded.status, data_json=excluded.data_json`
             ).run(
               tenantId, inv.id, inv.branchId, inv.invoiceNumber, inv.type, inv.activityId,
-              inv.partyId || null, inv.date, inv.paymentMethod,
+              inv.partyId || null, inv.date, inv.dueDate || null, inv.paymentMethod,
               formatScaledInt(totalUnits, MONEY_SCALE), formatScaledInt(paidUnits, MONEY_SCALE),
-              inv.status, JSON.stringify(inv)
+              formatScaledInt(advAppliedUnits, MONEY_SCALE), inv.status, JSON.stringify(inv)
             );
             database.prepare('DELETE FROM invoice_items WHERE tenant_id = ? AND invoice_id = ?').run(tenantId, inv.id);
             const itemStmt = database.prepare(
@@ -1474,6 +1495,17 @@ export function createBackupSyncService(database, backupDirectory) {
               description: String(row.description || ''),
               costCenterId: String(row.cost_center_id || row.costCenterId || 'general'),
               journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : undefined,
+              status: String(row.status || 'POSTED'),
+              appliedToDebtAmount: Number(row.applied_to_debt_amount ?? row.appliedToDebtAmount ?? 0),
+              advanceAmount: Number(row.advance_amount ?? row.advanceAmount ?? 0),
+              manualOverride: Boolean(row.manual_override ?? row.manualOverride),
+              overrideReason: row.override_reason ? String(row.override_reason) : row.overrideReason ? String(row.overrideReason) : undefined,
+              manualAllocations: Array.isArray(row.manual_allocations)
+                ? row.manual_allocations
+                : Array.isArray(row.manualAllocations)
+                ? row.manualAllocations
+                : undefined,
+              allocations: Array.isArray(row.allocations) ? row.allocations : undefined,
             };
             database.prepare(
               `INSERT INTO vouchers (tenant_id,id,branch_id,voucher_number,voucher_type,voucher_date,amount_decimal,cash_box_id,party_id,data_json)
@@ -1482,6 +1514,108 @@ export function createBackupSyncService(database, backupDirectory) {
             ).run(
               tenantId, v.id, v.branchId, v.voucherNumber, v.type, v.date,
               formatScaledInt(amtUnits, MONEY_SCALE), v.cashBoxId, v.partyId || null, JSON.stringify(v)
+            );
+            break;
+          }
+
+          case 'PAYMENT_ALLOCATION': {
+            const id = String(row.id || '');
+            if (!id) throw new Error('معرف التخصيص مفقود.');
+            const allocUnits = parseScaledInt(row.allocated_amount ?? row.allocatedAmount ?? 0, MONEY_SCALE, 'remoteAllocAmount');
+            const alloc = {
+              id,
+              tenantId,
+              branchId: fallbackBranchId,
+              voucherId: row.voucher_id ? String(row.voucher_id) : row.voucherId ? String(row.voucherId) : undefined,
+              advanceTransactionId: row.advance_transaction_id ? String(row.advance_transaction_id) : row.advanceTransactionId ? String(row.advanceTransactionId) : undefined,
+              partyId: String(row.party_id || row.partyId || ''),
+              invoiceId: String(row.invoice_id || row.invoiceId || ''),
+              invoiceNumber: row.invoice_number ? String(row.invoice_number) : row.invoiceNumber ? String(row.invoiceNumber) : undefined,
+              invoiceDate: row.invoice_date ? String(row.invoice_date) : row.invoiceDate ? String(row.invoiceDate) : undefined,
+              allocatedAmount: unitsToNumber(allocUnits, MONEY_SCALE),
+              allocationMethod: String(row.allocation_method || row.allocationMethod || 'FIFO'),
+              status: String(row.status || 'ACTIVE'),
+              createdAt: String(row.created_at || row.createdAt || new Date().toISOString()),
+              createdBy: row.created_by ? String(row.created_by) : row.createdBy ? String(row.createdBy) : undefined,
+            };
+            database.prepare(
+              `INSERT INTO payment_allocations (tenant_id,id,branch_id,voucher_id,advance_transaction_id,party_id,invoice_id,allocated_decimal,allocation_method,status,created_at,created_by,data_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(tenant_id,id) DO UPDATE SET status=excluded.status, data_json=excluded.data_json`
+            ).run(
+              tenantId, alloc.id, alloc.branchId, alloc.voucherId || null, alloc.advanceTransactionId || null,
+              alloc.partyId, alloc.invoiceId, formatScaledInt(allocUnits, MONEY_SCALE),
+              alloc.allocationMethod, alloc.status, alloc.createdAt, alloc.createdBy || null, JSON.stringify(alloc)
+            );
+            break;
+          }
+
+          case 'PARTY_ADVANCE': {
+            const id = String(row.id || '');
+            if (!id) throw new Error('معرف السلفة مفقود.');
+            const amtUnits = parseScaledInt(row.amount ?? 0, MONEY_SCALE, 'remoteAdvAmount');
+            const afterUnits = parseScaledInt(row.balance_after ?? row.balanceAfter ?? 0, MONEY_SCALE, 'remoteAdvAfter');
+            const adv = {
+              id,
+              tenantId,
+              branchId: fallbackBranchId,
+              partyId: String(row.party_id || row.partyId || ''),
+              partyType: String(row.party_type || row.partyType || 'CUSTOMER'),
+              type: String(row.tx_type || row.type || 'OVERPAYMENT_DEPOSIT'),
+              amount: unitsToNumber(amtUnits, MONEY_SCALE),
+              balanceAfter: unitsToNumber(afterUnits, MONEY_SCALE),
+              voucherId: row.voucher_id ? String(row.voucher_id) : row.voucherId ? String(row.voucherId) : undefined,
+              invoiceId: row.invoice_id ? String(row.invoice_id) : row.invoiceId ? String(row.invoiceId) : undefined,
+              journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : row.journalEntryId ? String(row.journalEntryId) : undefined,
+              date: String(row.tx_date || row.date || new Date().toISOString().split('T')[0]),
+              description: String(row.description || ''),
+              createdBy: row.created_by ? String(row.created_by) : row.createdBy ? String(row.createdBy) : undefined,
+              createdAt: String(row.created_at || row.createdAt || new Date().toISOString()),
+            };
+            database.prepare(
+              `INSERT INTO party_advance_transactions (tenant_id,id,branch_id,party_id,party_type,tx_type,amount_decimal,balance_after_decimal,voucher_id,invoice_id,journal_entry_id,tx_date,created_at,data_json)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(tenant_id,id) DO UPDATE SET data_json=excluded.data_json`
+            ).run(
+              tenantId, adv.id, adv.branchId, adv.partyId, adv.partyType, adv.type,
+              formatScaledInt(amtUnits, MONEY_SCALE), formatScaledInt(afterUnits, MONEY_SCALE),
+              adv.voucherId || null, adv.invoiceId || null, adv.journalEntryId || null,
+              adv.date, adv.createdAt, JSON.stringify(adv)
+            );
+            break;
+          }
+
+          case 'ALLOCATION_AUDIT': {
+            const id = String(row.id || '');
+            if (!id) throw new Error('معرف تدقيق التخصيص مفقود.');
+            const audit = {
+              id,
+              tenantId,
+              branchId: fallbackBranchId,
+              voucherId: String(row.voucher_id || row.voucherId || ''),
+              partyId: String(row.party_id || row.partyId || ''),
+              userId: String(row.user_id || row.userId || ''),
+              userName: String(row.user_name || row.userName || ''),
+              reason: String(row.reason || ''),
+              previousAllocations: Array.isArray(row.previous_allocations)
+                ? row.previous_allocations
+                : Array.isArray(row.previousAllocations)
+                ? row.previousAllocations
+                : [],
+              newAllocations: Array.isArray(row.new_allocations)
+                ? row.new_allocations
+                : Array.isArray(row.newAllocations)
+                ? row.newAllocations
+                : [],
+              timestamp: String(row.audit_timestamp || row.timestamp || new Date().toISOString()),
+            };
+            database.prepare(
+              `INSERT INTO allocation_audits (tenant_id,id,branch_id,voucher_id,party_id,user_id,audit_timestamp,data_json)
+               VALUES (?,?,?,?,?,?,?,?)
+               ON CONFLICT(tenant_id,id) DO UPDATE SET data_json=excluded.data_json`
+            ).run(
+              tenantId, audit.id, audit.branchId, audit.voucherId, audit.partyId,
+              audit.userId, audit.timestamp, JSON.stringify(audit)
             );
             break;
           }

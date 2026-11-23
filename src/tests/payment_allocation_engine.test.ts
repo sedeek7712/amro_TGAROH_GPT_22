@@ -245,4 +245,93 @@ describe('Payment Allocation & Advance Engine Unit Tests', () => {
     assert.equal(numberToArabicWords(100, 'ريال'), 'فقط مائة ريال لا غير');
     assert.equal(numberToArabicWords(2500.5, 'ريال'), 'فقط ألفان وخمسمائة ريال وخمسون هللة لا غير');
   });
+
+  test('FIN-01: Manual allocation and openTotalCents deduct returnedAmount so returned portion becomes customer advance (2103)', () => {
+    const openInvoices = [
+      {
+        id: 'sale-ret-1',
+        type: 'SALE' as const,
+        date: '2026-11-01',
+        invoiceNumber: 'INV-R1',
+        total: 1000,
+        paidAmount: 200,
+        returnedAmount: 300, // Net open remaining = 500
+      },
+    ];
+    // Party balance reflects invoice (1000) - paid (200) - return AR_OFFSET (300) = 500
+    const customer = { id: 'c-ret', type: 'CUSTOMER' as const, nameAr: 'عميل مرتجعات', balance: 500, advanceBalance: 0 };
+
+    // Attempting manual allocation of 600 (> net remaining 500) must fail
+    assert.throws(
+      () =>
+        validateManualAllocations({
+          openInvoices,
+          paymentAmount: 700,
+          requestedAllocations: [{ invoiceId: 'sale-ret-1', allocatedAmount: 600 }],
+        }),
+      /يتجاوز المتبقي/
+    );
+
+    // Paying 700 against customer with net open 500 allocates 500 to debt (1103) and puts 200 into 2103 advance
+    const plan = resolveVoucherAccountingPlan({
+      voucherType: 'RECEIPT',
+      voucherMode: 'CUSTOMER_RECEIPT',
+      party: customer,
+      amount: 700,
+      openInvoices,
+      manualAllocations: [{ invoiceId: 'sale-ret-1', allocatedAmount: 500 }],
+      hasOverridePermission: true,
+      overrideReason: 'تخصيص الصافي بعد المرتجع',
+    });
+
+    assert.equal(plan.appliedToDebtAmount, 500);
+    assert.equal(plan.advanceAmount, 200);
+    assert.equal(plan.allocations.length, 1);
+    assert.equal(plan.allocations[0].remainingBefore, 500);
+    assert.equal(plan.allocations[0].allocatedAmount, 500);
+    assert.equal(plan.allocations[0].remainingAfter, 0);
+  });
+
+  test('FIN-01: Supplier openTotalCents and manual override respect returnedAmount', () => {
+    const openInvoices = [
+      {
+        id: 'pur-ret-1',
+        type: 'PURCHASE' as const,
+        date: '2026-11-01',
+        invoiceNumber: 'PUR-R1',
+        total: 1000,
+        paidAmount: 100,
+        returnedAmount: 400, // Net open = 500
+      },
+    ];
+    const supplier = { id: 's-ret', type: 'SUPPLIER' as const, nameAr: 'مورد مرتجعات', balance: -500, advanceBalance: 0 };
+
+    assert.throws(
+      () =>
+        resolveVoucherAccountingPlan({
+          voucherType: 'PAYMENT',
+          voucherMode: 'SUPPLIER_PAYMENT',
+          party: supplier,
+          amount: 600,
+          openInvoices,
+          manualAllocations: [{ invoiceId: 'pur-ret-1', allocatedAmount: 600 }],
+          hasOverridePermission: true,
+          overrideReason: 'اختبار تجاوز المرتجع للمورد',
+          hasSupplierAdvancePermission: true,
+        }),
+      /يتجاوز المتبقي/
+    );
+
+    const plan = resolveVoucherAccountingPlan({
+      voucherType: 'PAYMENT',
+      voucherMode: 'SUPPLIER_PAYMENT',
+      party: supplier,
+      amount: 650,
+      openInvoices,
+      hasSupplierAdvancePermission: true,
+    });
+    assert.equal(plan.appliedToDebtAmount, 500);
+    assert.equal(plan.advanceAmount, 150);
+  });
 });
+

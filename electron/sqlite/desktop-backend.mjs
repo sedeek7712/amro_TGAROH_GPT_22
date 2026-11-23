@@ -16,7 +16,7 @@ export function createDesktopBackend({
   }
 
   const core = createCoreService(database);
-  const inventoryParties = createInventoryPartiesService(database);
+  const inventoryParties = createInventoryPartiesService(database, core);
   const financial = createFinancialService(database, core);
   const backupSync = createBackupSyncService(database, backupDirectory);
 

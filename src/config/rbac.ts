@@ -326,6 +326,60 @@ export function filterRecordsByBranchScope<T extends { branchId?: string }>(
   return records.filter((rec) => Boolean(rec.branchId && allowed.has(rec.branchId)));
 }
 
+export function getAuthorizedActivityIds(
+  user: Pick<SystemUser, 'role' | 'allowedActivities' | 'active'> | null | undefined
+): Set<string> {
+  if (!user || !user.active) return new Set();
+  const ids = (user.allowedActivities || [])
+    .map((a) => String(a).trim())
+    .filter(Boolean);
+  return new Set(ids);
+}
+
+export function assertActivityAccess(
+  user: Pick<SystemUser, 'role' | 'allowedActivities' | 'active'> | null | undefined,
+  targetActivityId?: string,
+  actionLabel?: string
+): void {
+  if (!user || !user.active) {
+    throw new PermissionError('حظر أمني: الجلسة غير صالحة.', 'activity:access');
+  }
+  const normalizedTarget = targetActivityId?.trim();
+  if (!normalizedTarget) {
+    throw new PermissionError(
+      'حظر عزل الأنشطة: يجب تحديد معرف نشاط تجاري صالح لتنفيذ العملية.',
+      'activity:required'
+    );
+  }
+  if (user.role === 'ADMIN') {
+    return;
+  }
+  const allowed = getAuthorizedActivityIds(user);
+  if (allowed.size === 0) {
+    throw new PermissionError(
+      'حظر عزل الأنشطة: المستخدم غير مرتبط بأي نشاط تجاري مصرح به.',
+      'activity:unassigned'
+    );
+  }
+  if (!allowed.has(normalizedTarget)) {
+    throw new PermissionError(
+      `حظر عزل الأنشطة: المستخدم غير مصرح له ${actionLabel ? `بـ (${actionLabel}) ` : ''}على النشاط (${normalizedTarget}).`,
+      `activity:${normalizedTarget}`
+    );
+  }
+}
+
+export function filterRecordsByActivityScope<T extends { activityId?: string }>(
+  records: T[],
+  user: Pick<SystemUser, 'role' | 'allowedActivities' | 'active'> | null | undefined
+): T[] {
+  if (!user || !user.active) return [];
+  if (user.role === 'ADMIN') return records;
+  const allowed = getAuthorizedActivityIds(user);
+  if (allowed.size === 0) return [];
+  return records.filter((rec) => Boolean(rec.activityId && allowed.has(rec.activityId)));
+}
+
 export function filterAuditLogsForUser(
   logs: SystemAuditLog[],
   user: Pick<SystemUser, 'id' | 'role' | 'branchId' | 'allowedBranches' | 'active' | 'tenantId'> | null | undefined

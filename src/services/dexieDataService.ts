@@ -17,6 +17,7 @@ import {
   Account,
   AccountType,
   Product,
+  ProductBatch,
   Party,
   Invoice,
   InvoiceItem,
@@ -43,9 +44,11 @@ import { syncQueueService } from './syncQueueService';
 import { authService, hashPassword, validatePasswordStrength } from './authService';
 import {
   Permission,
+  assertActivityAccess,
   assertBranchAccess,
   assertPermission,
   filterAuditLogsForUser,
+  filterRecordsByActivityScope,
   filterRecordsByBranchScope,
   hasPermission,
 } from '../config/rbac';
@@ -74,6 +77,13 @@ function accountBalanceDeltaByType(type: AccountType, debit: number, credit: num
   }
   return roundMoney(debit - credit);
 }
+
+const ACTIVITY_INVENTORY_ACCOUNTS: Record<CommercialActivityId, string> = {
+  pharmacy: '11041',
+  grocery: '11042',
+  bike_parts: '11043',
+  equipment_parts: '11044',
+};
 
 export type InitState = 'NOT_STARTED' | 'INITIALIZING' | 'READY' | 'FAILED';
 
@@ -492,6 +502,9 @@ export class DexieDataService implements IDataService {
     if (existing) return existing;
     const template = INITIAL_CHART_OF_ACCOUNTS.find((a) => a.code === code);
     if (!template) return undefined;
+    if (template.parentCode) {
+      await this.ensureCanonicalAccountTx(template.parentCode);
+    }
     const created: Account = { ...template, balance: 0 };
     await db.accounts.put(created);
     return created;
@@ -804,22 +817,26 @@ export class DexieDataService implements IDataService {
   // --- المخزون والأصناف ---
   public async getProducts(activityId?: CommercialActivityId): Promise<Product[]> {
     await this.ensureReady();
-    this.requireAuthorizedActor('inventory:view');
-    if (activityId) {
-      return await db.products.where('activityId').equals(activityId).toArray();
-    }
-    return await db.products.toArray();
+    const { actor } = this.requireAuthorizedActor('inventory:view');
+    const rows =
+      activityId && activityId !== ('all' as CommercialActivityId)
+        ? await db.products.where('activityId').equals(activityId).toArray()
+        : await db.products.toArray();
+    return filterRecordsByActivityScope(rows, actor);
   }
 
   public async getProductById(id: string): Promise<Product | undefined> {
     await this.ensureReady();
-    this.requireAuthorizedActor('inventory:view');
-    return await db.products.get(id);
+    const { actor } = this.requireAuthorizedActor('inventory:view');
+    const product = await db.products.get(id);
+    if (!product) return undefined;
+    return filterRecordsByActivityScope([product], actor)[0];
   }
 
   public async saveProductAtomic(product: Product, isUpdate = false): Promise<Product> {
     await this.ensureReady();
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    assertActivityAccess(actor, product.activityId, isUpdate ? 'تعديل صنف' : 'إضافة صنف');
 
     if (!product.id) product.id = storage.generateUUID();
     if (product.batches && product.batches.length > 0 && product.currentStock === 0) {
@@ -828,34 +845,127 @@ export class DexieDataService implements IDataService {
         4
       );
     }
+    product.isActive = product.isActive !== false;
     validateProductStockConsistency(product);
 
-    return await db.transaction('rw', [db.products, db.outbox, db.auditLogs], async () => {
-      await db.products.put(product);
-      await syncQueueService.enqueue({
-        tenantId,
-        branchId,
-        entityType: 'PRODUCT',
-        entityId: product.id,
-        action: isUpdate ? 'UPDATE' : 'CREATE',
-        payload: product as unknown as Record<string, unknown>,
-      });
-      await db.auditLogs.put({
-        id: storage.generateUUID(),
-        timestamp: new Date().toISOString(),
-        userId: actor.id,
-        userName: actor.fullName,
-        tenantId,
-        branchId,
-        action: isUpdate ? 'تعديل صنف' : 'إضافة صنف',
-        details: `${isUpdate ? 'تحديث' : 'إضافة'} الصنف ${product.nameAr} بكود ${product.code}`,
-      });
-      return product;
-    });
+    const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
+    const terminalCode = storage.getTerminalCode();
+    const nowIso = new Date().toISOString();
+    const todayDate = nowIso.split('T')[0];
+
+    return await db.transaction(
+      'rw',
+      [db.products, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
+      async () => {
+        const existing = await db.products.get(product.id);
+        if (existing?.activityId) {
+          assertActivityAccess(actor, existing.activityId, 'تعديل صنف');
+        }
+        await db.products.put(product);
+        await syncQueueService.enqueue({
+          tenantId,
+          branchId,
+          entityType: 'PRODUCT',
+          entityId: product.id,
+          action: existing || isUpdate ? 'UPDATE' : 'CREATE',
+          payload: product as unknown as Record<string, unknown>,
+        });
+
+        if (!existing && !isUpdate) {
+          const openingValue = roundMoney(
+            product.batches && product.batches.length > 0
+              ? product.batches.reduce(
+                  (sum, b) => sum + (Number(b.quantity) || 0) * (Number(b.costPrice ?? product.purchasePrice) || 0),
+                  0
+                )
+              : (Number(product.currentStock) || 0) * (Number(product.purchasePrice) || 0)
+          );
+          if (openingValue > 0) {
+            const invCode = ACTIVITY_INVENTORY_ACCOUNTS[product.activityId] || '11041';
+            const invAcc = await this.ensureCanonicalAccountTx(invCode);
+            const eqAcc = await this.ensureCanonicalAccountTx('3101');
+            const entryNumber = await this.allocateSequenceNumberAtomic(
+              'JV',
+              activeBranch.code || 'BR01',
+              terminalCode,
+              tenantId
+            );
+            const openingJv: JournalEntry = {
+              id: storage.generateUUID(),
+              entryNumber,
+              date: todayDate,
+              description: `قيد رصيد افتتاحي للمخزون - ${product.nameAr} (${product.code})`,
+              costCenterId: product.activityId,
+              branchId: activeBranch.id,
+              lines: [
+                {
+                  id: storage.generateUUID(),
+                  accountCode: invCode,
+                  accountName: invAcc?.nameAr || 'مخزون النشاط',
+                  debit: openingValue,
+                  credit: 0,
+                  costCenterId: product.activityId,
+                  memo: `إثبات رصيد افتتاحي: ${product.nameAr}`,
+                },
+                {
+                  id: storage.generateUUID(),
+                  accountCode: '3101',
+                  accountName: eqAcc?.nameAr || 'رأس المال المخصص',
+                  debit: 0,
+                  credit: openingValue,
+                  costCenterId: 'general',
+                  memo: `مقابل رصيد مخزون افتتاحي: ${product.nameAr}`,
+                },
+              ],
+              status: 'POSTED',
+              referenceType: 'INVENTORY',
+              referenceId: product.id,
+              isAutoGenerated: true,
+            };
+            if (invAcc) {
+              invAcc.balance = roundMoney(invAcc.balance + accountBalanceDeltaByType(invAcc.type, openingValue, 0));
+              await db.accounts.put(invAcc);
+            }
+            if (eqAcc) {
+              eqAcc.balance = roundMoney(eqAcc.balance + accountBalanceDeltaByType(eqAcc.type, 0, openingValue));
+              await db.accounts.put(eqAcc);
+            }
+            await db.journalEntries.put(openingJv);
+            await db.outbox.put({
+              id: storage.generateUUID(),
+              tenantId,
+              branchId: activeBranch.id,
+              entityType: 'JOURNAL_ENTRY',
+              entityId: openingJv.id,
+              action: 'CREATE',
+              payload: openingJv as unknown as Record<string, unknown>,
+              status: 'PENDING',
+              retryCount: 0,
+              priority: 4,
+              dependsOn: [product.id],
+              createdAt: nowIso,
+              idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${openingJv.id}_CREATE`,
+            });
+          }
+        }
+
+        await db.auditLogs.put({
+          id: storage.generateUUID(),
+          timestamp: nowIso,
+          userId: actor.id,
+          userName: actor.fullName,
+          tenantId,
+          branchId,
+          action: existing || isUpdate ? 'تعديل صنف' : 'إضافة صنف',
+          details: `${existing || isUpdate ? 'تحديث' : 'إضافة'} الصنف ${product.nameAr} بكود ${product.code}`,
+        });
+        return product;
+      }
+    );
   }
 
   /**
-   * تسوية جردية ذرية تحافظ على تطابق مجموع التشغيلات مع رصيد الصنف الإجمالي (INV-07)
+   * تسوية جردية ذرية تحافظ على تطابق مجموع التشغيلات مع رصيد الصنف الإجمالي وتصدر القيد المحاسبي المقابل (INV-01, INV-07)
    */
   public async adjustProductStockAtomic(params: {
     productId: string;
@@ -875,117 +985,229 @@ export class DexieDataService implements IDataService {
       throw new FinancialValidationError('سبب التسوية الجردية مطلوب رقابياً.');
     }
 
-    return await db.transaction('rw', [db.products, db.outbox, db.auditLogs], async () => {
-      const product = await db.products.get(productId);
-      if (!product) {
-        throw new FinancialValidationError(`الصنف ذو المعرف ${productId} غير موجود.`);
-      }
+    const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
+    const terminalCode = storage.getTerminalCode();
+    const nowIso = new Date().toISOString();
+    const todayDate = nowIso.split('T')[0];
 
-      const hasBatches = Boolean(product.batches && product.batches.length > 0);
-      if (hasBatches) {
-        validateProductStockConsistency(product);
-      }
+    return await db.transaction(
+      'rw',
+      [db.products, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
+      async () => {
+        const product = await db.products.get(productId);
+        if (!product) {
+          throw new FinancialValidationError(`الصنف ذو المعرف ${productId} غير موجود.`);
+        }
+        assertActivityAccess(actor, product.activityId, 'تسوية مخزنية');
 
-      if (deltaQuantity < 0) {
-        const deduct = Math.abs(deltaQuantity);
-        if (product.currentStock < deduct) {
-          throw new FinancialValidationError(
-            `الرصيد المتاح (${product.currentStock}) أقل من كمية الخصم المطلوبة (${deduct}).`
-          );
+        const hasBatches = Boolean(product.batches && product.batches.length > 0);
+        if (hasBatches) {
+          validateProductStockConsistency(product);
         }
 
-        if (hasBatches && product.batches) {
-          if (batchNumber) {
-            const targetBatch = product.batches.find((b) => b.batchNumber === batchNumber);
-            if (!targetBatch) {
-              throw new FinancialValidationError(`التشغيلة (${batchNumber}) غير موجودة.`);
-            }
-            if (targetBatch.quantity < deduct) {
-              throw new FinancialValidationError(
-                `الكمية المتاحة في التشغيلة (${batchNumber}) هي ${targetBatch.quantity} فقط.`
-              );
-            }
-            targetBatch.quantity = roundMoney(targetBatch.quantity - deduct, 4);
-          } else {
-            const totalAvailableInBatches = product.batches.reduce((s, b) => s + b.quantity, 0);
-            if (totalAvailableInBatches + 0.0001 < deduct) {
-              throw new FinancialValidationError(
-                `مجموع كميات التشغيلات (${totalAvailableInBatches}) غير كافٍ للخصم (${deduct}).`
-              );
-            }
-            let remaining = deduct;
-            const sorted = [...product.batches]
-              .filter((b) => b.quantity > 0)
-              .sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
-            for (const b of sorted) {
-              if (remaining <= 0) break;
-              const take = Math.min(b.quantity, remaining);
-              b.quantity = roundMoney(b.quantity - take, 4);
-              remaining = roundMoney(remaining - take, 4);
-            }
-            if (remaining > 0.0001) {
-              throw new FinancialValidationError('تعذر استيفاء كمية الخصم بالكامل من التشغيلات.');
-            }
-          }
-          product.currentStock = roundMoney(
-            product.batches.reduce((s, b) => s + b.quantity, 0),
-            4
-          );
-        } else {
-          product.currentStock = roundMoney(product.currentStock - deduct, 4);
-        }
-      } else {
-        if (product.trackExpiry || hasBatches) {
-          if (!batchNumber?.trim() || !expiryDate?.trim()) {
+        let adjustmentCostRaw = 0;
+
+        if (deltaQuantity < 0) {
+          const deduct = Math.abs(deltaQuantity);
+          if (product.currentStock < deduct) {
             throw new FinancialValidationError(
-              'الأصناف المتتبعة بالتشغيلات تتطلب تحديد رقم تشغيلة وتاريخ صلاحية عند الزيادة الجردية.'
+              `الرصيد المتاح (${product.currentStock}) أقل من كمية الخصم المطلوبة (${deduct}).`
             );
           }
-          if (!product.batches) product.batches = [];
-          const existingBatch = product.batches.find((b) => b.batchNumber === batchNumber.trim());
-          if (existingBatch) {
-            existingBatch.quantity = roundMoney(existingBatch.quantity + deltaQuantity, 4);
-          } else {
-            product.batches.push({
-              id: storage.generateUUID(),
-              productId: product.id,
-              batchNumber: batchNumber.trim(),
-              expiryDate: expiryDate.trim(),
-              quantity: deltaQuantity,
-              costPrice: product.purchasePrice,
-            });
-          }
-          product.currentStock = roundMoney(
-            product.batches.reduce((s, b) => s + b.quantity, 0),
-            4
-          );
-        } else {
-          product.currentStock = roundMoney(product.currentStock + deltaQuantity, 4);
-        }
-      }
 
-      validateProductStockConsistency(product);
-      await db.products.put(product);
-      await syncQueueService.enqueue({
-        tenantId,
-        branchId,
-        entityType: 'PRODUCT',
-        entityId: product.id,
-        action: 'UPDATE',
-        payload: product as unknown as Record<string, unknown>,
-      });
-      await db.auditLogs.put({
-        id: storage.generateUUID(),
-        timestamp: new Date().toISOString(),
-        userId: actor.id,
-        userName: actor.fullName,
-        tenantId,
-        branchId,
-        action: 'تسوية مخزنية ذرية',
-        details: `صنف ${product.nameAr}: تعديل (${deltaQuantity > 0 ? '+' : ''}${deltaQuantity})، السبب: ${reason}`,
-      });
-      return product;
-    });
+          if (hasBatches && product.batches) {
+            if (batchNumber) {
+              const targetBatch = product.batches.find((b) => b.batchNumber === batchNumber);
+              if (!targetBatch) {
+                throw new FinancialValidationError(`التشغيلة (${batchNumber}) غير موجودة.`);
+              }
+              if (targetBatch.quantity < deduct) {
+                throw new FinancialValidationError(
+                  `الكمية المتاحة في التشغيلة (${batchNumber}) هي ${targetBatch.quantity} فقط.`
+                );
+              }
+              targetBatch.quantity = roundMoney(targetBatch.quantity - deduct, 4);
+              adjustmentCostRaw = deduct * (Number(targetBatch.costPrice ?? product.purchasePrice) || 0);
+            } else {
+              const totalAvailableInBatches = product.batches.reduce((s, b) => s + b.quantity, 0);
+              if (totalAvailableInBatches + 0.0001 < deduct) {
+                throw new FinancialValidationError(
+                  `مجموع كميات التشغيلات (${totalAvailableInBatches}) غير كافٍ للخصم (${deduct}).`
+                );
+              }
+              let remaining = deduct;
+              const sorted = [...product.batches]
+                .filter((b) => b.quantity > 0)
+                .sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
+              for (const b of sorted) {
+                if (remaining <= 0) break;
+                const take = Math.min(b.quantity, remaining);
+                b.quantity = roundMoney(b.quantity - take, 4);
+                remaining = roundMoney(remaining - take, 4);
+                adjustmentCostRaw += take * (Number(b.costPrice ?? product.purchasePrice) || 0);
+              }
+              if (remaining > 0.0001) {
+                throw new FinancialValidationError('تعذر استيفاء كمية الخصم بالكامل من التشغيلات.');
+              }
+            }
+            product.currentStock = roundMoney(
+              product.batches.reduce((s, b) => s + b.quantity, 0),
+              4
+            );
+          } else {
+            product.currentStock = roundMoney(product.currentStock - deduct, 4);
+            adjustmentCostRaw = deduct * (Number(product.purchasePrice) || 0);
+          }
+        } else {
+          if (product.trackExpiry || hasBatches) {
+            if (!batchNumber?.trim() || !expiryDate?.trim()) {
+              throw new FinancialValidationError(
+                'الأصناف المتتبعة بالتشغيلات تتطلب تحديد رقم تشغيلة وتاريخ صلاحية عند الزيادة الجردية.'
+              );
+            }
+            if (!product.batches) product.batches = [];
+            const existingBatch = product.batches.find((b) => b.batchNumber === batchNumber.trim());
+            if (existingBatch) {
+              existingBatch.quantity = roundMoney(existingBatch.quantity + deltaQuantity, 4);
+              adjustmentCostRaw = deltaQuantity * (Number(existingBatch.costPrice ?? product.purchasePrice) || 0);
+            } else {
+              product.batches.push({
+                id: storage.generateUUID(),
+                productId: product.id,
+                batchNumber: batchNumber.trim(),
+                expiryDate: expiryDate.trim(),
+                quantity: deltaQuantity,
+                costPrice: product.purchasePrice,
+              });
+              adjustmentCostRaw = deltaQuantity * (Number(product.purchasePrice) || 0);
+            }
+            product.currentStock = roundMoney(
+              product.batches.reduce((s, b) => s + b.quantity, 0),
+              4
+            );
+          } else {
+            product.currentStock = roundMoney(product.currentStock + deltaQuantity, 4);
+            adjustmentCostRaw = deltaQuantity * (Number(product.purchasePrice) || 0);
+          }
+        }
+
+        validateProductStockConsistency(product);
+        await db.products.put(product);
+        await syncQueueService.enqueue({
+          tenantId,
+          branchId,
+          entityType: 'PRODUCT',
+          entityId: product.id,
+          action: 'UPDATE',
+          payload: product as unknown as Record<string, unknown>,
+        });
+
+        const adjustmentValue = roundMoney(adjustmentCostRaw);
+        if (adjustmentValue > 0) {
+          const invCode = ACTIVITY_INVENTORY_ACCOUNTS[product.activityId] || '11041';
+          const invAcc = await this.ensureCanonicalAccountTx(invCode);
+          const adjExpAcc = await this.ensureCanonicalAccountTx('5205');
+          const entryNumber = await this.allocateSequenceNumberAtomic(
+            'JV',
+            activeBranch.code || 'BR01',
+            terminalCode,
+            tenantId
+          );
+          const isShortage = deltaQuantity < 0;
+          const adjLines: JournalEntryLine[] = isShortage
+            ? [
+                {
+                  id: storage.generateUUID(),
+                  accountCode: '5205',
+                  accountName: adjExpAcc?.nameAr || 'فروقات وتسويات وتلف المخزون',
+                  debit: adjustmentValue,
+                  credit: 0,
+                  costCenterId: product.activityId,
+                  memo: `عجز/تلف تسوية مخزنية: ${product.nameAr} - ${reason}`,
+                },
+                {
+                  id: storage.generateUUID(),
+                  accountCode: invCode,
+                  accountName: invAcc?.nameAr || 'مخزون النشاط',
+                  debit: 0,
+                  credit: adjustmentValue,
+                  costCenterId: product.activityId,
+                  memo: `تخفيض مخزون بالتسوية: ${product.nameAr}`,
+                },
+              ]
+            : [
+                {
+                  id: storage.generateUUID(),
+                  accountCode: invCode,
+                  accountName: invAcc?.nameAr || 'مخزون النشاط',
+                  debit: adjustmentValue,
+                  credit: 0,
+                  costCenterId: product.activityId,
+                  memo: `زيادة جردية للمخزون: ${product.nameAr} - ${reason}`,
+                },
+                {
+                  id: storage.generateUUID(),
+                  accountCode: '5205',
+                  accountName: adjExpAcc?.nameAr || 'فروقات وتسويات وتلف المخزون',
+                  debit: 0,
+                  credit: adjustmentValue,
+                  costCenterId: product.activityId,
+                  memo: `فائض تسوية جردية: ${product.nameAr}`,
+                },
+              ];
+
+          const adjJv: JournalEntry = {
+            id: storage.generateUUID(),
+            entryNumber,
+            date: todayDate,
+            description: `قيد تسوية مخزنية (${isShortage ? 'نقص/تلف' : 'زيادة جردية'}) - ${product.nameAr}: ${reason}`,
+            costCenterId: product.activityId,
+            branchId: activeBranch.id,
+            lines: adjLines,
+            status: 'POSTED',
+            referenceType: 'INVENTORY',
+            referenceId: product.id,
+            isAutoGenerated: true,
+          };
+
+          for (const line of adjLines) {
+            const acc = await db.accounts.get(line.accountCode);
+            if (acc) {
+              acc.balance = roundMoney(acc.balance + accountBalanceDeltaByType(acc.type, line.debit, line.credit));
+              await db.accounts.put(acc);
+            }
+          }
+          await db.journalEntries.put(adjJv);
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: activeBranch.id,
+            entityType: 'JOURNAL_ENTRY',
+            entityId: adjJv.id,
+            action: 'CREATE',
+            payload: adjJv as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            dependsOn: [product.id],
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${adjJv.id}_CREATE`,
+          });
+        }
+
+        await db.auditLogs.put({
+          id: storage.generateUUID(),
+          timestamp: nowIso,
+          userId: actor.id,
+          userName: actor.fullName,
+          tenantId,
+          branchId,
+          action: 'تسوية مخزنية ذرية',
+          details: `صنف ${product.nameAr}: تعديل (${deltaQuantity > 0 ? '+' : ''}${deltaQuantity})، السبب: ${reason}`,
+        });
+        return product;
+      }
+    );
   }
 
   public async addProduct(product: Product): Promise<void> {
@@ -999,30 +1221,130 @@ export class DexieDataService implements IDataService {
   public async deleteProductAtomic(productId: string): Promise<void> {
     await this.ensureReady();
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:delete');
+    const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
+    const terminalCode = storage.getTerminalCode();
+    const nowIso = new Date().toISOString();
 
-    await db.transaction('rw', [db.products, db.outbox, db.auditLogs], async () => {
-      const existing = await db.products.get(productId);
-      if (!existing) return;
-      await db.products.delete(productId);
-      await syncQueueService.enqueue({
-        tenantId,
-        branchId,
-        entityType: 'PRODUCT',
-        entityId: productId,
-        action: 'DELETE',
-        payload: { id: productId },
-      });
-      await db.auditLogs.put({
-        id: storage.generateUUID(),
-        timestamp: new Date().toISOString(),
-        userId: actor.id,
-        userName: actor.fullName,
-        tenantId,
-        branchId,
-        action: 'حذف صنف',
-        details: `تم حذف الصنف ${existing.nameAr} (${productId})`,
-      });
-    });
+    await db.transaction(
+      'rw',
+      [db.products, db.invoices, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
+      async () => {
+        const existing = await db.products.get(productId);
+        if (!existing) return;
+        assertActivityAccess(actor, existing.activityId, 'حذف صنف');
+
+        const invoices = await db.invoices.toArray();
+        const usedInInvoices = invoices.some(
+          (inv) =>
+            (inv.items || []).some((item) => item.productId === productId) ||
+            (inv.stockDeductionsRecorded || []).some((ded) => ded.productId === productId)
+        );
+        if (usedInInvoices) {
+          throw new FinancialValidationError(
+            'لا يمكن حذف صنف مرتبط بفواتير مرحلة حفاظاً على سلامة السجل المالي.'
+          );
+        }
+
+        const remainingValue = roundMoney(
+          existing.batches && existing.batches.length > 0
+            ? existing.batches.reduce(
+                (sum, b) => sum + (Number(b.quantity) || 0) * (Number(b.costPrice ?? existing.purchasePrice) || 0),
+                0
+              )
+            : (Number(existing.currentStock) || 0) * (Number(existing.purchasePrice) || 0)
+        );
+        const hasInvJv =
+          (await db.journalEntries
+            .filter((j) => j.referenceType === 'INVENTORY' && j.referenceId === productId)
+            .count()) > 0;
+
+        if (remainingValue > 0 && hasInvJv) {
+          const invCode = ACTIVITY_INVENTORY_ACCOUNTS[existing.activityId] || '11041';
+          const invAcc = await this.ensureCanonicalAccountTx(invCode);
+          const eqAcc = await this.ensureCanonicalAccountTx('3101');
+          const entryNumber = await this.allocateSequenceNumberAtomic(
+            'REV',
+            activeBranch.code || 'BR01',
+            terminalCode,
+            tenantId
+          );
+          const delJv: JournalEntry = {
+            id: storage.generateUUID(),
+            entryNumber,
+            date: nowIso.split('T')[0],
+            description: `إلغاء أثر رصيد مخزون محذوف - ${existing.nameAr} (${existing.code})`,
+            costCenterId: existing.activityId,
+            branchId: activeBranch.id,
+            lines: [
+              {
+                id: storage.generateUUID(),
+                accountCode: '3101',
+                accountName: eqAcc?.nameAr || 'رأس المال المخصص',
+                debit: remainingValue,
+                credit: 0,
+                costCenterId: 'general',
+                memo: `إلغاء رصيد صنف محذوف: ${existing.nameAr}`,
+              },
+              {
+                id: storage.generateUUID(),
+                accountCode: invCode,
+                accountName: invAcc?.nameAr || 'مخزون النشاط',
+                debit: 0,
+                credit: remainingValue,
+                costCenterId: existing.activityId,
+                memo: `تخفيض مخزون صنف محذوف: ${existing.nameAr}`,
+              },
+            ],
+            status: 'POSTED',
+            referenceType: 'INVENTORY',
+            referenceId: productId,
+            isAutoGenerated: true,
+          };
+          for (const line of delJv.lines) {
+            const acc = await db.accounts.get(line.accountCode);
+            if (acc) {
+              acc.balance = roundMoney(acc.balance + accountBalanceDeltaByType(acc.type, line.debit, line.credit));
+              await db.accounts.put(acc);
+            }
+          }
+          await db.journalEntries.put(delJv);
+          await db.outbox.put({
+            id: storage.generateUUID(),
+            tenantId,
+            branchId: activeBranch.id,
+            entityType: 'JOURNAL_ENTRY',
+            entityId: delJv.id,
+            action: 'CREATE',
+            payload: delJv as unknown as Record<string, unknown>,
+            status: 'PENDING',
+            retryCount: 0,
+            priority: 4,
+            createdAt: nowIso,
+            idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${delJv.id}_CREATE`,
+          });
+        }
+
+        await db.products.delete(productId);
+        await syncQueueService.enqueue({
+          tenantId,
+          branchId,
+          entityType: 'PRODUCT',
+          entityId: productId,
+          action: 'DELETE',
+          payload: { id: productId },
+        });
+        await db.auditLogs.put({
+          id: storage.generateUUID(),
+          timestamp: nowIso,
+          userId: actor.id,
+          userName: actor.fullName,
+          tenantId,
+          branchId,
+          action: 'حذف صنف',
+          details: `تم حذف الصنف ${existing.nameAr} (${productId})`,
+        });
+      }
+    );
   }
 
   public async deleteProduct(productId: string): Promise<void> {
@@ -1112,10 +1434,11 @@ export class DexieDataService implements IDataService {
   public async getInvoices(activityId?: CommercialActivityId): Promise<Invoice[]> {
     await this.ensureReady();
     const { actor } = this.requireAuthorizedActor('invoices:view');
-    const rows = activityId
-      ? await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date')
-      : await db.invoices.toCollection().reverse().sortBy('date');
-    return filterRecordsByBranchScope(rows, actor);
+    const rows =
+      activityId && activityId !== ('all' as CommercialActivityId)
+        ? await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date')
+        : await db.invoices.toCollection().reverse().sortBy('date');
+    return filterRecordsByActivityScope(filterRecordsByBranchScope(rows, actor), actor);
   }
 
   public async getInvoiceById(id: string): Promise<Invoice | undefined> {
@@ -1123,12 +1446,13 @@ export class DexieDataService implements IDataService {
     const { actor } = this.requireAuthorizedActor('invoices:view');
     const invoice = await db.invoices.get(id);
     if (!invoice) return undefined;
-    return filterRecordsByBranchScope([invoice], actor)[0];
+    return filterRecordsByActivityScope(filterRecordsByBranchScope([invoice], actor), actor)[0];
   }
 
   public async addInvoice(invoice: Invoice): Promise<void> {
     await this.ensureReady();
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('pos:sale', invoice.branchId);
+    assertActivityAccess(actor, invoice.activityId, 'إصدار فاتورة');
     if (!invoice.id) invoice.id = storage.generateUUID();
     invoice.isPosted = true;
 
@@ -1512,8 +1836,8 @@ export class DexieDataService implements IDataService {
         throw new FinancialValidationError(`الفاتورة (${alloc.invoiceId}) غير موجودة أثناء التخصيص.`);
       }
       const nextPaid = fromCents(toCents(inv.paidAmount) + toCents(alloc.allocatedAmount));
-      if (toCents(nextPaid) > toCents(inv.total)) {
-        throw new FinancialValidationError(`تجاوز التخصيص إجمالي الفاتورة (${inv.invoiceNumber}).`);
+      if (toCents(nextPaid) + toCents(inv.returnedAmount || 0) > toCents(inv.total)) {
+        throw new FinancialValidationError(`تجاوز التخصيص صافي المتبقي من الفاتورة (${inv.invoiceNumber}) بعد المرتجعات.`);
       }
       inv.paidAmount = nextPaid;
       await db.invoices.put(inv);
@@ -1809,14 +2133,22 @@ export class DexieDataService implements IDataService {
             throw new FinancialValidationError('العميل أو المورد المحدد غير موجود.');
           }
           const targetAccount = voucher.accountCode ? await db.accounts.get(voucher.accountCode) : undefined;
+          const partyInvoices =
+            party && Array.isArray(manualAllocations)
+              ? (await db.invoices.where('partyId').equals(party.id).toArray()).filter(
+                  (i) => i.branchId === branchId && i.status !== 'REVERSED'
+                )
+              : [];
           const previewPlan = resolveVoucherAccountingPlan({
             voucherType: voucher.type,
             voucherMode: voucher.voucherMode,
             party,
             requestedAccountCode: voucher.accountCode,
             amount: voucher.amount,
-            openInvoices: [],
+            openInvoices: partyInvoices,
+            manualAllocations,
             hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
+            overrideReason,
             hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
             targetAccountIsLeaf: targetAccount ? targetAccount.isLeaf !== false : false,
           });
@@ -1836,6 +2168,13 @@ export class DexieDataService implements IDataService {
             );
           }
           const nowIso = new Date().toISOString();
+          const savedManualAllocations =
+            previewPlan.manualOverride && Array.isArray(manualAllocations)
+              ? manualAllocations.map((m) => ({
+                  invoiceId: m.invoiceId,
+                  allocatedAmount: roundMoney(m.allocatedAmount),
+                }))
+              : undefined;
           const draftVoucher: PaymentVoucher = {
             ...voucher,
             branchId,
@@ -1846,6 +2185,9 @@ export class DexieDataService implements IDataService {
             partyType: party?.type,
             partyName: party?.nameAr || voucher.partyName || '',
             paymentMethod: voucher.paymentMethod || 'CASH',
+            manualOverride: previewPlan.manualOverride,
+            overrideReason: previewPlan.overrideReason,
+            ...(savedManualAllocations ? { manualAllocations: savedManualAllocations } : {}),
             createdBy: actor.id,
             createdByName: actor.fullName,
             createdAt: nowIso,
@@ -1941,6 +2283,10 @@ export class DexieDataService implements IDataService {
         if (draft.status !== 'DRAFT') {
           throw new FinancialValidationError('يمكن ترحيل السندات التي في حالة المسودة فقط.');
         }
+        const effectiveManualAllocations =
+          manualAllocations !== undefined ? manualAllocations : draft.manualAllocations;
+        const effectiveOverrideReason =
+          overrideReason !== undefined ? overrideReason : draft.overrideReason;
         return await this.postVoucherCoreTx({
           voucher: { ...draft, status: 'POSTED' },
           actor,
@@ -1949,8 +2295,8 @@ export class DexieDataService implements IDataService {
           activeBranch,
           terminalCode,
           currencySymbol,
-          manualAllocations,
-          overrideReason,
+          manualAllocations: effectiveManualAllocations,
+          overrideReason: effectiveOverrideReason,
           isPromotingDraft: true,
         });
       }
@@ -3179,6 +3525,25 @@ export class DexieDataService implements IDataService {
       }
 
       const d = parsed.data;
+      const batchMap = new Map<string, ProductBatch>();
+      if (Array.isArray(d.productBatches)) {
+        for (const b of d.productBatches as ProductBatch[]) {
+          if (b && b.id) batchMap.set(b.id, b);
+        }
+      }
+      if (Array.isArray(d.products)) {
+        for (const p of d.products as Product[]) {
+          if (Array.isArray(p?.batches)) {
+            for (const b of p.batches) {
+              if (b && b.id && !batchMap.has(b.id)) {
+                batchMap.set(b.id, b);
+              }
+            }
+          }
+        }
+      }
+      const normalizedBatches = Array.from(batchMap.values());
+
       await db.transaction(
         'rw',
         [
@@ -3211,17 +3576,24 @@ export class DexieDataService implements IDataService {
             await db.accounts.clear();
             if (d.accounts.length > 0) await db.accounts.bulkPut(d.accounts);
           }
-          if (Array.isArray(d.activities)) {
-            await db.activities.clear();
-            if (d.activities.length > 0) await db.activities.bulkPut(d.activities);
-          }
+          await db.activities.clear();
+          const activitiesToLoad =
+            Array.isArray(d.activities) && d.activities.length > 0
+              ? d.activities
+              : OFFICIAL_ACTIVITIES;
+          await db.activities.bulkPut(activitiesToLoad);
+
           if (Array.isArray(d.products)) {
             await db.products.clear();
-            if (d.products.length > 0) await db.products.bulkPut(d.products);
+            if (d.products.length > 0) {
+              await db.products.bulkPut(
+                d.products.map((p: Product) => ({ ...p, isActive: p.isActive !== false }))
+              );
+            }
           }
-          if (Array.isArray(d.productBatches)) {
-            await db.productBatches.clear();
-            if (d.productBatches.length > 0) await db.productBatches.bulkPut(d.productBatches);
+          await db.productBatches.clear();
+          if (normalizedBatches.length > 0) {
+            await db.productBatches.bulkPut(normalizedBatches);
           }
           if (Array.isArray(d.parties)) {
             await db.parties.clear();
@@ -3233,7 +3605,16 @@ export class DexieDataService implements IDataService {
           }
           if (Array.isArray(d.invoices)) {
             await db.invoices.clear();
-            if (d.invoices.length > 0) await db.invoices.bulkPut(d.invoices);
+            if (d.invoices.length > 0) {
+              await db.invoices.bulkPut(
+                d.invoices.map((inv: Invoice) => ({
+                  ...inv,
+                  advanceAppliedAmount: inv.advanceAppliedAmount ?? 0,
+                  returnedAmount: inv.returnedAmount ?? 0,
+                  status: inv.status || (inv.isPosted === false ? 'DRAFT' : 'POSTED'),
+                }))
+              );
+            }
           }
           if (Array.isArray(d.journalEntries)) {
             await db.journalEntries.clear();
@@ -3263,29 +3644,43 @@ export class DexieDataService implements IDataService {
           if (Array.isArray(d.allocationAudits) && d.allocationAudits.length > 0) {
             await db.allocationAudits.bulkPut(d.allocationAudits);
           }
-          if (Array.isArray(d.amanat)) {
-            await db.amanatRecords.clear();
-            if (d.amanat.length > 0) await db.amanatRecords.bulkPut(d.amanat);
+          await db.amanatRecords.clear();
+          if (Array.isArray(d.amanat) && d.amanat.length > 0) {
+            await db.amanatRecords.bulkPut(d.amanat);
           }
           if (Array.isArray(d.users)) {
             await db.users.clear();
-            if (d.users.length > 0) await db.users.bulkPut(d.users);
+            if (d.users.length > 0) {
+              await db.users.bulkPut(
+                d.users.map((u: SystemUser) => ({
+                  ...u,
+                  allowedBranches: Array.isArray(u.allowedBranches)
+                    ? u.allowedBranches
+                    : u.branchId
+                      ? [u.branchId]
+                      : [],
+                  allowedActivities: Array.isArray(u.allowedActivities)
+                    ? u.allowedActivities
+                    : [],
+                }))
+              );
+            }
           }
-          if (Array.isArray(d.auditLogs)) {
-            await db.auditLogs.clear();
-            if (d.auditLogs.length > 0) await db.auditLogs.bulkPut(d.auditLogs);
+          await db.auditLogs.clear();
+          if (Array.isArray(d.auditLogs) && d.auditLogs.length > 0) {
+            await db.auditLogs.bulkPut(d.auditLogs);
           }
-          if (Array.isArray(d.outbox)) {
-            await db.outbox.clear();
-            if (d.outbox.length > 0) await db.outbox.bulkPut(d.outbox);
+          await db.outbox.clear();
+          if (Array.isArray(d.outbox) && d.outbox.length > 0) {
+            await db.outbox.bulkPut(d.outbox);
           }
-          if (Array.isArray(d.syncConflicts)) {
-            await db.syncConflicts.clear();
-            if (d.syncConflicts.length > 0) await db.syncConflicts.bulkPut(d.syncConflicts);
+          await db.syncConflicts.clear();
+          if (Array.isArray(d.syncConflicts) && d.syncConflicts.length > 0) {
+            await db.syncConflicts.bulkPut(d.syncConflicts);
           }
-          if (Array.isArray(d.sequences)) {
-            await db.sequences.clear();
-            if (d.sequences.length > 0) await db.sequences.bulkPut(d.sequences);
+          await db.sequences.clear();
+          if (Array.isArray(d.sequences) && d.sequences.length > 0) {
+            await db.sequences.bulkPut(d.sequences);
           }
         }
       );
@@ -3379,6 +3774,7 @@ export class DexieDataService implements IDataService {
     const { invoice, totalCogs, stockDeductions, clientRequestId } = params;
     const applyAdvance = roundMoney(params.applyAdvanceAmount ?? 0);
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('pos:sale', invoice.branchId);
+    assertActivityAccess(actor, invoice.activityId, 'إصدار فاتورة مبيعات');
     if (applyAdvance > 0) {
       assertPermission(actor, 'party:advance:use');
     }
@@ -3982,6 +4378,7 @@ export class DexieDataService implements IDataService {
       'purchase:create',
       invoice.branchId
     );
+    assertActivityAccess(actor, invoice.activityId, 'إصدار فاتورة مشتريات');
     if (applyAdvance > 0) {
       assertPermission(actor, 'party:advance:use', 'تسوية سلفة مورد على فاتورة المشتريات');
     }
@@ -4552,6 +4949,7 @@ export class DexieDataService implements IDataService {
         if (!orig) {
           throw new FinancialValidationError('فاتورة المبيعات الأصلية غير موجودة.');
         }
+        assertActivityAccess(actor, orig.activityId, 'إصدار مرتجع مبيعات');
         if (orig.type !== 'SALE') {
           throw new FinancialValidationError('يمكن إصدار مرتجع مبيعات لفواتير المبيعات (SALE) فقط.');
         }
@@ -5147,6 +5545,7 @@ export class DexieDataService implements IDataService {
         if (!orig) {
           throw new FinancialValidationError('فاتورة المشتريات الأصلية غير موجودة.');
         }
+        assertActivityAccess(actor, orig.activityId, 'إصدار مرتجع مشتريات');
         if (orig.type !== 'PURCHASE') {
           throw new FinancialValidationError('يمكن إصدار مرتجع مشتريات لفواتير المشتريات (PURCHASE) فقط.');
         }
@@ -5630,7 +6029,7 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.journalEntries, db.accounts, db.outbox, db.auditLogs, db.sequences],
+      [db.journalEntries, db.accounts, db.cashBoxes, db.outbox, db.auditLogs, db.sequences],
       async () => {
         const accountsByCode = await this.getAccountsByCodeMap();
         validateJournalEntryInput({ entry, accountsByCode });
@@ -5645,20 +6044,69 @@ export class DexieDataService implements IDataService {
           );
         }
 
-        const persistedEntry: JournalEntry = {
-          ...entry,
-          branchId,
-          status: 'POSTED',
-        };
-
-        for (const line of persistedEntry.lines) {
-          const acc = await db.accounts.get(line.accountCode);
+        const resolvedLines: JournalEntryLine[] = [];
+        for (const rawLine of entry.lines) {
+          const acc = await db.accounts.get(rawLine.accountCode);
           if (acc) {
-            const delta = accountBalanceDeltaByType(acc.type, Number(line.debit) || 0, Number(line.credit) || 0);
+            const delta = accountBalanceDeltaByType(acc.type, Number(rawLine.debit) || 0, Number(rawLine.credit) || 0);
             acc.balance = roundMoney(acc.balance + delta);
             await db.accounts.put(acc);
           }
+
+          const linkedBoxes = await db.cashBoxes.where('accountCode').equals(rawLine.accountCode).toArray();
+          const requestedCashBoxId = rawLine.cashBoxId?.trim();
+          let resolvedCashBoxId = requestedCashBoxId || undefined;
+
+          if (requestedCashBoxId || linkedBoxes.length > 0) {
+            let targetBox = requestedCashBoxId
+              ? await db.cashBoxes.get(requestedCashBoxId)
+              : undefined;
+
+            if (requestedCashBoxId) {
+              if (!targetBox) {
+                throw new FinancialValidationError(`الصندوق المحدد (${requestedCashBoxId}) في سطر القيد غير موجود.`);
+              }
+              if (targetBox.accountCode !== rawLine.accountCode) {
+                throw new FinancialValidationError(
+                  `الصندوق (${targetBox.nameAr}) مرتبط بالحساب ${targetBox.accountCode} وليس بالحساب ${rawLine.accountCode}.`
+                );
+              }
+              this.assertCashBoxBranchAccess(actor, targetBox, branchId);
+            } else {
+              const branchBoxes = linkedBoxes.filter((box) => box.branchId === branchId || box.isCentral);
+              if (branchBoxes.length !== 1) {
+                throw new FinancialValidationError(
+                  `يرجى تحديد الصندوق الفعلي في سطر الحساب النقدي (${rawLine.accountCode})؛ يتطلب القيد النقدي تحديد صندوق واحد صريح.`
+                );
+              }
+              targetBox = branchBoxes[0];
+              this.assertCashBoxBranchAccess(actor, targetBox, branchId);
+              resolvedCashBoxId = targetBox.id;
+            }
+
+            const cashFlowDelta = roundMoney((Number(rawLine.debit) || 0) - (Number(rawLine.credit) || 0));
+            const nextCashBalance = roundMoney(targetBox.balance + cashFlowDelta);
+            if (nextCashBalance < -0.001) {
+              throw new FinancialValidationError(
+                `رصيد الصندوق (${targetBox.nameAr}) غير كافٍ لإتمام القيد؛ الرصيد الحالي ${targetBox.balance}.`
+              );
+            }
+            targetBox.balance = Math.max(0, nextCashBalance);
+            await db.cashBoxes.put(targetBox);
+          }
+
+          resolvedLines.push({
+            ...rawLine,
+            ...(resolvedCashBoxId ? { cashBoxId: resolvedCashBoxId } : {}),
+          });
         }
+
+        const persistedEntry: JournalEntry = {
+          ...entry,
+          branchId,
+          lines: resolvedLines,
+          status: 'POSTED',
+        };
 
         await db.journalEntries.put(persistedEntry);
 
@@ -5747,6 +6195,7 @@ export class DexieDataService implements IDataService {
           debit: roundMoney(l.credit),
           credit: roundMoney(l.debit),
           costCenterId: l.costCenterId,
+          ...(l.cashBoxId ? { cashBoxId: l.cashBoxId } : {}),
           memo: `عكس لقيد ${original.entryNumber}: ${reversalReason}`,
         }));
 
@@ -5779,22 +6228,35 @@ export class DexieDataService implements IDataService {
           }
 
           const linkedBoxes = await db.cashBoxes.where('accountCode').equals(line.accountCode).toArray();
-          if (linkedBoxes.length > 0) {
-            const branchBoxes = linkedBoxes.filter((box) => box.branchId === originalBranchId || box.isCentral);
-            if (branchBoxes.length !== 1) {
-              throw new FinancialValidationError(
-                `لا يمكن عكس القيد بأمان: حساب الصندوق (${line.accountCode}) لا يرتبط بصندوق واحد محدد في الفرع الأصلي.`
-              );
+          const requestedCashBoxId = line.cashBoxId?.trim();
+          if (requestedCashBoxId || linkedBoxes.length > 0) {
+            let linkedBox = requestedCashBoxId
+              ? await db.cashBoxes.get(requestedCashBoxId)
+              : undefined;
+            if (requestedCashBoxId) {
+              if (!linkedBox) {
+                throw new FinancialValidationError(`الصندوق المرتبط بالقيد الأصلي (${requestedCashBoxId}) غير موجود.`);
+              }
+              this.assertCashBoxBranchAccess(actor, linkedBox, originalBranchId);
+            } else {
+              const branchBoxes = linkedBoxes.filter((box) => box.branchId === originalBranchId || box.isCentral);
+              if (branchBoxes.length !== 1) {
+                throw new FinancialValidationError(
+                  `لا يمكن عكس القيد بأمان: حساب الصندوق (${line.accountCode}) لا يرتبط بصندوق واحد محدد في الفرع الأصلي.`
+                );
+              }
+              linkedBox = branchBoxes[0];
+              if (linkedBox.isCentral) assertPermission(actor, 'cashbox:central_access');
+              line.cashBoxId = linkedBox.id;
             }
-            const linkedBox = branchBoxes[0];
-            if (linkedBox.isCentral) assertPermission(actor, 'cashbox:central_access');
+
             const nextCashBalance = roundMoney(linkedBox.balance + cashFlowDelta);
-            if (nextCashBalance < 0) {
+            if (nextCashBalance < -0.001) {
               throw new FinancialValidationError(
                 `سيؤدي عكس القيد إلى جعل رصيد الصندوق (${linkedBox.nameAr}) سالباً؛ أُلغيت العملية بالكامل.`
               );
             }
-            linkedBox.balance = nextCashBalance;
+            linkedBox.balance = Math.max(0, nextCashBalance);
             await db.cashBoxes.put(linkedBox);
           }
         }

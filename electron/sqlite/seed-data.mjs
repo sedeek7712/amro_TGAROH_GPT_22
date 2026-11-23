@@ -83,6 +83,7 @@ export const INITIAL_CHART_OF_ACCOUNTS = [
   { code: '5202', nameAr: 'كهرباء ومياه وهاتف', type: 'EXPENSE', parentCode: '52', isLeaf: true, balance: 0, costCenterId: 'general' },
   { code: '5203', nameAr: 'رواتب وأجور العاملين', type: 'EXPENSE', parentCode: '52', isLeaf: true, balance: 0, costCenterId: 'general' },
   { code: '5204', nameAr: 'مصاريف صيانة ونثريات', type: 'EXPENSE', parentCode: '52', isLeaf: true, balance: 0, costCenterId: 'general' },
+  { code: '5205', nameAr: 'فروقات وتسويات وتلف المخزون', type: 'EXPENSE', parentCode: '52', isLeaf: true, balance: 0, costCenterId: 'general' },
 ];
 
 export const INITIAL_CASH_BOXES = [

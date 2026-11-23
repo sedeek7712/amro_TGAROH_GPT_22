@@ -363,7 +363,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
             .filter((x) => x.allocatedAmount > 0)
         : undefined;
 
-    if (voucherMode !== 'GENERAL' && useManualOverride && targetStatus === 'POSTED') {
+    if (voucherMode !== 'GENERAL' && useManualOverride) {
       if (!overrideReason.trim()) {
         setVoucherError('يجب كتابة سبب التعديل اليدوي لتوثيقه في سجل التدقيق.');
         return;
@@ -437,7 +437,12 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
     setActionBanner(null);
     setIsSubmitting(true);
     try {
-      const res = await dataService.postDraftCashVoucherAtomic({ voucherId: v.id });
+      const res = await dataService.postDraftCashVoucherAtomic({
+        voucherId: v.id,
+        ...(v.manualOverride && Array.isArray(v.manualAllocations)
+          ? { manualAllocations: v.manualAllocations, overrideReason: v.overrideReason }
+          : {}),
+      });
       setActionBanner({
         type: 'success',
         text: `تم ترحيل المسودة (${res.voucher.voucherNumber}) وإصدار القيد المحاسبي وتحديث الذمم بنجاح.`,

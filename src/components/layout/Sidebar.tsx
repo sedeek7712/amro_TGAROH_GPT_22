@@ -29,7 +29,7 @@ import {
   LogOut,
 } from 'lucide-react';
 import { ActivityId, SystemUser } from '../../types/erp';
-import { ActiveView, ROLE_ALLOWED_VIEWS } from '../../config/rbac';
+import { ActiveView, ROLE_ALLOWED_VIEWS, getAuthorizedActivityIds } from '../../config/rbac';
 
 export type { ActiveView };
 
@@ -74,13 +74,20 @@ export const Sidebar: React.FC<SidebarProps> = ({
   const allowedViews = ROLE_ALLOWED_VIEWS[currentUser?.role || 'CASHIER'] || ROLE_ALLOWED_VIEWS.CASHIER;
   const navItems = allNavItems.filter((item) => allowedViews.includes(item.id));
 
-  const activities = [
+  const allActivities = [
     { id: 'all', label: 'كافة الأنشطة (مجمع)', icon: Sparkles, color: 'text-slate-400' },
     { id: 'pharmacy' as ActivityId, label: 'الصيدلية', icon: Pill, color: 'text-emerald-400' },
     { id: 'grocery' as ActivityId, label: 'البقالة والأغذية', icon: ShoppingBag, color: 'text-amber-400' },
     { id: 'bike_parts' as ActivityId, label: 'قطع غيار الدراجات', icon: Bike, color: 'text-blue-400' },
     { id: 'equipment_parts' as ActivityId, label: 'قطع غيار المعدات', icon: Wrench, color: 'text-indigo-400' },
   ];
+  const authorizedActivities = getAuthorizedActivityIds(currentUser);
+  const activities =
+    currentUser?.role === 'ADMIN'
+      ? allActivities
+      : allActivities.filter((act) =>
+          act.id === 'all' ? authorizedActivities.size > 1 : authorizedActivities.has(act.id)
+        );
 
   const renderSidebarContent = (isMobile: boolean = false) => (
     <div className="flex flex-col h-full overflow-hidden select-none">

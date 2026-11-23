@@ -336,3 +336,154 @@ test('Phase 7 Upgrade: creates pre-migration backup, preserves data across v1->v
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('ACT-01: SQLite backend enforces allowedActivities on product/invoice reads and writes', async () => {
+  const dir = makeTempDir('amro-act01-');
+  let runtime = null;
+  try {
+    runtime = await openErpDatabase({ userDataPath: dir });
+    const auth = new DesktopAuthenticationService(runtime.database);
+    auth.createInitialAdmin({
+      username: 'admin_act',
+      fullName: 'المدير العام',
+      password: 'StrongPassword#123',
+    });
+    const adminLogin = auth.authenticate({ username: 'admin_act', password: 'StrongPassword#123' });
+    const backend = createDesktopBackend({
+      database: runtime.database,
+      backupDirectory: runtime.backupDirectory,
+      authenticationService: auth,
+    });
+
+    backend.createUser({
+      token: adminLogin.token,
+      input: {
+        username: 'cashier_ph',
+        fullName: 'كاشير الصيدلية',
+        role: 'CASHIER',
+        allowedActivities: ['pharmacy'],
+        branchId: 'branch_main',
+        allowedBranches: ['branch_main'],
+        plainPassword: 'CashierPass#2026',
+      },
+    });
+    backend.createUser({
+      token: adminLogin.token,
+      input: {
+        username: 'keeper_gr',
+        fullName: 'أمين مخزن البقالة',
+        role: 'INVENTORY_KEEPER',
+        allowedActivities: ['grocery'],
+        branchId: 'branch_main',
+        allowedBranches: ['branch_main'],
+        plainPassword: 'KeeperPass#2026',
+      },
+    });
+
+    backend.saveProductAtomic({
+      token: adminLogin.token,
+      product: {
+        id: 'sq-p-ph',
+        activityId: 'pharmacy',
+        code: 'SQ-PH-1',
+        nameAr: 'دواء SQLite',
+        category: 'أدوية',
+        unit: 'علبة',
+        purchasePrice: 10,
+        sellPrice: 20,
+        currentStock: 5,
+        minStockAlert: 1,
+        batches: [],
+      },
+      isUpdate: false,
+    });
+    backend.saveProductAtomic({
+      token: adminLogin.token,
+      product: {
+        id: 'sq-p-gr',
+        activityId: 'grocery',
+        code: 'SQ-GR-1',
+        nameAr: 'سلعة بقالة SQLite',
+        category: 'أغذية',
+        unit: 'حبة',
+        purchasePrice: 5,
+        sellPrice: 8,
+        currentStock: 5,
+        minStockAlert: 1,
+        batches: [],
+      },
+      isUpdate: false,
+    });
+
+    backend.createSalesInvoiceAtomic({
+      token: adminLogin.token,
+      params: {
+        invoice: {
+          id: 'sq-inv-gr',
+          type: 'SALE',
+          activityId: 'grocery',
+          branchId: 'branch_main',
+          partyName: 'عميل نقدي',
+          date: '2026-11-22',
+          items: [{ id: 'sq-i-1', productId: 'sq-p-gr', productName: 'سلعة بقالة SQLite', quantity: 1, unitPrice: 8, discount: 0, total: 8 }],
+          subtotal: 8,
+          discount: 0,
+          tax: 0,
+          total: 8,
+          paymentMethod: 'CASH',
+          cashBoxId: 'cb-1',
+          paidAmount: 8,
+        },
+        stockDeductions: [{ productId: 'sq-p-gr', quantity: 1 }],
+      },
+    });
+
+    const cashierLogin = auth.authenticate({ username: 'cashier_ph', password: 'CashierPass#2026' });
+    const visibleProducts = backend.getProducts({ token: cashierLogin.token });
+    assert.deepEqual(visibleProducts.map((p) => p.id), ['sq-p-ph']);
+    assert.equal(backend.getProductById({ token: cashierLogin.token, id: 'sq-p-gr' }), undefined);
+    assert.deepEqual(backend.getInvoices({ token: cashierLogin.token }), []);
+    assert.equal(backend.getInvoiceById({ token: cashierLogin.token, id: 'sq-inv-gr' }), undefined);
+
+    assert.throws(
+      () =>
+        backend.createSalesInvoiceAtomic({
+          token: cashierLogin.token,
+          params: {
+            invoice: {
+              id: 'sq-inv-forbid',
+              type: 'SALE',
+              activityId: 'grocery',
+              branchId: 'branch_main',
+              partyName: 'عميل نقدي',
+              date: '2026-11-22',
+              items: [{ id: 'sq-i-f', productId: 'sq-p-gr', productName: 'سلعة بقالة SQLite', quantity: 1, unitPrice: 8, discount: 0, total: 8 }],
+              subtotal: 8,
+              discount: 0,
+              tax: 0,
+              total: 8,
+              paymentMethod: 'CASH',
+              cashBoxId: 'cb-1',
+              paidAmount: 8,
+            },
+            stockDeductions: [{ productId: 'sq-p-gr', quantity: 1 }],
+          },
+        }),
+      /غير مصرح/
+    );
+
+    const keeperLogin = auth.authenticate({ username: 'keeper_gr', password: 'KeeperPass#2026' });
+    assert.throws(
+      () =>
+        backend.adjustProductStockAtomic({
+          token: keeperLogin.token,
+          params: { productId: 'sq-p-ph', deltaQuantity: -1, reason: 'محاولة غير مصرح بها' },
+        }),
+      /غير مصرح/
+    );
+  } finally {
+    if (runtime) runtime.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+

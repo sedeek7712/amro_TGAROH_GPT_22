@@ -6,6 +6,7 @@ import path from 'node:path';
 import { openErpDatabase, restoreSqliteBackupFile, verifySqliteFile } from '../../electron/sqlite/database.mjs';
 import { DesktopAuthenticationService } from '../../electron/security/authentication.mjs';
 import { createDesktopBackend } from '../../electron/sqlite/desktop-backend.mjs';
+import { importLegacyBackup, legacyChecksum } from '../../electron/sqlite/legacy-backup-importer.mjs';
 
 test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preserving passwords/batches, outbox lease & sync conflicts', async () => {
   const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'erp-batch-d-'));
@@ -405,10 +406,147 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     assert.equal(syncedProd.currentStock, 12);
     assert.equal(syncedProd.batches.length, 1);
 
+    // 6. SYNC-01 parity: applyRemoteEntity Pull for PAYMENT_ALLOCATION, PARTY_ADVANCE, ALLOCATION_AUDIT
+    backend2.applyRemoteEntity({
+      token: token2,
+      entityType: 'PAYMENT_ALLOCATION',
+      row: {
+        id: 'alloc-rem-1',
+        branch_id: 'branch_main',
+        voucher_id: null,
+        advance_transaction_id: 'adv-rem-1',
+        party_id: supplier.id,
+        invoice_id: 'pur-d-1',
+        allocated_amount: 40,
+        allocation_method: 'MANUAL',
+        status: 'ACTIVE',
+        created_at: '2026-11-22T10:00:00.000Z',
+        created_by: 'admin',
+        payload_data: { overrideReason: 'سحب سحابي' },
+      },
+    });
+    const pulledAllocs = backend2.getPaymentAllocations({ token: token2, partyId: supplier.id });
+    assert.ok(pulledAllocs.some((a) => a.id === 'alloc-rem-1' && a.allocatedAmount === 40));
+
+    backend2.applyRemoteEntity({
+      token: token2,
+      entityType: 'PARTY_ADVANCE',
+      row: {
+        id: 'adv-rem-1',
+        branch_id: 'branch_main',
+        party_id: supplier.id,
+        party_type: 'SUPPLIER',
+        tx_type: 'ADVANCE_CREATED',
+        amount: 40,
+        balance_after: 40,
+        tx_date: '2026-11-22',
+        created_at: '2026-11-22T09:55:00.000Z',
+      },
+    });
+    const pulledAdvs = backend2.getPartyAdvanceTransactions({ token: token2, partyId: supplier.id });
+    assert.ok(pulledAdvs.some((a) => a.id === 'adv-rem-1' && a.amount === 40));
+
+    backend2.applyRemoteEntity({
+      token: token2,
+      entityType: 'ALLOCATION_AUDIT',
+      row: {
+        id: 'aud-rem-1',
+        branch_id: 'branch_main',
+        voucher_id: 'v-rem-1',
+        party_id: supplier.id,
+        user_id: 'admin',
+        user_name: 'المدير العام',
+        audit_timestamp: '2026-11-22T10:01:00.000Z',
+        action: 'OVERRIDE',
+        reason: 'اختبار سحب تدقيق التخصيص',
+      },
+    });
+    const pulledAudits = backend2.getAllocationAudits({ token: token2, voucherId: 'v-rem-1' });
+    assert.ok(pulledAudits.some((a) => a.id === 'aud-rem-1' && a.voucherId === 'v-rem-1'));
+
     rt2.close();
   } finally {
     rmSync(userDataPath, { recursive: true, force: true });
     rmSync(customBackupDir, { recursive: true, force: true });
     rmSync(externalExportDir, { recursive: true, force: true });
+  }
+});
+
+test('BKP-01: SQLite importLegacyBackup handles older v2.0 JSON backups omitting optional tables/fields', async () => {
+  const legacyDir = mkdtempSync(path.join(os.tmpdir(), 'erp-bkp01-'));
+  let runtime = null;
+  try {
+    runtime = await openErpDatabase({ userDataPath: legacyDir });
+    const legacyData = {
+      accounts: [
+        { code: '1101', nameAr: 'الصندوق', type: 'ASSET', parentCode: null, isLeaf: true, balance: 500 },
+      ],
+      products: [
+        {
+          id: 'old-p-1',
+          activityId: 'pharmacy',
+          code: 'OLD-1',
+          nameAr: 'دواء قديم',
+          category: 'أدوية',
+          unit: 'علبة',
+          purchasePrice: 10,
+          sellPrice: 20,
+          currentStock: 5,
+          minStockAlert: 1,
+          batches: [
+            { id: 'old-b-1', productId: 'old-p-1', batchNumber: 'OB1', expiryDate: '2028-01-01', quantity: 5, costPrice: 10 },
+          ],
+        },
+      ],
+      parties: [
+        { id: 'old-c-1', type: 'CUSTOMER', nameAr: 'عميل قديم', phone: '700', balance: 100 },
+      ],
+      invoices: [
+        {
+          id: 'old-inv-1',
+          invoiceNumber: 'INV-OLD-1',
+          type: 'SALE',
+          activityId: 'pharmacy',
+          partyId: 'old-c-1',
+          partyName: 'عميل قديم',
+          date: '2026-09-01',
+          items: [],
+          total: 100,
+          paidAmount: 0,
+          paymentMethod: 'CREDIT',
+        },
+      ],
+      journalEntries: [],
+      cashBoxes: [
+        { id: 'cb-old', code: 'CB-1', nameAr: 'الصندوق', accountCode: '1101', balance: 500, branchId: 'branch_main' },
+      ],
+      vouchers: [],
+      users: [
+        {
+          id: 'u-old-admin',
+          username: 'oldadmin',
+          fullName: 'مدير قديم',
+          role: 'ADMIN',
+          branchId: 'branch_main',
+          active: true,
+        },
+      ],
+    };
+    const raw = JSON.stringify({
+      systemIdentifier: 'multi_activity_erp',
+      version: '2.0.0',
+      exportedAt: '2026-09-01T00:00:00.000Z',
+      checksum: legacyChecksum(legacyData),
+      data: legacyData,
+    });
+    const res = await importLegacyBackup(runtime.database, runtime.backupDirectory, raw);
+    assert.equal(res.success, true);
+    assert.equal(res.rowCounts.activities, 4);
+    assert.equal(res.rowCounts.productBatches, 1);
+    assert.equal(res.rowCounts.branches, 1);
+    assert.equal(res.financialTotals.invoiceTotal, '100.000000');
+  } finally {
+    if (runtime) runtime.close();
+    rmSync(legacyDir, { recursive: true, force: true });
   }
 });

@@ -243,6 +243,7 @@ class InventoryService {
       } else {
         itemVal = p.currentStock * p.purchasePrice;
       }
+      itemVal = Number(itemVal.toFixed(2));
 
       totalValue += itemVal;
       totalItemsCount += p.currentStock;

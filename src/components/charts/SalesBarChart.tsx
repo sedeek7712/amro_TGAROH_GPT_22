@@ -3,6 +3,7 @@
  * يدعم التدرجات اللونية (Gradients)، تأثيرات التمرير التفاعلية (Tooltips)، والمؤشرات الدقيقة
  */
 import React, { useState } from 'react';
+import { getActiveCurrencyConfig } from '../../config/currency';
 
 interface BarData {
   label: string;
@@ -18,6 +19,7 @@ interface SalesBarChartProps {
 
 export const SalesBarChart: React.FC<SalesBarChartProps> = ({ data, title, height = 240 }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   const maxValue = Math.max(...data.map((d) => d.value), 1);
   const totalValue = data.reduce((acc, curr) => acc + curr.value, 0);
@@ -47,7 +49,7 @@ export const SalesBarChart: React.FC<SalesBarChartProps> = ({ data, title, heigh
         </div>
         <div className="text-left font-mono">
           <span className="text-[10px] text-slate-500 block">الإجمالي المحقق</span>
-          <span className="text-xs sm:text-sm font-extrabold text-slate-900">{formatValue(totalValue)} ر.س</span>
+          <span className="text-xs sm:text-sm font-extrabold text-slate-900">{formatValue(totalValue)} {currencySymbol}</span>
         </div>
       </div>
 
@@ -205,7 +207,7 @@ export const SalesBarChart: React.FC<SalesBarChartProps> = ({ data, title, heigh
             />
             <span className="font-bold">{data[hoveredIndex].label}:</span>
             <span className="font-mono text-emerald-400 font-bold">
-              {formatValue(data[hoveredIndex].value)} ر.س
+              {formatValue(data[hoveredIndex].value)} {currencySymbol}
             </span>
           </div>
         )}

@@ -171,6 +171,49 @@ export function filterRecordsByBranchScope(records, actor) {
   return records.filter((rec) => Boolean(rec && rec.branchId && allowed.has(rec.branchId)));
 }
 
+export function getAuthorizedActivityIds(actor) {
+  if (!actor || !actor.active) return new Set();
+  const ids = (Array.isArray(actor.allowedActivities) ? actor.allowedActivities : [])
+    .map((a) => String(a).trim())
+    .filter(Boolean);
+  return new Set(ids);
+}
+
+export function assertActivityAccess(actor, targetActivityId, actionLabel) {
+  if (!actor || !actor.active) {
+    throw new PermissionError('حظر أمني: الجلسة غير صالحة.', 'activity:access');
+  }
+  const normalizedTarget = typeof targetActivityId === 'string' ? targetActivityId.trim() : '';
+  if (!normalizedTarget) {
+    throw new PermissionError(
+      'حظر عزل الأنشطة: يجب تحديد معرف نشاط تجاري صالح لتنفيذ العملية.',
+      'activity:required'
+    );
+  }
+  if (actor.role === 'ADMIN') return;
+  const allowed = getAuthorizedActivityIds(actor);
+  if (allowed.size === 0) {
+    throw new PermissionError(
+      'حظر عزل الأنشطة: المستخدم غير مرتبط بأي نشاط تجاري مصرح به.',
+      'activity:unassigned'
+    );
+  }
+  if (!allowed.has(normalizedTarget)) {
+    throw new PermissionError(
+      `حظر عزل الأنشطة: المستخدم غير مصرح له ${actionLabel ? `بـ (${actionLabel}) ` : ''}على النشاط (${normalizedTarget}).`,
+      `activity:${normalizedTarget}`
+    );
+  }
+}
+
+export function filterRecordsByActivityScope(records, actor) {
+  if (!actor || !actor.active) return [];
+  if (actor.role === 'ADMIN') return records;
+  const allowed = getAuthorizedActivityIds(actor);
+  if (allowed.size === 0) return [];
+  return records.filter((rec) => Boolean(rec && rec.activityId && allowed.has(rec.activityId)));
+}
+
 export function filterAuditLogsForUser(logs, actor) {
   if (!actor || !actor.active || !actor.tenantId || !String(actor.tenantId).trim()) return [];
   if (actor.role === 'ADMIN') {

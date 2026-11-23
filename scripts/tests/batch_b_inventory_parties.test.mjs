@@ -213,6 +213,69 @@ test('Batch B backend: products, product_batches sync, FEFO adjustment, parties,
     const loadedCust = backend2.getPartyById({ token: adminToken2, id: 'cust-1' });
     assert.equal(loadedCust.balance, 50);
     assert.equal(loadedCust.nameAr, 'صيدلية الشفاء الحديثة');
+
+    // 10. INV-01 & INV-03 parity checks:
+    // Opening JV + FEFO shortage (-6 = 72.5) + surplus (+2.5 = 31.25) + temp opening/reversal must keep 11041 = 143.75 and 5205 = 41.25
+    const accounts2 = backend2.getAccounts({ token: adminToken2 });
+    const inv11041 = accounts2.find((a) => a.code === '11041');
+    const adj5205 = accounts2.find((a) => a.code === '5205');
+    assert.equal(inv11041.balance, 143.75);
+    assert.equal(adj5205.balance, 41.25);
+
+    const jvs = backend2.getJournalEntries({ token: adminToken2 });
+    for (const jv of jvs) {
+      const dr = jv.lines.reduce((s, l) => s + l.debit, 0);
+      const cr = jv.lines.reduce((s, l) => s + l.credit, 0);
+      assert.equal(Number(dr.toFixed(2)), Number(cr.toFixed(2)));
+    }
+
+    // Archiving (isActive = false) persists cleanly without deleting stock history
+    const archivedProd = backend2.saveProductAtomic({
+      token: adminToken2,
+      product: { ...loadedProd, isActive: false },
+      isUpdate: true,
+    });
+    assert.equal(archivedProd.isActive, false);
+    assert.equal(backend2.getProductById({ token: adminToken2, id: 'prod-1' }).isActive, false);
+
+    // Invoice-referenced product deletion must be blocked
+    backend2.createSalesInvoiceAtomic({
+      token: adminToken2,
+      params: {
+        invoice: {
+          id: 'inv-b-lock',
+          invoiceNumber: '',
+          type: 'SALE',
+          activityId: 'pharmacy',
+          date: '2026-11-22',
+          partyName: 'عميل نقدي',
+          items: [
+            {
+              productId: 'prod-1',
+              productName: 'باراسيتامول 500 ملغ',
+              quantity: 1,
+              unitPrice: 18.75,
+              discount: 0,
+              total: 18.75,
+              unit: 'علبة',
+            },
+          ],
+          subtotal: 18.75,
+          discount: 0,
+          tax: 0,
+          total: 18.75,
+          paidAmount: 18.75,
+          paymentMethod: 'CASH',
+          cashBoxId: 'cb-1',
+        },
+        stockDeductions: [{ productId: 'prod-1', quantity: 1 }],
+      },
+    });
+    assert.throws(
+      () => backend2.deleteProductAtomic({ token: adminToken2, productId: 'prod-1' }),
+      /لا يمكن حذف صنف/
+    );
+
     rt2.close();
   } finally {
     rmSync(userDataPath, { recursive: true, force: true });

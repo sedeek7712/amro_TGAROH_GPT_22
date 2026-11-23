@@ -243,4 +243,173 @@ describe('Sync Engine Regression Tests (SYN-03, SYNC-01..06)', () => {
     assert.equal(crossTenantRes.pulled, 0);
     assert.ok(crossTenantRes.errors[0]?.includes('حظر عزل المؤسسات'));
   });
+
+  test('SEC-01: Rejects service_role, wrong-tenant, and expired JWTs; sends real user JWT Bearer token', async () => {
+    const makeJwt = (claims: Record<string, unknown>) => {
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const body = Buffer.from(JSON.stringify(claims)).toString('base64url');
+      return `${header}.${body}.sig`;
+    };
+    const futureExp = Math.floor(Date.now() / 1000) + 3600;
+    const pastExp = Math.floor(Date.now() / 1000) - 60;
+
+    // 1. Reject service_role key
+    supabaseSync.saveConfig({
+      supabaseUrl: 'https://test.supabase.co',
+      supabaseAnonKey: 'anon-test-key',
+      tenantId: 'tenant_main',
+      supabaseAccessToken: makeJwt({ role: 'service_role', tenant_id: 'tenant_main', exp: futureExp }),
+      autoSync: false,
+    });
+    const serviceRoleRes = await supabaseSync.testConnection();
+    assert.equal(serviceRoleRes.success, false);
+    assert.ok(serviceRoleRes.message.includes('service_role'));
+
+    // 2. Reject wrong tenant_id claim
+    supabaseSync.saveConfig({
+      supabaseAccessToken: makeJwt({ role: 'authenticated', erp_role: 'ADMIN', tenant_id: 'tenant_evil', exp: futureExp }),
+    });
+    const wrongTenantRes = await supabaseSync.testConnection();
+    assert.equal(wrongTenantRes.success, false);
+    assert.ok(wrongTenantRes.message.includes('حظر عزل المؤسسات'));
+
+    // 3. Reject expired token
+    supabaseSync.saveConfig({
+      supabaseAccessToken: makeJwt({ role: 'authenticated', erp_role: 'ADMIN', tenant_id: 'tenant_main', exp: pastExp }),
+    });
+    const expiredRes = await supabaseSync.testConnection();
+    assert.equal(expiredRes.success, false);
+    assert.ok(expiredRes.message.includes('منتهي'));
+
+    // 4. Valid user JWT sends Authorization: Bearer <user_jwt> (NOT anon key)
+    const validJwt = makeJwt({ role: 'authenticated', erp_role: 'ADMIN', tenant_id: 'tenant_main', exp: futureExp });
+    let capturedAuthHeader = '';
+    globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const headers = init?.headers as Record<string, string> | undefined;
+      capturedAuthHeader = headers?.Authorization || '';
+      return new Response(JSON.stringify([{ id: 'tenant_main', name: 'مؤسسة الاختبار' }]), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const signInRes = await (async () => {
+      globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes('/auth/v1/token')) {
+          return new Response(
+            JSON.stringify({ access_token: validJwt, expires_in: 3600 }),
+            { status: 200, headers: { 'Content-Type': 'application/json' } }
+          );
+        }
+        const headers = init?.headers as Record<string, string> | undefined;
+        capturedAuthHeader = headers?.Authorization || '';
+        return new Response(JSON.stringify([{ id: 'tenant_main', name: 'مؤسسة الاختبار' }]), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }) as typeof fetch;
+      return supabaseSync.signInWithSupabasePassword('admin@test.local', 'Secret#123');
+    })();
+    assert.equal(signInRes.success, true);
+
+    const connRes = await supabaseSync.testConnection();
+    assert.equal(connRes.success, true);
+    assert.equal(capturedAuthHeader, `Bearer ${validJwt}`);
+    assert.notEqual(capturedAuthHeader, 'Bearer anon-test-key');
+  });
+
+  test('SYNC-01: Supabase Pull hydrates payment allocations, party advances, and allocation audits', async () => {
+    await db.paymentAllocations.clear();
+    await db.partyAdvanceTransactions.clear();
+    await db.allocationAudits.clear();
+
+    const makeJwt = (claims: Record<string, unknown>) => {
+      const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+      const body = Buffer.from(JSON.stringify(claims)).toString('base64url');
+      return `${header}.${body}.sig`;
+    };
+    const validJwt = makeJwt({
+      role: 'authenticated',
+      erp_role: 'ADMIN',
+      tenant_id: 'tenant_main',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    });
+
+    supabaseSync.saveConfig({
+      supabaseUrl: 'https://test.supabase.co',
+      supabaseAnonKey: 'anon-test-key',
+      tenantId: 'tenant_main',
+      branchId: 'branch_main',
+      supabaseAccessToken: validJwt,
+      autoSync: false,
+      tableCursors: {},
+    });
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/erp_payment_allocations')) {
+        return new Response(JSON.stringify([{
+          id: 'alloc-remote-1',
+          tenant_id: 'tenant_main',
+          branch_id: 'branch_main',
+          voucher_id: 'vch-1',
+          party_id: 'cust-1',
+          invoice_id: 'inv-1',
+          allocated_amount: 500,
+          allocation_method: 'MANUAL',
+          status: 'ACTIVE',
+          created_at: '2026-11-23T10:00:00Z',
+          updated_at: '2026-11-23T10:00:00Z',
+        }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/erp_party_advances')) {
+        return new Response(JSON.stringify([{
+          id: 'adv-remote-1',
+          tenant_id: 'tenant_main',
+          branch_id: 'branch_main',
+          party_id: 'cust-1',
+          party_type: 'CUSTOMER',
+          tx_type: 'OVERPAYMENT_DEPOSIT',
+          amount: 250,
+          balance_after: 250,
+          voucher_id: 'vch-1',
+          tx_date: '2026-11-23',
+          created_at: '2026-11-23T10:00:00Z',
+          updated_at: '2026-11-23T10:00:00Z',
+        }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      if (url.includes('/erp_allocation_audits')) {
+        return new Response(JSON.stringify([{
+          id: 'audit-remote-1',
+          tenant_id: 'tenant_main',
+          branch_id: 'branch_main',
+          voucher_id: 'vch-1',
+          party_id: 'cust-1',
+          user_id: 'usr-1',
+          user_name: 'محاسب',
+          reason: 'اتفاق خاص مع العميل',
+          previous_allocations: [],
+          new_allocations: [{ invoiceId: 'inv-1', amount: 500 }],
+          audit_timestamp: '2026-11-23T10:00:00Z',
+          updated_at: '2026-11-23T10:00:00Z',
+        }]), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response('[]', { status: 200, headers: { 'Content-Type': 'application/json' } });
+    }) as typeof fetch;
+
+    const pullRes = await supabaseSync.pullDeltaFromSupabase();
+    assert.equal(pullRes.errors.length, 0);
+    assert.equal(pullRes.pulled, 3);
+
+    const pulledAlloc = await db.paymentAllocations.get('alloc-remote-1');
+    const pulledAdv = await db.partyAdvanceTransactions.get('adv-remote-1');
+    const pulledAudit = await db.allocationAudits.get('audit-remote-1');
+    assert.equal(pulledAlloc?.allocatedAmount, 500);
+    assert.equal(pulledAlloc?.allocationMethod, 'MANUAL');
+    assert.equal(pulledAdv?.balanceAfter, 250);
+    assert.equal(pulledAdv?.type, 'OVERPAYMENT_DEPOSIT');
+    assert.equal(pulledAudit?.reason, 'اتفاق خاص مع العميل');
+  });
 });
+

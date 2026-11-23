@@ -3,7 +3,7 @@
  * يدعم الصيدلية (تشغيلات وصلاحية)، البقالة (باركود)، وقطع الغيار (OEM وتوافقية)
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Package,
   Plus,
@@ -23,10 +23,14 @@ import {
   DollarSign,
   Layers,
   ArrowUpDown,
+  Archive,
+  RotateCcw,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
 import { dataService } from '../../services/dataService';
+import { authService } from '../../services/authService';
+import { getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId } from '../../types/erp';
@@ -42,9 +46,30 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   setSelectedActivity,
   onRefresh,
 }) => {
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const actor =
+    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
+  const authorizedActivityIds = getAuthorizedActivityIds(actor);
+  const isActivityAllowed = (id: ActivityId) =>
+    actor?.role === 'ADMIN' || authorizedActivityIds.has(id);
+  const firstAllowedActivity: ActivityId =
+    (['pharmacy', 'grocery', 'bike_parts', 'equipment_parts'] as ActivityId[]).find((id) =>
+      isActivityAllowed(id)
+    ) || 'pharmacy';
+
   const [activeTab, setActiveTab] = useState<ActivityId>(
-    selectedActivity === 'all' ? 'pharmacy' : selectedActivity
+    selectedActivity !== 'all' && isActivityAllowed(selectedActivity)
+      ? selectedActivity
+      : firstAllowedActivity
   );
+
+  useEffect(() => {
+    if (selectedActivity !== 'all' && isActivityAllowed(selectedActivity)) {
+      setActiveTab(selectedActivity);
+    } else if (!isActivityAllowed(activeTab)) {
+      setActiveTab(firstAllowedActivity);
+    }
+  }, [selectedActivity, firstAllowedActivity]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'low_stock' | 'expiring'>('all');
@@ -296,6 +321,27 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     }
   };
 
+  const handleToggleArchiveProduct = async (product: Product) => {
+    if (isSubmitting) return;
+    setTableError(null);
+    setIsSubmitting(true);
+    try {
+      const nextActive = product.isActive === false;
+      await dataService.saveProductAtomic(
+        {
+          ...product,
+          isActive: nextActive,
+        },
+        true
+      );
+      onRefresh();
+    } catch (err: unknown) {
+      setTableError(err instanceof Error ? err.message : 'تعذر تحديث حالة أرشفة الصنف.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
   const handleSaveAdjustment = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!adjustProduct || isSubmitting) return;
@@ -329,12 +375,16 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     }
   };
 
-  const activities = [
+  const allActivities = [
     { id: 'pharmacy' as ActivityId, name: 'الصيدلية', icon: Pill, color: 'text-emerald-600' },
     { id: 'grocery' as ActivityId, name: 'المواد الغذائية والبقالة', icon: ShoppingBag, color: 'text-amber-600' },
     { id: 'bike_parts' as ActivityId, name: 'قطع غيار الدراجات', icon: Bike, color: 'text-blue-600' },
     { id: 'equipment_parts' as ActivityId, name: 'قطع غيار المعدات', icon: Wrench, color: 'text-indigo-600' },
   ];
+  const activities =
+    actor?.role === 'ADMIN'
+      ? allActivities
+      : allActivities.filter((act) => authorizedActivityIds.has(act.id));
 
   return (
     <div className="p-3.5 sm:p-5 lg:p-6 space-y-4 sm:space-y-6 max-w-7xl mx-auto">
@@ -462,11 +512,24 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
               ) : (
                 filteredProducts.map((p) => {
                   const isLow = p.currentStock <= p.minStockAlert;
+                  const isArchived = p.isActive === false;
                   return (
-                    <tr key={p.id} className="hover:bg-slate-50/80 transition-colors">
+                    <tr
+                      key={p.id}
+                      className={`transition-colors ${
+                        isArchived ? 'bg-slate-50/80 opacity-70 hover:bg-slate-100/70' : 'hover:bg-slate-50/80'
+                      }`}
+                    >
                       <td className="py-3 px-4 font-mono font-bold text-slate-900">{p.code}</td>
                       <td className="py-3 px-4">
-                        <div className="font-bold text-slate-900">{p.nameAr}</div>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span className="font-bold text-slate-900">{p.nameAr}</span>
+                          {isArchived && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-bold bg-slate-200 text-slate-700 rounded">
+                              مؤرشف
+                            </span>
+                          )}
+                        </div>
                         {p.barcode && (
                           <div className="text-[10px] text-slate-400 font-mono">باركود: {p.barcode}</div>
                         )}
@@ -530,6 +593,18 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                             title="تعديل بيانات الصنف"
                           >
                             <Edit2 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            onClick={() => handleToggleArchiveProduct(p)}
+                            disabled={isSubmitting}
+                            className={`p-1.5 rounded-md transition-colors ${
+                              isArchived
+                                ? 'text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50'
+                                : 'text-slate-500 hover:text-amber-700 hover:bg-amber-50'
+                            }`}
+                            title={isArchived ? 'إعادة تفعيل الصنف' : 'أرشفة الصنف وتعطيله'}
+                          >
+                            {isArchived ? <RotateCcw className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
                           </button>
                           <button
                             onClick={() => setDeleteConfirmProduct(p)}

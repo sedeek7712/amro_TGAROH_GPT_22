@@ -24,6 +24,9 @@ import {
   JournalEntry,
   PaymentVoucher,
   AmanatRecord,
+  PaymentAllocation,
+  PartyAdvanceTransaction,
+  AllocationAudit,
 } from '../types/erp';
 import { syncQueueService } from './syncQueueService';
 import { networkMonitor } from './networkMonitor';
@@ -552,6 +555,9 @@ class DjangoSyncService {
       { type: 'INVOICE', endpoint: '/invoices/' },
       { type: 'JOURNAL_ENTRY', endpoint: '/journal-entries/' },
       { type: 'VOUCHER', endpoint: '/vouchers/' },
+      { type: 'PAYMENT_ALLOCATION', endpoint: '/payment-allocations/' },
+      { type: 'PARTY_ADVANCE', endpoint: '/party-advances/' },
+      { type: 'ALLOCATION_AUDIT', endpoint: '/allocation-audits/' },
       { type: 'AMANAT', endpoint: '/amanat-records/' },
     ];
 
@@ -750,6 +756,7 @@ class DjangoSyncService {
           minStockAlert: Number(row.min_stock_alert ?? row.minStockAlert ?? 0),
           storageLocation: row.storage_location ? String(row.storage_location) : undefined,
           trackExpiry: Boolean(row.track_expiry ?? row.trackExpiry),
+          isActive: row.is_active !== false && row.isActive !== false,
           batches: Array.isArray(row.batches) ? (row.batches as Product['batches']) : undefined,
         };
         await db.products.put(p);
@@ -769,6 +776,7 @@ class DjangoSyncService {
           phone: String(row.phone || ''),
           address: row.address ? String(row.address) : undefined,
           balance: Number(row.balance || 0),
+          advanceBalance: Number(row.advance_balance ?? row.advanceBalance ?? 0),
         };
         await db.parties.put(party);
         break;
@@ -784,14 +792,18 @@ class DjangoSyncService {
           partyId: row.party_id ? String(row.party_id) : undefined,
           partyName: String(row.party_name || row.partyName || ''),
           date: String(row.date || new Date().toISOString().split('T')[0]),
+          dueDate: row.due_date ? String(row.due_date) : row.dueDate ? String(row.dueDate) : undefined,
           items: Array.isArray(row.items) ? (row.items as Invoice['items']) : [],
           subtotal: Number(row.subtotal || 0),
           discount: Number(row.discount || 0),
           tax: Number(row.tax || 0),
           total: Number(row.total || 0),
           paidAmount: Number(row.paid_amount ?? row.paidAmount ?? 0),
+          returnedAmount: Number(row.returned_amount ?? row.returnedAmount ?? 0),
+          advanceAppliedAmount: Number(row.advance_applied_amount ?? row.advanceAppliedAmount ?? 0),
           paymentMethod: (row.payment_method || row.paymentMethod || 'CASH') as Invoice['paymentMethod'],
           cashBoxId: String(row.cash_box_id || row.cashBoxId || 'cb-1'),
+          status: (row.status as Invoice['status']) || 'POSTED',
           isPosted: Boolean(row.is_posted ?? true),
         };
         await db.invoices.put(inv);
@@ -831,8 +843,90 @@ class DjangoSyncService {
           description: String(row.description || ''),
           costCenterId: (row.cost_center_id || row.costCenterId || 'general') as PaymentVoucher['costCenterId'],
           journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : undefined,
+          status: (row.status as PaymentVoucher['status']) || 'POSTED',
+          appliedToDebtAmount: Number(row.applied_to_debt_amount ?? row.appliedToDebtAmount ?? 0),
+          advanceAmount: Number(row.advance_amount ?? row.advanceAmount ?? 0),
+          manualOverride: Boolean(row.manual_override ?? row.manualOverride),
+          overrideReason: row.override_reason ? String(row.override_reason) : row.overrideReason ? String(row.overrideReason) : undefined,
+          manualAllocations: Array.isArray(row.manual_allocations)
+            ? (row.manual_allocations as PaymentVoucher['manualAllocations'])
+            : Array.isArray(row.manualAllocations)
+            ? (row.manualAllocations as PaymentVoucher['manualAllocations'])
+            : undefined,
+          allocations: Array.isArray(row.allocations)
+            ? (row.allocations as PaymentVoucher['allocations'])
+            : undefined,
         };
         await db.vouchers.put(v);
+        break;
+      }
+
+      case 'PAYMENT_ALLOCATION': {
+        const alloc: PaymentAllocation = {
+          id: String(row.id),
+          tenantId: row.tenant_id ? String(row.tenant_id) : undefined,
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
+          voucherId: row.voucher_id ? String(row.voucher_id) : row.voucherId ? String(row.voucherId) : undefined,
+          advanceTransactionId: row.advance_transaction_id ? String(row.advance_transaction_id) : row.advanceTransactionId ? String(row.advanceTransactionId) : undefined,
+          partyId: String(row.party_id || row.partyId || ''),
+          invoiceId: String(row.invoice_id || row.invoiceId || ''),
+          invoiceNumber: row.invoice_number ? String(row.invoice_number) : row.invoiceNumber ? String(row.invoiceNumber) : undefined,
+          invoiceDate: row.invoice_date ? String(row.invoice_date) : row.invoiceDate ? String(row.invoiceDate) : undefined,
+          allocatedAmount: Number(row.allocated_amount ?? row.allocatedAmount ?? 0),
+          allocationMethod: (row.allocation_method || row.allocationMethod || 'FIFO') as PaymentAllocation['allocationMethod'],
+          status: (row.status as PaymentAllocation['status']) || 'ACTIVE',
+          createdAt: String(row.created_at || row.createdAt || new Date().toISOString()),
+          createdBy: row.created_by ? String(row.created_by) : row.createdBy ? String(row.createdBy) : undefined,
+        };
+        await db.paymentAllocations.put(alloc);
+        break;
+      }
+
+      case 'PARTY_ADVANCE': {
+        const adv: PartyAdvanceTransaction = {
+          id: String(row.id),
+          tenantId: row.tenant_id ? String(row.tenant_id) : undefined,
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
+          partyId: String(row.party_id || row.partyId || ''),
+          partyType: (row.party_type || row.partyType || 'CUSTOMER') as PartyAdvanceTransaction['partyType'],
+          type: (row.tx_type || row.type || 'OVERPAYMENT_DEPOSIT') as PartyAdvanceTransaction['type'],
+          amount: Number(row.amount || 0),
+          balanceAfter: Number(row.balance_after ?? row.balanceAfter ?? 0),
+          voucherId: row.voucher_id ? String(row.voucher_id) : row.voucherId ? String(row.voucherId) : undefined,
+          invoiceId: row.invoice_id ? String(row.invoice_id) : row.invoiceId ? String(row.invoiceId) : undefined,
+          journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : row.journalEntryId ? String(row.journalEntryId) : undefined,
+          date: String(row.tx_date || row.date || new Date().toISOString()),
+          description: String(row.description || ''),
+          createdBy: row.created_by ? String(row.created_by) : row.createdBy ? String(row.createdBy) : undefined,
+          createdAt: String(row.created_at || row.createdAt || new Date().toISOString()),
+        };
+        await db.partyAdvanceTransactions.put(adv);
+        break;
+      }
+
+      case 'ALLOCATION_AUDIT': {
+        const audit: AllocationAudit = {
+          id: String(row.id),
+          tenantId: row.tenant_id ? String(row.tenant_id) : undefined,
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
+          voucherId: String(row.voucher_id || row.voucherId || ''),
+          partyId: String(row.party_id || row.partyId || ''),
+          userId: String(row.user_id || row.userId || ''),
+          userName: String(row.user_name || row.userName || ''),
+          reason: String(row.reason || ''),
+          previousAllocations: Array.isArray(row.previous_allocations)
+            ? (row.previous_allocations as AllocationAudit['previousAllocations'])
+            : Array.isArray(row.previousAllocations)
+            ? (row.previousAllocations as AllocationAudit['previousAllocations'])
+            : [],
+          newAllocations: Array.isArray(row.new_allocations)
+            ? (row.new_allocations as AllocationAudit['newAllocations'])
+            : Array.isArray(row.newAllocations)
+            ? (row.newAllocations as AllocationAudit['newAllocations'])
+            : [],
+          timestamp: String(row.audit_timestamp || row.timestamp || new Date().toISOString()),
+        };
+        await db.allocationAudits.put(audit);
         break;
       }
 

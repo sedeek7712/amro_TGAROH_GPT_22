@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { createSqliteBackup } from './database.mjs';
+import { OFFICIAL_ACTIVITIES } from './seed-data.mjs';
 
 const DEFAULT_TENANT_ID = 'tenant_main';
 const MAX_BACKUP_BYTES = 200 * 1024 * 1024;
@@ -121,13 +122,12 @@ export function parseLegacyBackup(rawBackup) {
     throw new Error('فشل التحقق من Checksum النسخة الاحتياطية؛ تم إيقاف الاستيراد.');
   }
 
-  const keys = [
-    'branches', 'accounts', 'activities', 'products', 'parties', 'invoices',
-    'journalEntries', 'cashBoxes', 'vouchers', 'amanat', 'users', 'auditLogs',
-    'outbox', 'syncConflicts', 'sequences',
+  const requiredKeys = [
+    'accounts', 'products', 'parties', 'invoices',
+    'journalEntries', 'cashBoxes', 'vouchers', 'users',
   ];
   const data = {};
-  for (const key of keys) {
+  for (const key of requiredKeys) {
     if (!Array.isArray(backup.data[key])) {
       throw new Error('النسخة الاحتياطية ناقصة: القائمة ' + key + ' غير موجودة.');
     }
@@ -136,6 +136,38 @@ export function parseLegacyBackup(rawBackup) {
     }
     data[key] = backup.data[key];
   }
+
+  // Older v1/v2.0 backups may omit newer operational/sync arrays; normalize safely while still validating shape if provided.
+  if (backup.data.branches !== undefined) {
+    if (!Array.isArray(backup.data.branches) || !backup.data.branches.every(isObject)) {
+      throw new Error('توجد سجلات غير صالحة في القائمة: branches');
+    }
+    data.branches = backup.data.branches;
+  } else {
+    data.branches = [
+      {
+        id: 'branch_main',
+        tenantId: DEFAULT_TENANT_ID,
+        code: 'BR01',
+        nameAr: 'الفرع الرئيسي',
+        isMain: true,
+        active: true,
+        createdAt: backup.exportedAt || new Date().toISOString(),
+      },
+    ];
+  }
+
+  if (backup.data.activities !== undefined) {
+    if (!Array.isArray(backup.data.activities) || !backup.data.activities.every(isObject)) {
+      throw new Error('توجد سجلات غير صالحة في القائمة: activities');
+    }
+    data.activities = backup.data.activities.length > 0
+      ? backup.data.activities
+      : OFFICIAL_ACTIVITIES.map((a) => ({ ...a }));
+  } else {
+    data.activities = OFFICIAL_ACTIVITIES.map((a) => ({ ...a }));
+  }
+
   data.productBatches = Array.isArray(backup.data.productBatches)
     ? backup.data.productBatches
     : [];
@@ -144,7 +176,16 @@ export function parseLegacyBackup(rawBackup) {
   }
   data.productBatches = buildBatchList(data);
 
-  for (const optKey of ['paymentAllocations', 'partyAdvanceTransactions', 'allocationAudits']) {
+  for (const optKey of [
+    'amanat',
+    'auditLogs',
+    'outbox',
+    'syncConflicts',
+    'sequences',
+    'paymentAllocations',
+    'partyAdvanceTransactions',
+    'allocationAudits',
+  ]) {
     const rawList = backup.data[optKey];
     if (rawList !== undefined) {
       if (!Array.isArray(rawList) || !rawList.every(isObject)) {
@@ -339,11 +380,12 @@ export function insertRows(database, data, options = {}) {
   }
 
   for (const row of data.products) {
+    const normalizedProduct = { ...row, isActive: row.isActive !== false };
     run(
       'INSERT INTO products (tenant_id,id,activity_id,code,barcode,category,current_stock_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)',
       [tenantIdOf(row), requiredString(row.id,'product.id'), requiredString(row.activityId,'product.activityId'),
        requiredString(row.code,'product.code'), row.barcode || null, String(row.category || ''),
-       decimal(row.currentStock,'product.currentStock'), safeJson(row)]
+       decimal(row.currentStock,'product.currentStock'), safeJson(normalizedProduct)]
     );
   }
 
@@ -375,13 +417,19 @@ export function insertRows(database, data, options = {}) {
     }
     const tenantId = tenantIdOf(row);
     const invoiceId = requiredString(row.id,'invoice.id');
+    const normalizedInvoice = {
+      ...row,
+      advanceAppliedAmount: Number(row.advanceAppliedAmount ?? 0),
+      returnedAmount: Number(row.returnedAmount ?? 0),
+      status: row.status || (row.isPosted === false ? 'DRAFT' : 'POSTED'),
+    };
     run(
       'INSERT INTO invoices (tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,due_date,payment_method,total_decimal,paid_amount_decimal,advance_applied_decimal,status,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
       [tenantId, invoiceId, row.branchId || null, requiredString(row.invoiceNumber,'invoice.invoiceNumber'),
        row.type, requiredString(row.activityId,'invoice.activityId'), row.partyId || null,
        requiredString(row.date,'invoice.date'), row.dueDate || null, row.paymentMethod, decimal(row.total,'invoice.total'),
-       decimal(row.paidAmount,'invoice.paidAmount'), decimal(row.advanceAppliedAmount ?? 0,'invoice.advanceAppliedAmount'),
-       row.status || (row.isPosted === false ? 'DRAFT' : 'POSTED'), safeJson(row)]
+       decimal(row.paidAmount ?? 0,'invoice.paidAmount'), decimal(row.advanceAppliedAmount ?? 0,'invoice.advanceAppliedAmount'),
+       normalizedInvoice.status, safeJson(normalizedInvoice)]
     );
     for (const item of row.items || []) {
       run(
@@ -500,11 +548,22 @@ export function insertRows(database, data, options = {}) {
       ? (preservedHashes.byId.get(`${tenantId}:${uid}`) || preservedHashes.byUsername.get(`${tenantId}:${uname.toLowerCase()}`) || null)
       : null;
     const finalHash = row.passwordHash || preservedHash || null;
+    const normalizedUser = stripPasswordHash({
+      ...row,
+      allowedBranches: Array.isArray(row.allowedBranches)
+        ? row.allowedBranches
+        : row.branchId
+          ? [row.branchId]
+          : [],
+      allowedActivities: Array.isArray(row.allowedActivities)
+        ? row.allowedActivities
+        : [],
+    });
     run(
       'INSERT INTO users (tenant_id,id,branch_id,username,role,active,password_hash,data_json) VALUES (?,?,?,?,?,?,?,?)',
       [tenantId, uid, row.branchId || null,
-       uname, row.role, boolInt(row.active),
-       finalHash, safeJson(stripPasswordHash(row))]
+       uname, row.role, boolInt(row.active !== false),
+       finalHash, safeJson(normalizedUser)]
     );
   }
 

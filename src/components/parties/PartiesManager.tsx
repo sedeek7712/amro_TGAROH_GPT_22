@@ -42,6 +42,7 @@ import {
   resolveVoucherAccountingPlan,
   getInvoiceRemainingAmount,
 } from '../../../electron/sqlite/payment-allocation-engine.mjs';
+import { buildPartyStatement } from '../../utils/partyStatement';
 
 interface PartiesManagerProps {
   onRefresh: () => void;
@@ -347,177 +348,25 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
     }
   };
 
-  // استخراج حركات كشف الحساب المفصل للطرف المحدد مع رصيد تراكمي بعد كل حركة وتفاصيل التخصيص والأرصدة المقدمة
+  // استخراج حركات كشف الحساب المفصل للطرف المحدد من المصدر الموحد دون تكرار احتساب السداد
   const getPartyTransactions = (party: Party) => {
-    const relevantInvoices = allInvoices.filter(
-      (inv) => inv.partyId === party.id && inv.status !== 'REVERSED'
-    );
-    const relevantVouchers = allVouchers.filter(
-      (v) => v.partyId === party.id && (v.status || 'POSTED') !== 'DRAFT' && v.status !== 'CANCELLED'
-    );
-
-    const items: Array<{
-      date: string;
-      sortKey: string;
-      docNumber: string;
-      description: string;
-      debit: number;
-      credit: number;
-      extraBadge?: string;
-    }> = [];
-
-    relevantInvoices.forEach((inv) => {
-      const cashPaid = Math.max(0, roundMoney(inv.paidAmount - (inv.advanceAppliedAmount || 0)));
-      if (party.type === 'CUSTOMER') {
-        if (inv.type === 'RETURN_SALE') {
-          const advCredited = inv.advanceAppliedAmount || 0;
-          items.push({
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            docNumber: inv.invoiceNumber,
-            description: `مرتجع مبيعات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
-            debit: roundMoney(inv.paidAmount + advCredited),
-            credit: inv.total,
-            extraBadge:
-              advCredited > 0
-                ? `تحويل للرصيد المقدم: ${Number(advCredited).toFixed(2)}`
-                : undefined,
-          });
-        } else {
-          items.push({
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            docNumber: inv.invoiceNumber,
-            description: `فاتورة مبيعات (${inv.paymentMethod === 'CASH' ? 'نقدي' : 'آجل'})`,
-            debit: inv.total,
-            credit: cashPaid,
-            extraBadge:
-              (inv.advanceAppliedAmount || 0) > 0
-                ? `خصم من رصيد مقدم: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
-                : undefined,
-          });
-        }
-      } else {
-        if (inv.type === 'RETURN_PURCHASE') {
-          const advCredited = inv.advanceAppliedAmount || 0;
-          items.push({
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            docNumber: inv.invoiceNumber,
-            description: `مرتجع مشتريات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
-            debit: inv.total,
-            credit: roundMoney(inv.paidAmount + advCredited),
-            extraBadge:
-              advCredited > 0
-                ? `إثبات سلفة مورد: ${Number(advCredited).toFixed(2)}`
-                : undefined,
-          });
-        } else {
-          items.push({
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            docNumber: inv.invoiceNumber,
-            description: `فاتورة مشتريات (${inv.paymentMethod === 'CASH' ? 'نقدي' : 'آجل'})`,
-            debit: cashPaid,
-            credit: inv.total,
-            extraBadge:
-              (inv.advanceAppliedAmount || 0) > 0
-                ? `خصم من سلفة مورد: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
-                : undefined,
-          });
-        }
-      }
+    const statement = buildPartyStatement({
+      party,
+      invoices: allInvoices,
+      vouchers: allVouchers,
+      paymentAllocations: statementAllocations,
+      partyAdvances: statementAdvances,
     });
-
-    relevantVouchers.forEach((v) => {
-      const allocs = statementAllocations.filter((a) => a.voucherId === v.id);
-      const allocInfo =
-        allocs.length > 0
-          ? `تخصيص: ${allocs
-              .map((a) => `${a.invoiceNumber || a.invoiceId} (${a.allocatedAmount.toFixed(2)})`)
-              .join('، ')}`
-          : undefined;
-      const isReversed = v.status === 'REVERSED';
-
-      if (v.type === 'RECEIPT') {
-        items.push({
-          date: v.date,
-          sortKey: `${v.date}-2-${v.voucherNumber}`,
-          docNumber: v.voucherNumber,
-          description: `سند قبض${isReversed ? ' (معكوس)' : ''}: ${v.description}`,
-          debit: 0,
-          credit: v.appliedToDebtAmount ?? v.amount,
-          extraBadge: [
-            allocInfo,
-            (v.advanceAmount || 0) > 0 ? `رصيد مقدم: ${Number(v.advanceAmount).toFixed(2)}` : '',
-          ]
-            .filter(Boolean)
-            .join(' | ') || undefined,
-        });
-        if (isReversed) {
-          items.push({
-            date: v.date,
-            sortKey: `${v.date}-3-${v.voucherNumber}-REV`,
-            docNumber: `${v.voucherNumber}-REV`,
-            description: `عكس سند قبض ${v.voucherNumber}: ${v.reversalReason || ''}`,
-            debit: v.appliedToDebtAmount ?? v.amount,
-            credit: 0,
-          });
-        }
-      } else {
-        items.push({
-          date: v.date,
-          sortKey: `${v.date}-2-${v.voucherNumber}`,
-          docNumber: v.voucherNumber,
-          description: `سند صرف${isReversed ? ' (معكوس)' : ''}: ${v.description}`,
-          debit: v.appliedToDebtAmount ?? v.amount,
-          credit: 0,
-          extraBadge: [
-            allocInfo,
-            (v.advanceAmount || 0) > 0 ? `سلفة/مقدم: ${Number(v.advanceAmount).toFixed(2)}` : '',
-          ]
-            .filter(Boolean)
-            .join(' | ') || undefined,
-        });
-        if (isReversed) {
-          items.push({
-            date: v.date,
-            sortKey: `${v.date}-3-${v.voucherNumber}-REV`,
-            docNumber: `${v.voucherNumber}-REV`,
-            description: `عكس سند صرف ${v.voucherNumber}: ${v.reversalReason || ''}`,
-            debit: 0,
-            credit: v.appliedToDebtAmount ?? v.amount,
-          });
-        }
-      }
-    });
-
-    // إضافة حركات تسوية الرصيد المقدم على الفواتير (APPLY_TO_INVOICE)
-    statementAdvances
-      .filter((tx) => tx.type === 'APPLY_TO_INVOICE')
-      .forEach((tx) => {
-        items.push({
-          date: tx.date,
-          sortKey: `${tx.date}-4-${tx.id}`,
-          docNumber: 'ADV-SET',
-          description: tx.description,
-          debit: party.type === 'SUPPLIER' ? Math.abs(tx.amount) : 0,
-          credit: party.type === 'CUSTOMER' ? Math.abs(tx.amount) : 0,
-          extraBadge: `رصيد مقدم متبقٍ بعد الحركة: ${tx.balanceAfter.toFixed(2)}`,
-        });
-      });
-
-    items.sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'en'));
-
-    let running = 0;
-    return items.map((item) => {
-      if (party.type === 'CUSTOMER') {
-        running = roundMoney(running + item.debit - item.credit);
-      } else {
-        running = roundMoney(running + item.credit - item.debit);
-      }
-      return { ...item, runningBalance: running };
-    });
+    return statement.transactions.map((row) => ({
+      date: row.date,
+      sortKey: row.sortKey,
+      docNumber: row.docNumber,
+      description: row.memo,
+      debit: row.debit,
+      credit: row.credit,
+      extraBadge: row.extraBadge,
+      runningBalance: row.balanceAfter,
+    }));
   };
 
   return (

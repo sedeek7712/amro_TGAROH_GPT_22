@@ -174,4 +174,104 @@ describe('DB InitState, Non-Destructive Migration, Atomic Backup & Currency Test
       assert.ok(gitignore.includes(pattern), `.gitignore missing exclusion rule: ${pattern}`);
     }
   });
+
+  test('BKP-01: Dexie importBackupJSON restores legacy v2.0 backup omitting newer tables, extracts embedded batches, and clears stale rows', async () => {
+    await db.outbox.put({
+      id: 'stale-outbox-1',
+      tenantId: 'tenant_main',
+      branchId: 'branch_main',
+      entityType: 'PRODUCT',
+      entityId: 'stale-p',
+      action: 'CREATE',
+      payload: {},
+      status: 'PENDING',
+      retryCount: 0,
+      createdAt: '2026-11-20T00:00:00.000Z',
+      idempotencyKey: 'stale-key-1',
+    });
+
+    const embeddedBatch = {
+      id: 'legacy-batch-1',
+      productId: 'legacy-prod-1',
+      batchNumber: 'LB-01',
+      expiryDate: '2028-06-30',
+      quantity: 12,
+      costPrice: 15,
+    };
+    const legacyData = {
+      branches: await db.branches.toArray(),
+      accounts: await db.accounts.toArray(),
+      products: [
+        {
+          id: 'legacy-prod-1',
+          activityId: 'pharmacy',
+          code: 'LEG-1',
+          nameAr: 'صنف أرشيفي قديم',
+          category: 'أدوية',
+          unit: 'علبة',
+          purchasePrice: 15,
+          sellPrice: 25,
+          currentStock: 12,
+          minStockAlert: 2,
+          batches: [embeddedBatch],
+        },
+      ],
+      parties: [
+        { id: 'leg-cust-1', type: 'CUSTOMER', nameAr: 'عميل قديم', phone: '700111222', balance: 50 },
+      ],
+      invoices: [
+        {
+          id: 'leg-inv-1',
+          invoiceNumber: 'INV-OLD-1',
+          type: 'SALE',
+          activityId: 'pharmacy',
+          branchId: 'branch_main',
+          partyId: 'leg-cust-1',
+          partyName: 'عميل قديم',
+          date: '2026-10-01',
+          items: [],
+          subtotal: 50,
+          discount: 0,
+          tax: 0,
+          total: 50,
+          paidAmount: 0,
+          paymentMethod: 'CREDIT',
+        },
+      ],
+      journalEntries: [],
+      cashBoxes: await db.cashBoxes.toArray(),
+      vouchers: [],
+      users: await db.users.toArray(),
+      // Intentionally omit: activities, productBatches, outbox, syncConflicts, sequences,
+      // paymentAllocations, partyAdvanceTransactions, allocationAudits, amanat, auditLogs
+    };
+    const serialized = JSON.stringify(legacyData);
+    let checksum = 0;
+    for (let i = 0; i < serialized.length; i++) {
+      checksum = (checksum + serialized.charCodeAt(i) * (i + 1)) % 1000000007;
+    }
+    const legacyBackup = {
+      app: 'نظام الإدارة التجارية والمحاسبية المتكامل',
+      systemIdentifier: 'multi_activity_erp',
+      version: '2.0.0',
+      exportedAt: '2026-10-01T12:00:00.000Z',
+      checksum: checksum.toString(16),
+      data: legacyData,
+    };
+
+    const res = await dexieDataService.importBackupJSON(JSON.stringify(legacyBackup));
+    assert.equal(res.success, true, `Legacy import failed: ${res.error}`);
+    assert.equal(await db.outbox.count(), 0, 'Stale outbox rows must be cleared when absent in backup');
+    assert.equal((await db.activities.toArray()).length, 4, 'Official activities must be restored when omitted');
+    const restoredBatch = await db.productBatches.get('legacy-batch-1');
+    assert.equal(restoredBatch?.quantity, 12, 'Embedded product batch must populate productBatches table');
+    const restoredProd = await db.products.get('legacy-prod-1');
+    assert.equal(restoredProd?.isActive, true);
+    const restoredParty = await db.parties.get('leg-cust-1');
+    assert.equal(restoredParty?.advanceBalance, 0);
+    const restoredInv = await db.invoices.get('leg-inv-1');
+    assert.equal(restoredInv?.status, 'POSTED');
+    assert.equal(restoredInv?.advanceAppliedAmount, 0);
+  });
 });
+

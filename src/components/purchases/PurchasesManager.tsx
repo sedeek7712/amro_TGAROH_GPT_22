@@ -23,7 +23,7 @@ import { storage } from '../../services/storageService';
 import { desktopSession } from '../../services/desktopSession';
 import { dataService } from '../../services/dataService';
 import { authService } from '../../services/authService';
-import { hasPermission } from '../../config/rbac';
+import { hasPermission, getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveInvoices, useLiveParties, useLiveCashBoxes, useLiveProducts } from '../../hooks/useLiveDexie';
 import { Invoice, InvoiceItem, ActivityId, PaymentMethod } from '../../types/erp';
@@ -37,8 +37,25 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const actor =
+    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
+  const authorizedActivityIds = getAuthorizedActivityIds(actor);
+  const allActivities: Array<{ id: ActivityId; name: string }> = [
+    { id: 'pharmacy', name: 'الصيدلية' },
+    { id: 'grocery', name: 'المواد الغذائية والبقالة' },
+    { id: 'bike_parts', name: 'قطع غيار الدراجات' },
+    { id: 'equipment_parts', name: 'قطع غيار المعدات' },
+  ];
+  const allowedActivityOptions =
+    actor?.role === 'ADMIN'
+      ? allActivities
+      : allActivities.filter((a) => authorizedActivityIds.has(a.id));
+
   // حقول نموذج فاتورة الشراء
-  const [activityId, setActivityId] = useState<ActivityId>('pharmacy');
+  const [activityId, setActivityId] = useState<ActivityId>(
+    allowedActivityOptions[0]?.id || 'pharmacy'
+  );
   const [supplierId, setSupplierId] = useState('');
   const [supplierName, setSupplierName] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH');
@@ -78,9 +95,6 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [clientRequestId, setClientRequestId] = useState<string>(() => storage.generateUUID());
 
-  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
-  const actor =
-    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const canUseAdvance = hasPermission(actor, 'party:advance:use');
   const canReturnPurchase = hasPermission(actor, 'purchase:return');
 
@@ -606,10 +620,11 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                     }}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-slate-900 focus:outline-none"
                   >
-                    <option value="pharmacy">الصيدلية</option>
-                    <option value="grocery">المواد الغذائية والبقالة</option>
-                    <option value="bike_parts">قطع غيار الدراجات</option>
-                    <option value="equipment_parts">قطع غيار المعدات</option>
+                    {allowedActivityOptions.map((act) => (
+                      <option key={act.id} value={act.id}>
+                        {act.name}
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -670,11 +685,13 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                       className="w-full px-3 py-1.5 border border-slate-200 rounded bg-white text-slate-900"
                     >
                       <option value="">-- اختر الصنف من المستودع --</option>
-                      {products.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.nameAr} ({p.code})
-                        </option>
-                      ))}
+                      {products
+                        .filter((p) => p.isActive !== false)
+                        .map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.nameAr} ({p.code})
+                          </option>
+                        ))}
                     </select>
                   </div>
 

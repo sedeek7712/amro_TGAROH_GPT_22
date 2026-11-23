@@ -33,6 +33,8 @@ import {
 } from '../../hooks/useLiveDexie';
 import { ActivityId } from '../../types/erp';
 import { ActiveView } from '../layout/Sidebar';
+import { getActiveCurrencyConfig } from '../../config/currency';
+import { computeInventoryValuation } from '../../utils/inventoryValuation';
 
 interface ExecutiveDashboardProps {
   setActiveView: (view: ActiveView) => void;
@@ -52,40 +54,9 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
   const amanatRecords = useLiveAmanatRecords();
   const journalEntries = useLiveJournalEntries();
   const liveProducts = useLiveProducts();
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
-  const valuation = {
-    totalValue: Number(liveProducts.reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0).toFixed(2)),
-    totalItemsCount: liveProducts.length,
-    totalQuantity: liveProducts.reduce((sum, p) => sum + p.currentStock, 0),
-    totalCostValue: Number(liveProducts.reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0).toFixed(2)),
-    totalRetailValue: Number(liveProducts.reduce((sum, p) => sum + p.currentStock * p.sellPrice, 0).toFixed(2)),
-    activityBreakdown: {
-      pharmacy: {
-        count: liveProducts.filter((p) => p.activityId === 'pharmacy').length,
-        value: liveProducts
-          .filter((p) => p.activityId === 'pharmacy')
-          .reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0),
-      },
-      grocery: {
-        count: liveProducts.filter((p) => p.activityId === 'grocery').length,
-        value: liveProducts
-          .filter((p) => p.activityId === 'grocery')
-          .reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0),
-      },
-      bike_parts: {
-        count: liveProducts.filter((p) => p.activityId === 'bike_parts').length,
-        value: liveProducts
-          .filter((p) => p.activityId === 'bike_parts')
-          .reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0),
-      },
-      equipment_parts: {
-        count: liveProducts.filter((p) => p.activityId === 'equipment_parts').length,
-        value: liveProducts
-          .filter((p) => p.activityId === 'equipment_parts')
-          .reduce((sum, p) => sum + p.currentStock * p.purchasePrice, 0),
-      },
-    },
-  };
+  const valuation = computeInventoryValuation(liveProducts);
 
   const expiringAlerts = liveProducts.flatMap((p) =>
     (p.batches || [])
@@ -206,7 +177,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             <TrendingUp className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-600 shrink-0" />
           </div>
           <div className="text-base sm:text-lg lg:text-xl font-bold font-mono tabular-nums text-slate-900 truncate">
-            {totalSales.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">ر.س</span>
+            {totalSales.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">{currencySymbol}</span>
           </div>
           <div className="text-[10px] sm:text-[11px] text-slate-500 mt-1 truncate">
             {invoices.length} فاتورة مسجلة
@@ -220,7 +191,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             <Wallet className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-blue-600 shrink-0" />
           </div>
           <div className="text-base sm:text-lg lg:text-xl font-bold font-mono tabular-nums text-slate-900 truncate">
-            {totalCashInBoxes.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">ر.س</span>
+            {totalCashInBoxes.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">{currencySymbol}</span>
           </div>
           <div className="text-[10px] sm:text-[11px] text-slate-500 mt-1 truncate">
             في {cashBoxes.length} خزائن وبنوك
@@ -234,7 +205,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             <Package className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-amber-600 shrink-0" />
           </div>
           <div className="text-base sm:text-lg lg:text-xl font-bold font-mono tabular-nums text-slate-900 truncate">
-            {valuation.totalValue.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">ر.س</span>
+            {valuation.totalValue.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">{currencySymbol}</span>
           </div>
           <div className="text-[10px] sm:text-[11px] text-slate-500 mt-1 truncate">
             {valuation.totalItemsCount} قطعة بالمستودعات
@@ -248,7 +219,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             <ArrowUpRight className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-emerald-600 shrink-0" />
           </div>
           <div className="text-base sm:text-lg lg:text-xl font-bold font-mono tabular-nums text-slate-900 truncate">
-            {totalReceivables.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">ر.س</span>
+            {totalReceivables.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">{currencySymbol}</span>
           </div>
           <div className="text-[10px] sm:text-[11px] text-slate-500 mt-1 truncate">
             مستحقة لدى العملاء
@@ -262,7 +233,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             <ArrowDownLeft className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-rose-600 shrink-0" />
           </div>
           <div className="text-base sm:text-lg lg:text-xl font-bold font-mono tabular-nums text-rose-700 truncate">
-            {totalPayables.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">ر.س</span>
+            {totalPayables.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">{currencySymbol}</span>
           </div>
           <div className="text-[10px] sm:text-[11px] text-slate-500 mt-1 truncate">
             التزامات شراء آجلة
@@ -276,7 +247,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
             <ShieldCheck className="w-3.5 h-3.5 sm:w-4 sm:h-4 text-purple-600 shrink-0" />
           </div>
           <div className="text-base sm:text-lg lg:text-xl font-bold font-mono tabular-nums text-purple-950 truncate">
-            {heldCashAmanat.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">ر.س</span>
+            {heldCashAmanat.toFixed(2)} <span className="text-[10px] sm:text-xs font-normal text-slate-500">{currencySymbol}</span>
           </div>
           <div className="text-[10px] sm:text-[11px] text-purple-700 mt-1 truncate">
             معزولة + {heldItemAmanatCount} عينية
@@ -328,7 +299,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
           <DonutChart
             title="توزيع قيمة المخزون السلعي"
             centerLabel="إجمالي"
-            centerValue={valuation.totalValue.toFixed(0) + ' ر.س'}
+            centerValue={`${valuation.totalValue.toFixed(0)} ${currencySymbol}`}
             data={[
               {
                 label: 'الصيدلية',
@@ -389,14 +360,14 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
                     <div className="flex justify-between text-slate-600">
                       <span>قيمة المخزون التجاري:</span>
                       <span className="font-mono tabular-nums font-semibold text-slate-900">
-                        {act.valuation.toFixed(2)} ر.س
+                        {act.valuation.toFixed(2)} {currencySymbol}
                       </span>
                     </div>
 
                     <div className="flex justify-between text-slate-600">
                       <span>إجمالي المبيعات:</span>
                       <span className="font-mono tabular-nums font-semibold text-emerald-700">
-                        {act.sales.toFixed(2)} ر.س
+                        {act.sales.toFixed(2)} {currencySymbol}
                       </span>
                     </div>
 
@@ -456,7 +427,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
         </div>
         <div className="flex items-center gap-3 shrink-0">
           <div className="text-left font-mono tabular-nums">
-            <div className="text-xs font-bold text-purple-100">{heldCashAmanat.toFixed(2)} ر.س نقدية</div>
+            <div className="text-xs font-bold text-purple-100">{heldCashAmanat.toFixed(2)} {currencySymbol} نقدية</div>
             <div className="text-[10px] text-purple-300">{heldItemAmanatCount} صنف عيني محفوظ</div>
           </div>
           <button
@@ -613,7 +584,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
                         </span>
                       </td>
                       <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
-                        {totalAmount.toFixed(2)} ر.س
+                        {totalAmount.toFixed(2)} {currencySymbol}
                       </td>
                     </tr>
                   );

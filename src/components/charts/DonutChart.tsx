@@ -3,6 +3,7 @@
  * يدعم التفاعل، بطاقات التمرير، ونسباً إحصائية أنيقة
  */
 import React, { useState } from 'react';
+import { getActiveCurrencyConfig } from '../../config/currency';
 
 interface DonutData {
   label: string;
@@ -47,6 +48,7 @@ function getArcPath(
 
 export const DonutChart: React.FC<DonutChartProps> = ({ data, title, centerLabel, centerValue }) => {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  const currencySymbol = getActiveCurrencyConfig().symbol;
 
   const total = data.reduce((s, d) => s + d.value, 0);
 
@@ -102,7 +104,7 @@ export const DonutChart: React.FC<DonutChartProps> = ({ data, title, centerLabel
         </div>
         <div className="text-left font-mono">
           <span className="text-[10px] text-slate-500 block">إجمالي التقييم</span>
-          <span className="text-xs sm:text-sm font-extrabold text-slate-900">{formatValue(total)} ر.س</span>
+          <span className="text-xs sm:text-sm font-extrabold text-slate-900">{formatValue(total)} {currencySymbol}</span>
         </div>
       </div>
 
@@ -175,7 +177,7 @@ export const DonutChart: React.FC<DonutChartProps> = ({ data, title, centerLabel
                 fill="#94a3b8"
                 fontFamily="sans-serif"
               >
-                {activeSlice ? `${formatValue(activeSlice.value)} ر.س` : 'ر.س'}
+                {activeSlice ? `${formatValue(activeSlice.value)} ${currencySymbol}` : currencySymbol}
               </text>
             </g>
           </svg>
@@ -204,7 +206,7 @@ export const DonutChart: React.FC<DonutChartProps> = ({ data, title, centerLabel
                   <div className="truncate">
                     <span className="text-xs font-semibold text-slate-800 block truncate">{s.label}</span>
                     <span className="text-[10px] text-slate-500 font-mono">
-                      {formatValue(s.value)} ر.س
+                      {formatValue(s.value)} {currencySymbol}
                     </span>
                   </div>
                 </div>

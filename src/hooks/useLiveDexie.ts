@@ -10,7 +10,13 @@ import { db } from '../db/erpDatabase';
 import { dexieDataService, InitState } from '../services/dexieDataService';
 import { authService } from '../services/authService';
 import { desktopSession } from '../services/desktopSession';
-import { filterAuditLogsForUser, filterRecordsByBranchScope, getAuthorizedBranchIds, hasPermission } from '../config/rbac';
+import {
+  filterAuditLogsForUser,
+  filterRecordsByActivityScope,
+  filterRecordsByBranchScope,
+  getAuthorizedBranchIds,
+  hasPermission,
+} from '../config/rbac';
 import {
   Product,
   CommercialActivityId,
@@ -35,7 +41,14 @@ import {
 
 function currentActorKey(actor: SystemUser | null): string {
   return actor
-    ? [actor.id, actor.tenantId || '', actor.role, actor.branchId || '', ...(actor.allowedBranches || [])].join('|')
+    ? [
+        actor.id,
+        actor.tenantId || '',
+        actor.role,
+        actor.branchId || '',
+        ...(actor.allowedBranches || []),
+        ...(actor.allowedActivities || []),
+      ].join('|')
     : 'anonymous';
 }
 
@@ -157,10 +170,11 @@ export function useLiveProducts(activityId?: CommercialActivityId | 'all'): Prod
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (activityId && activityId !== 'all') {
-        return await db.products.where('activityId').equals(activityId).toArray();
-      }
-      return await db.products.toArray();
+      if (!hasPermission(actor, 'inventory:view')) return [];
+      const rows = activityId && activityId !== 'all'
+        ? await db.products.where('activityId').equals(activityId).toArray()
+        : await db.products.toArray();
+      return filterRecordsByActivityScope(rows, actor);
     },
     [],
     [activityId, currentActorKey(actor)],
@@ -177,10 +191,11 @@ export function useLiveInvoices(activityId?: CommercialActivityId | 'all'): Invo
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'invoices:view')) return [];
       const rows = activityId && activityId !== 'all'
         ? await db.invoices.where('activityId').equals(activityId).reverse().sortBy('date')
         : await db.invoices.toCollection().reverse().sortBy('date');
-      return scopeBranchRows(rows, actor);
+      return filterRecordsByActivityScope(scopeBranchRows(rows, actor), actor);
     },
     [],
     [activityId, currentActorKey(actor)],

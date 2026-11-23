@@ -161,7 +161,8 @@ export function validateManualAllocations({ openInvoices, paymentAmount, request
 
     const totalCentsVal = toCents(inv.total);
     const paidBeforeCents = toCents(inv.paidAmount);
-    const remainingBeforeCents = Math.max(0, totalCentsVal - paidBeforeCents);
+    const returnedCentsVal = toCents(inv.returnedAmount || 0);
+    const remainingBeforeCents = Math.max(0, totalCentsVal - paidBeforeCents - returnedCentsVal);
     if (allocCents > remainingBeforeCents) {
       throw new Error(
         `المبلغ المخصص (${fromCents(allocCents)}) يتجاوز المتبقي من الفاتورة ${inv.invoiceNumber || inv.id} (${fromCents(remainingBeforeCents)}).`
@@ -239,7 +240,7 @@ export function resolveVoucherAccountingPlan({
     if (voucherType === 'RECEIPT' && party.type === 'CUSTOMER') {
       const sortedOpen = sortOpenInvoicesFIFO(openInvoices.filter((i) => i.type === 'SALE'));
       const openTotalCents = sortedOpen.reduce(
-        (s, inv) => s + Math.max(0, toCents(inv.total) - toCents(inv.paidAmount)),
+        (s, inv) => s + toCents(getInvoiceRemainingAmount(inv)),
         0
       );
       const currentPartyReceivableCents = Math.max(0, toCents(party.balance));
@@ -306,7 +307,7 @@ export function resolveVoucherAccountingPlan({
     if (voucherType === 'PAYMENT' && party.type === 'SUPPLIER') {
       const sortedOpen = sortOpenInvoicesFIFO(openInvoices.filter((i) => i.type === 'PURCHASE'));
       const openTotalCents = sortedOpen.reduce(
-        (s, inv) => s + Math.max(0, toCents(inv.total) - toCents(inv.paidAmount)),
+        (s, inv) => s + toCents(getInvoiceRemainingAmount(inv)),
         0
       );
       const currentPayableDebtCents = Math.max(0, -toCents(party.balance));

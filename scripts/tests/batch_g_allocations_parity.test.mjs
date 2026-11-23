@@ -309,6 +309,45 @@ test('Batch G SQLite parity: FIFO allocations, 2103/1105 advances, POS settlemen
     assert.equal(revOk.voucher.status, 'REVERSED');
     assert.equal(backend.getInvoices({ token: adminToken }).find((x) => x.id === sB.id).paidAmount, 0);
 
+    // FIN-04 SQLite parity: DRAFT persists manualAllocations & overrideReason and honors them on post({ voucherId })
+    const manualDraft = backend.createCashVoucherAtomic({
+      token: adminToken,
+      params: {
+        voucher: {
+          id: 'g-v-draft-fin04',
+          type: 'RECEIPT',
+          voucherMode: 'CUSTOMER_RECEIPT',
+          date: '2026-11-10',
+          amount: 4000,
+          cashBoxId: 'cb-1',
+          partyId: cust.id,
+          partyType: 'CUSTOMER',
+          partyName: cust.nameAr,
+          accountCode: '1103',
+          description: 'مسودة بتخصيص يدوي محفوظ',
+          costCenterId: 'general',
+          status: 'DRAFT',
+        },
+        manualAllocations: [{ invoiceId: sB.id, allocatedAmount: 4000 }],
+        overrideReason: 'تخصيص يدوي محفوظ داخل المسودة',
+      },
+    });
+    assert.equal(manualDraft.voucher.manualOverride, true);
+    assert.deepEqual(manualDraft.voucher.manualAllocations, [{ invoiceId: sB.id, allocatedAmount: 4000 }]);
+    const postedFin04 = backend.postDraftCashVoucherAtomic({
+      token: adminToken,
+      params: { voucherId: manualDraft.voucher.id },
+    });
+    assert.equal(postedFin04.voucher.manualOverride, true);
+    assert.equal(postedFin04.allocations.length, 1);
+    assert.equal(postedFin04.allocations[0].invoiceId, sB.id);
+    assert.equal(backend.getInvoices({ token: adminToken }).find((x) => x.id === sB.id).paidAmount, 4000);
+    assert.equal(backend.getAllocationAudits({ token: adminToken, voucherId: manualDraft.voucher.id }).length, 1);
+    backend.reverseCashVoucherAtomic({
+      token: adminToken,
+      params: { voucherId: manualDraft.voucher.id, reversalReason: 'إرجاع الحالة بعد اختبار FIN-04' },
+    });
+
     // 5. Supplier purchase + FIFO payment + 1105 advance + block 5204 with supplier partyId
     backend.createPurchaseInvoiceAtomic({
       token: adminToken,
@@ -380,6 +419,64 @@ test('Batch G SQLite parity: FIFO allocations, 2103/1105 advances, POS settlemen
     assert.equal(supPay.voucher.advanceAmount, 2000);
     assert.equal(backend.getPartyById({ token: adminToken, id: sup.id }).advanceBalance, 2000);
     assert.equal(backend.getAccounts({ token: adminToken }).find((a) => a.code === '1105').balance, 2000);
+
+    // FIN-03 SQLite parity: enforce explicit cashBoxId when 2 boxes share 1101 & verify exact reversal
+    backend.createCashBoxAtomic({
+      token: adminToken,
+      box: {
+        id: 'cb-g-pos2',
+        code: 'CB-G-2',
+        type: 'CASH',
+        nameAr: 'صندوق إضافي',
+        accountCode: '1101',
+        balance: 500,
+        currency: 'YER',
+        branchId: 'branch_main',
+      },
+    });
+    assert.throws(
+      () =>
+        backend.createJournalEntryAtomic({
+          token: adminToken,
+          entry: {
+            id: 'jv-g-ambig',
+            date: '2026-11-12',
+            description: 'قيد غامض بدون تحديد صندوق',
+            costCenterId: 'general',
+            branchId: 'branch_main',
+            referenceType: 'MANUAL',
+            lines: [
+              { id: 'la1', accountCode: '5201', debit: 100, credit: 0 },
+              { id: 'la2', accountCode: '1101', debit: 0, credit: 100 },
+            ],
+          },
+        }),
+      /تحديد الصندوق الفعلي/
+    );
+    const jvG = backend.createJournalEntryAtomic({
+      token: adminToken,
+      entry: {
+        id: 'jv-g-ok',
+        date: '2026-11-12',
+        description: 'صرف نثري من الصندوق الإضافي',
+        costCenterId: 'general',
+        branchId: 'branch_main',
+        referenceType: 'MANUAL',
+        lines: [
+          { id: 'lo1', accountCode: '5201', debit: 100, credit: 0 },
+          { id: 'lo2', accountCode: '1101', cashBoxId: 'cb-g-pos2', debit: 0, credit: 100 },
+        ],
+      },
+    });
+    assert.equal(jvG.lines[1].cashBoxId, 'cb-g-pos2');
+    assert.equal(backend.getCashBoxes({ token: adminToken }).find((b) => b.id === 'cb-g-pos2').balance, 400);
+    const jvGRev = backend.reverseJournalEntryAtomic({
+      token: adminToken,
+      originalEntryId: jvG.id,
+      reversalReason: 'اختبار عكس الصندوق المحدد',
+    });
+    assert.equal(jvGRev.lines[1].cashBoxId, 'cb-g-pos2');
+    assert.equal(backend.getCashBoxes({ token: adminToken }).find((b) => b.id === 'cb-g-pos2').balance, 500);
 
     assertTrialBalanceZero(rt.database);
     rt.close();
@@ -504,3 +601,4 @@ test('Batch G SQLite parity: FIFO allocations, 2103/1105 advances, POS settlemen
     rmSync(legacyImportPath, { recursive: true, force: true });
   }
 });
+

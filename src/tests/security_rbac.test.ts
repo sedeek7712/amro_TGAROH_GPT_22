@@ -287,4 +287,204 @@ describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-
     );
     assert.equal(sqlFileContent.trim(), SUPABASE_RLS_SQL.trim(), 'SQL file and TS constant must stay in exact parity');
   });
+
+  test('ACT-01: Enforces allowedActivities on Dexie product/invoice reads and writes', async () => {
+    const admin = makeUser({
+      id: 'usr-admin-act',
+      username: 'admin_act',
+      role: 'ADMIN',
+      passwordHash: await hashPassword('Admin#Act2026'),
+    });
+    const pharmacyCashier = makeUser({
+      id: 'usr-cashier-pharma',
+      username: 'cashier_pharma',
+      role: 'CASHIER',
+      allowedActivities: ['pharmacy'],
+      passwordHash: await hashPassword('Cashier#Act2026'),
+    });
+    const groceryKeeper = makeUser({
+      id: 'usr-keeper-groc',
+      username: 'keeper_groc',
+      role: 'INVENTORY_KEEPER',
+      allowedActivities: ['grocery'],
+      passwordHash: await hashPassword('Keeper#Act2026'),
+    });
+    await db.users.bulkPut([admin, pharmacyCashier, groceryKeeper]);
+
+    // Admin seeds products and invoices in both pharmacy and grocery
+    const adminLogin = await authService.authenticate({
+      username: admin.username,
+      password: 'Admin#Act2026',
+      users: [admin, pharmacyCashier, groceryKeeper],
+      onUserUpdated: async (u) => { await db.users.put(u); },
+    });
+    assert.equal(adminLogin.success, true);
+
+    await dexieDataService.saveProductAtomic({
+      id: 'prod-act-pharma',
+      activityId: 'pharmacy',
+      code: 'PH-ACT-1',
+      nameAr: 'دواء مصرح',
+      category: 'أدوية',
+      unit: 'علبة',
+      purchasePrice: 10,
+      sellPrice: 20,
+      currentStock: 5,
+      minStockAlert: 1,
+      batches: [
+        { id: 'b-act-1', productId: 'prod-act-pharma', batchNumber: 'B1', expiryDate: '2028-01-01', quantity: 5, costPrice: 10 },
+      ],
+    });
+    await dexieDataService.saveProductAtomic({
+      id: 'prod-act-groc',
+      activityId: 'grocery',
+      code: 'GR-ACT-1',
+      nameAr: 'سلعة بقالة',
+      category: 'أغذية',
+      unit: 'حبة',
+      purchasePrice: 5,
+      sellPrice: 8,
+      currentStock: 10,
+      minStockAlert: 1,
+    });
+    await dexieDataService.createSalesInvoiceAtomic({
+      invoice: {
+        id: 'inv-act-pharma',
+        invoiceNumber: 'INV-ACT-P1',
+        type: 'SALE',
+        activityId: 'pharmacy',
+        branchId: 'branch_main',
+        partyName: 'عميل نقدي',
+        date: '2026-11-22',
+        items: [{ id: 'ii-p1', productId: 'prod-act-pharma', productName: 'دواء مصرح', quantity: 1, unitPrice: 20, discount: 0, total: 20 }],
+        subtotal: 20,
+        discount: 0,
+        tax: 0,
+        total: 20,
+        paymentMethod: 'CASH',
+        cashBoxId: 'cb-1',
+        paidAmount: 20,
+        isPosted: true,
+      },
+      totalCogs: 10,
+      stockDeductions: [{ productId: 'prod-act-pharma', quantity: 1, batchNumber: 'B1' }],
+    });
+    await dexieDataService.createSalesInvoiceAtomic({
+      invoice: {
+        id: 'inv-act-groc',
+        invoiceNumber: 'INV-ACT-G1',
+        type: 'SALE',
+        activityId: 'grocery',
+        branchId: 'branch_main',
+        partyName: 'عميل نقدي',
+        date: '2026-11-22',
+        items: [{ id: 'ii-g1', productId: 'prod-act-groc', productName: 'سلعة بقالة', quantity: 1, unitPrice: 8, discount: 0, total: 8 }],
+        subtotal: 8,
+        discount: 0,
+        tax: 0,
+        total: 8,
+        paymentMethod: 'CASH',
+        cashBoxId: 'cb-1',
+        paidAmount: 8,
+        isPosted: true,
+      },
+      totalCogs: 5,
+      stockDeductions: [{ productId: 'prod-act-groc', quantity: 1 }],
+    });
+
+    // Switch to pharmacy-only cashier
+    authService.logout();
+    const cashierLogin = await authService.authenticate({
+      username: pharmacyCashier.username,
+      password: 'Cashier#Act2026',
+      users: [admin, pharmacyCashier, groceryKeeper],
+      onUserUpdated: async (u) => { await db.users.put(u); },
+    });
+    assert.equal(cashierLogin.success, true);
+
+    const cashierProducts = await dexieDataService.getProducts();
+    assert.deepEqual(cashierProducts.map((p) => p.id), ['prod-act-pharma']);
+    assert.equal(await dexieDataService.getProductById('prod-act-groc'), undefined);
+
+    const cashierInvoices = await dexieDataService.getInvoices();
+    assert.deepEqual(cashierInvoices.map((i) => i.id), ['inv-act-pharma']);
+    assert.equal(await dexieDataService.getInvoiceById('inv-act-groc'), undefined);
+
+    await assert.rejects(
+      () =>
+        dexieDataService.createSalesInvoiceAtomic({
+          invoice: {
+            id: 'inv-forbidden-groc',
+            invoiceNumber: 'INV-FORB-1',
+            type: 'SALE',
+            activityId: 'grocery',
+            branchId: 'branch_main',
+            partyName: 'عميل نقدي',
+            date: '2026-11-22',
+            items: [{ id: 'ii-f1', productId: 'prod-act-groc', productName: 'سلعة بقالة', quantity: 1, unitPrice: 8, discount: 0, total: 8 }],
+            subtotal: 8,
+            discount: 0,
+            tax: 0,
+            total: 8,
+            paymentMethod: 'CASH',
+            cashBoxId: 'cb-1',
+            paidAmount: 8,
+            isPosted: true,
+          },
+          totalCogs: 5,
+          stockDeductions: [{ productId: 'prod-act-groc', quantity: 1 }],
+        }),
+      (err: unknown) => err instanceof PermissionError
+    );
+
+    await assert.rejects(
+      () =>
+        dexieDataService.createSalesReturnAtomic({
+          originalInvoiceId: 'inv-act-groc',
+          items: [{ productId: 'prod-act-groc', quantity: 1 }],
+          returnReason: 'محاولة إرجاع نشاط غير مصرح',
+          refundMethod: 'CASH',
+          cashBoxId: 'cb-1',
+        }),
+      (err: unknown) => err instanceof PermissionError
+    );
+
+    // Switch to grocery-only inventory keeper
+    authService.logout();
+    const keeperLogin = await authService.authenticate({
+      username: groceryKeeper.username,
+      password: 'Keeper#Act2026',
+      users: [admin, pharmacyCashier, groceryKeeper],
+      onUserUpdated: async (u) => { await db.users.put(u); },
+    });
+    assert.equal(keeperLogin.success, true);
+
+    await assert.rejects(
+      () =>
+        dexieDataService.saveProductAtomic({
+          id: 'prod-forbid-pharma',
+          activityId: 'pharmacy',
+          code: 'PH-FORB',
+          nameAr: 'صنف صيدلية محظور',
+          category: 'أدوية',
+          unit: 'علبة',
+          purchasePrice: 10,
+          sellPrice: 15,
+          currentStock: 1,
+          minStockAlert: 1,
+        }),
+      (err: unknown) => err instanceof PermissionError
+    );
+
+    await assert.rejects(
+      () =>
+        dexieDataService.adjustProductStockAtomic({
+          productId: 'prod-act-pharma',
+          deltaQuantity: -1,
+          reason: 'تعديل صنف نشاط غير مصرح',
+        }),
+      (err: unknown) => err instanceof PermissionError
+    );
+  });
 });
+

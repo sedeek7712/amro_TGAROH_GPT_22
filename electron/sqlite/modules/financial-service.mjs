@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
+  assertActivityAccess,
   assertBranchAccess,
   assertPermission,
+  filterRecordsByActivityScope,
   filterRecordsByBranchScope,
   hasPermission,
 } from '../rbac.mjs';
@@ -31,6 +33,19 @@ import {
   loadProductWithBatches,
   syncProductAndBatchesTx,
 } from './inventory-parties-service.mjs';
+import {
+  ACTIVITY_INVENTORY_ACCOUNTS,
+  FinancialValidationError,
+  accountBalanceDeltaUnitsByType,
+  ensureCanonicalAccountTx,
+  getTerminalCodeValue,
+  insertJournalEntryTx,
+  resolveBranchTx,
+  updateAccountBalanceByLineTx,
+  validateAndBuildJournalLines,
+} from './accounting-tx-helpers.mjs';
+
+export { FinancialValidationError };
 
 const INVOICE_SELECT_COLUMNS =
   'tenant_id,id,branch_id,invoice_number,invoice_type,activity_id,party_id,invoice_date,due_date,payment_method,total_decimal,paid_amount_decimal,advance_applied_decimal,status,data_json';
@@ -52,13 +67,6 @@ const ACTIVITY_REVENUE_ACCOUNTS = {
   equipment_parts: '4104',
 };
 
-const ACTIVITY_INVENTORY_ACCOUNTS = {
-  pharmacy: '11041',
-  grocery: '11042',
-  bike_parts: '11043',
-  equipment_parts: '11044',
-};
-
 const ACTIVITY_COGS_ACCOUNTS = {
   pharmacy: '5101',
   grocery: '5102',
@@ -73,14 +81,6 @@ const ACTIVITY_SALES_RETURN_ACCOUNTS = {
   equipment_parts: '4204',
 };
 
-export class FinancialValidationError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'FinancialValidationError';
-    this.code = 'FINANCIAL_VALIDATION_ERROR';
-  }
-}
-
 function getCurrencySymbol(database, tenantId) {
   const profile = getAppSetting(database, tenantId, 'company_profile', null);
   if (profile && typeof profile.currencySymbol === 'string' && profile.currencySymbol.trim()) {
@@ -88,31 +88,6 @@ function getCurrencySymbol(database, tenantId) {
   }
   const code = profile && typeof profile.currencyCode === 'string' ? profile.currencyCode : 'YER';
   return CURRENCY_SYMBOLS[code] || 'ر.ي';
-}
-
-function getTerminalCodeValue(database, tenantId) {
-  const saved = getAppSetting(database, tenantId, 'terminal_code', 'POS01');
-  return typeof saved === 'string' && saved.trim() ? saved.trim() : 'POS01';
-}
-
-function resolveBranchTx(database, core, actor, requestedBranchId) {
-  const candidate = requestedBranchId && String(requestedBranchId).trim()
-    ? String(requestedBranchId).trim()
-    : core.getActiveBranchId(actor);
-  assertBranchAccess(actor, candidate);
-  const row = database.prepare(
-    'SELECT id, code, name_ar, active, data_json FROM branches WHERE tenant_id = ? AND id = ?'
-  ).get(actor.tenantId, candidate);
-  if (!row || row.active !== 1) {
-    throw new FinancialValidationError('الفرع المحدد غير موجود أو غير نشط.');
-  }
-  return {
-    ...parseRowJson(row),
-    id: row.id,
-    code: row.code,
-    nameAr: row.name_ar,
-    active: row.active === 1,
-  };
 }
 
 function getCashBoxRowTx(database, tenantId, cashBoxId) {
@@ -164,66 +139,6 @@ function resolveBranchDefaultCashBoxTx(database, tenantId, branchId) {
     throw new FinancialValidationError('لا يوجد صندوق نقدي مربوط بالفرع المحدد؛ يرجى إنشاء صندوق للفرع أولاً.');
   }
   return getCashBoxRowTx(database, tenantId, chosen.id);
-}
-
-function accountBalanceDeltaUnitsByType(accountType, debitUnits, creditUnits) {
-  if (accountType === 'LIABILITY' || accountType === 'EQUITY' || accountType === 'REVENUE') {
-    return creditUnits - debitUnits;
-  }
-  return debitUnits - creditUnits;
-}
-
-function ensureCanonicalAccountTx(database, tenantId, accountCode) {
-  const existing = database.prepare(
-    'SELECT code, account_type, is_leaf, balance_decimal, data_json FROM accounts WHERE tenant_id = ? AND code = ?'
-  ).get(tenantId, accountCode);
-  if (existing) {
-    const parsed = parseRowJson(existing);
-    return {
-      ...parsed,
-      code: existing.code,
-      type: existing.account_type || parsed.type,
-      isLeaf: existing.is_leaf === 1 && parsed.isLeaf !== false,
-    };
-  }
-  const template = INITIAL_CHART_OF_ACCOUNTS.find((a) => a.code === accountCode);
-  if (!template) return null;
-  if (template.parentCode) {
-    ensureCanonicalAccountTx(database, tenantId, template.parentCode);
-  }
-  const accObj = { ...template, balance: 0, tenantId };
-  database.prepare(
-    'INSERT OR IGNORE INTO accounts (tenant_id,code,account_type,parent_code,is_leaf,balance_decimal,data_json) VALUES (?,?,?,?,?,?,?)'
-  ).run(
-    tenantId,
-    accObj.code,
-    accObj.type,
-    accObj.parentCode ?? null,
-    accObj.isLeaf ? 1 : 0,
-    '0.00',
-    JSON.stringify(accObj)
-  );
-  return accObj;
-}
-
-function updateAccountBalanceByLineTx(database, tenantId, accountCode, debitUnits, creditUnits) {
-  const row = database.prepare(
-    'SELECT code, account_type, balance_decimal, data_json FROM accounts WHERE tenant_id = ? AND code = ?'
-  ).get(tenantId, accountCode);
-  if (!row) return null;
-  const parsed = parseRowJson(row);
-  const accType = row.account_type || parsed.type || 'ASSET';
-  const deltaUnits = accountBalanceDeltaUnitsByType(accType, debitUnits, creditUnits);
-  const currentUnits = parseScaledInt(row.balance_decimal, MONEY_SCALE, `accountBalance(${accountCode})`);
-  const nextUnits = currentUnits + deltaUnits;
-  const nextNum = unitsToNumber(nextUnits, MONEY_SCALE);
-  const nextDec = formatScaledInt(nextUnits, MONEY_SCALE);
-  parsed.code = row.code;
-  parsed.balance = nextNum;
-  database.prepare(
-    'UPDATE accounts SET balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND code = ?'
-  ).run(nextDec, JSON.stringify(parsed), tenantId, accountCode);
-  return { ...parsed, balance: nextNum };
 }
 
 function updateAccountBalanceTx(database, tenantId, accountCode, deltaUnits) {
@@ -303,133 +218,6 @@ function updateCashBoxBalanceTx(database, tenantId, cashBoxId, deltaUnits, requi
     'UPDATE cash_boxes SET balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?'
   ).run(nextDec, JSON.stringify(parsed), tenantId, cashBoxId);
   return { ...parsed, balance: nextNum };
-}
-
-function validateAndBuildJournalLines(database, tenantId, lines) {
-  if (!Array.isArray(lines) || lines.length < 2) {
-    throw new FinancialValidationError('يجب أن يحتوي القيد على طرفين على الأقل (طرف مدين وطرف دائن).');
-  }
-  const accountRows = database.prepare('SELECT code, is_leaf, data_json FROM accounts WHERE tenant_id = ?').all(tenantId);
-  const validMap = new Map(
-    accountRows.map((r) => {
-      const parsed = parseRowJson(r);
-      return [r.code, { ...parsed, _isLeaf: r.is_leaf === 1 && parsed.isLeaf !== false }];
-    })
-  );
-
-  let totalDebitUnits = 0n;
-  let totalCreditUnits = 0n;
-  const cleanLines = [];
-
-  for (const rawLine of lines) {
-    const accountCode = String(rawLine?.accountCode || '').trim();
-    if (!accountCode) {
-      throw new FinancialValidationError('جميع أسطر القيد يجب أن تحتوي على كود حساب صالح.');
-    }
-    const accountObj = validMap.get(accountCode);
-    if (!accountObj) {
-      throw new FinancialValidationError(`الحساب المحاسبي (${accountCode}) غير معرف في الدليل المحاسبي.`);
-    }
-    if (!accountObj._isLeaf) {
-      throw new FinancialValidationError(`لا يجوز القيد على الحساب التجميعي غير الفرعي (${accountCode}).`);
-    }
-
-    const debitUnits = parseScaledInt(rawLine.debit ?? 0, MONEY_SCALE, `debit(${accountCode})`);
-    const creditUnits = parseScaledInt(rawLine.credit ?? 0, MONEY_SCALE, `credit(${accountCode})`);
-
-    if (debitUnits < 0n || creditUnits < 0n) {
-      throw new FinancialValidationError('لا يجوز أن تحتوي أسطر القيد على قيم سالبة أو غير صالحة.');
-    }
-    if (debitUnits > 0n && creditUnits > 0n) {
-      throw new FinancialValidationError(`السطر للحساب (${accountCode}) لا يمكن أن يحمل مدين ودائن في آن واحد.`);
-    }
-    if (debitUnits === 0n && creditUnits === 0n) {
-      throw new FinancialValidationError(`السطر للحساب (${accountCode}) لا يمكن أن يكون صفراً في الجانبين.`);
-    }
-
-    totalDebitUnits += debitUnits;
-    totalCreditUnits += creditUnits;
-
-    cleanLines.push({
-      ...rawLine,
-      id: String(rawLine.id || '').trim() || randomUUID(),
-      accountCode,
-      accountName: rawLine.accountName || accountObj.nameAr || accountCode,
-      debit: unitsToNumber(debitUnits, MONEY_SCALE),
-      credit: unitsToNumber(creditUnits, MONEY_SCALE),
-      costCenterId: rawLine.costCenterId || 'general',
-      memo: String(rawLine.memo || ''),
-      _debitUnits: debitUnits,
-      _creditUnits: creditUnits,
-    });
-  }
-
-  if (totalDebitUnits <= 0n) {
-    throw new FinancialValidationError('إجمالي القيد المحاسبي يجب أن يكون أكبر من الصفر.');
-  }
-  if (totalDebitUnits !== totalCreditUnits) {
-    throw new FinancialValidationError(
-      `القيد غير متوازن! إجمالي المدين (${formatScaledInt(totalDebitUnits, MONEY_SCALE)}) لا يساوي إجمالي الدائن (${formatScaledInt(totalCreditUnits, MONEY_SCALE)}).`
-    );
-  }
-
-  return cleanLines;
-}
-
-function insertJournalEntryTx(database, tenantId, entry) {
-  if (!entry.description || !String(entry.description).trim()) {
-    throw new FinancialValidationError('شرح وبيان القيد المحاسبي مطلوب.');
-  }
-  const cleanLinesWithUnits = validateAndBuildJournalLines(database, tenantId, entry.lines);
-  const publicLines = cleanLinesWithUnits.map(({ _debitUnits, _creditUnits, ...rest }) => rest);
-  const entryId = String(entry.id || '').trim() || randomUUID();
-  const persisted = {
-    ...entry,
-    id: entryId,
-    tenantId,
-    description: String(entry.description).trim(),
-    costCenterId: entry.costCenterId || 'general',
-    status: entry.status || 'POSTED',
-    lines: publicLines,
-  };
-
-  database.prepare(
-    `INSERT INTO journal_entries
-      (tenant_id,id,branch_id,entry_number,entry_date,cost_center_id,status,reference_type,reference_id,data_json)
-     VALUES (?,?,?,?,?,?,?,?,?,?)`
-  ).run(
-    tenantId,
-    persisted.id,
-    persisted.branchId || null,
-    persisted.entryNumber,
-    persisted.date,
-    persisted.costCenterId,
-    persisted.status,
-    persisted.referenceType || null,
-    persisted.referenceId || null,
-    JSON.stringify(persisted)
-  );
-
-  const lineStmt = database.prepare(
-    `INSERT INTO journal_entry_lines
-      (tenant_id,entry_id,id,account_code,debit_decimal,credit_decimal,data_json)
-     VALUES (?,?,?,?,?,?,?)`
-  );
-  for (let i = 0; i < cleanLinesWithUnits.length; i += 1) {
-    const raw = cleanLinesWithUnits[i];
-    const pub = publicLines[i];
-    lineStmt.run(
-      tenantId,
-      persisted.id,
-      pub.id,
-      pub.accountCode,
-      formatScaledInt(raw._debitUnits, MONEY_SCALE),
-      formatScaledInt(raw._creditUnits, MONEY_SCALE),
-      JSON.stringify(pub)
-    );
-  }
-
-  return { persisted, linesWithUnits: cleanLinesWithUnits };
 }
 
 function hydrateJournalEntryRow(database, tenantId, row) {
@@ -628,7 +416,7 @@ export function createFinancialService(database, core) {
           ).all(actor.tenantId);
 
       const hydrated = rows.map((r) => hydrateInvoiceRow(database, actor.tenantId, r));
-      return filterRecordsByBranchScope(hydrated, actor);
+      return filterRecordsByActivityScope(filterRecordsByBranchScope(hydrated, actor), actor);
     },
 
     getInvoiceById(actor, id) {
@@ -639,7 +427,7 @@ export function createFinancialService(database, core) {
       ).get(actor.tenantId, String(id));
       if (!row) return undefined;
       const hydrated = hydrateInvoiceRow(database, actor.tenantId, row);
-      return filterRecordsByBranchScope([hydrated], actor)[0];
+      return filterRecordsByActivityScope(filterRecordsByBranchScope([hydrated], actor), actor)[0];
     },
 
     createSalesInvoiceAtomic(actor, params) {
@@ -648,6 +436,7 @@ export function createFinancialService(database, core) {
       }
       assertPermission(actor, 'pos:sale', 'إصدار فاتورة مبيعات');
       const rawInvoice = params.invoice;
+      assertActivityAccess(actor, rawInvoice.activityId, 'إصدار فاتورة مبيعات');
       const stockDeductions = Array.isArray(params.stockDeductions) ? params.stockDeductions : [];
       const clientRequestId = params.clientRequestId ? String(params.clientRequestId).trim() : '';
       const applyAdvanceUnits = parseScaledInt(params.applyAdvanceAmount ?? 0, MONEY_SCALE, 'applyAdvanceAmount');
@@ -1280,6 +1069,7 @@ export function createFinancialService(database, core) {
       }
       assertPermission(actor, 'purchase:create', 'إصدار فاتورة مشتريات');
       const rawInvoice = params.invoice;
+      assertActivityAccess(actor, rawInvoice.activityId, 'إصدار فاتورة مشتريات');
       const itemsWithBatches = Array.isArray(params.itemsWithBatches) ? params.itemsWithBatches : [];
       const clientRequestId = params.clientRequestId ? String(params.clientRequestId).trim() : '';
       const applyAdvanceUnits = parseScaledInt(params.applyAdvanceAmount ?? 0, MONEY_SCALE, 'applyAdvanceAmount');
@@ -1925,6 +1715,7 @@ export function createFinancialService(database, core) {
           throw new FinancialValidationError('فاتورة المبيعات الأصلية غير موجودة.');
         }
         const orig = hydrateInvoiceRow(database, tenantId, origRow);
+        assertActivityAccess(actor, orig.activityId, 'إصدار مرتجع مبيعات');
         if (orig.type !== 'SALE') {
           throw new FinancialValidationError('يمكن إصدار مرتجع مبيعات لفواتير المبيعات (SALE) فقط.');
         }
@@ -2519,6 +2310,7 @@ export function createFinancialService(database, core) {
           throw new FinancialValidationError('فاتورة المشتريات الأصلية غير موجودة.');
         }
         const orig = hydrateInvoiceRow(database, tenantId, origRow);
+        assertActivityAccess(actor, orig.activityId, 'إصدار مرتجع مشتريات');
         if (orig.type !== 'PURCHASE') {
           throw new FinancialValidationError('يمكن إصدار مرتجع مشتريات لفواتير المشتريات (PURCHASE) فقط.');
         }
@@ -3455,9 +3247,10 @@ export function createFinancialService(database, core) {
           const allocUnits = parseScaledInt(alloc.allocatedAmount, MONEY_SCALE, 'allocAmount');
           const invTotalUnits = parseScaledInt(invRow.total_decimal, MONEY_SCALE, 'invTotal');
           const invPaidUnits = parseScaledInt(invRow.paid_amount_decimal, MONEY_SCALE, 'invPaid');
+          const invReturnedUnits = parseScaledInt(invObj.returnedAmount || 0, MONEY_SCALE, 'invReturned');
           const nextPaidUnits = invPaidUnits + allocUnits;
-          if (nextPaidUnits > invTotalUnits) {
-            throw new FinancialValidationError(`تجاوز التخصيص إجمالي الفاتورة (${invObj.invoiceNumber}).`);
+          if (nextPaidUnits + invReturnedUnits > invTotalUnits) {
+            throw new FinancialValidationError(`تجاوز التخصيص صافي المتبقي من الفاتورة (${invObj.invoiceNumber}) بعد المرتجعات.`);
           }
           const nextPaidNum = unitsToNumber(nextPaidUnits, MONEY_SCALE);
           invObj.paidAmount = nextPaidNum;
@@ -3807,14 +3600,26 @@ export function createFinancialService(database, core) {
             throw new FinancialValidationError(`الحساب المقابل (${voucher.accountCode || '-'}) غير موجود في الدليل المحاسبي.`);
           }
           const reqAccIsLeaf = reqAccRow ? reqAccRow.is_leaf === 1 && parseRowJson(reqAccRow).isLeaf !== false : false;
+          const partyInvoices =
+            partyObj && Array.isArray(params.manualAllocations)
+              ? filterRecordsByBranchScope(
+                  database
+                    .prepare(`SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND party_id = ?`)
+                    .all(tenantId, partyObj.id)
+                    .map((r) => hydrateInvoiceRow(database, tenantId, r)),
+                  actor
+                )
+              : [];
           const previewPlan = resolveVoucherAccountingPlan({
             voucherType: voucher.type,
             voucherMode: voucher.voucherMode,
             party: partyObj,
             requestedAccountCode: reqAccCode,
             amount: unitsToNumber(amountUnits, MONEY_SCALE),
-            openInvoices: [],
+            openInvoices: partyInvoices,
+            manualAllocations: params.manualAllocations,
             hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
+            overrideReason: params.overrideReason,
             hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
             targetAccountIsLeaf: reqAccIsLeaf,
           });
@@ -3832,6 +3637,14 @@ export function createFinancialService(database, core) {
             voucher.voucherNumber = String(voucher.voucherNumber).trim();
           }
 
+          const savedManualAllocations =
+            previewPlan.manualOverride && Array.isArray(params.manualAllocations)
+              ? params.manualAllocations.map((m) => ({
+                  invoiceId: String(m.invoiceId || '').trim(),
+                  allocatedAmount: unitsToNumber(parseScaledInt(m.allocatedAmount, MONEY_SCALE, 'manualAlloc'), MONEY_SCALE),
+                }))
+              : undefined;
+
           const draftVoucher = {
             ...voucher,
             tenantId,
@@ -3843,6 +3656,9 @@ export function createFinancialService(database, core) {
             partyType: partyObj?.type,
             partyName: partyObj?.nameAr || voucher.partyName || '',
             paymentMethod: voucher.paymentMethod || 'CASH',
+            manualOverride: previewPlan.manualOverride,
+            overrideReason: previewPlan.overrideReason,
+            ...(savedManualAllocations ? { manualAllocations: savedManualAllocations } : {}),
             createdBy: actor.id,
             createdByName: actor.fullName,
             createdAt: nowIso,
@@ -3971,6 +3787,11 @@ export function createFinancialService(database, core) {
           : null;
         const reqAccIsLeaf = reqAccRow ? reqAccRow.is_leaf === 1 && parseRowJson(reqAccRow).isLeaf !== false : false;
 
+        const effectiveManualAllocations =
+          params.manualAllocations !== undefined ? params.manualAllocations : draft.manualAllocations;
+        const effectiveOverrideReason =
+          params.overrideReason !== undefined ? params.overrideReason : draft.overrideReason;
+
         const plan = resolveVoucherAccountingPlan({
           voucherType: draft.type,
           voucherMode: draft.voucherMode,
@@ -3978,9 +3799,9 @@ export function createFinancialService(database, core) {
           requestedAccountCode: reqAccCode,
           amount: amountNum,
           openInvoices: partyInvoices,
-          manualAllocations: params.manualAllocations,
+          manualAllocations: effectiveManualAllocations,
           hasOverridePermission: hasPermission(actor, 'payment:allocation:override'),
-          overrideReason: params.overrideReason,
+          overrideReason: effectiveOverrideReason,
           hasSupplierAdvancePermission: hasPermission(actor, 'supplier:advance:approve'),
           targetAccountIsLeaf: reqAccIsLeaf,
         });
@@ -4071,9 +3892,10 @@ export function createFinancialService(database, core) {
           const invRow = database.prepare(`SELECT ${INVOICE_SELECT_COLUMNS} FROM invoices WHERE tenant_id = ? AND id = ?`).get(tenantId, alloc.invoiceId);
           const invObj = hydrateInvoiceRow(database, tenantId, invRow);
           const allocUnits = parseScaledInt(alloc.allocatedAmount, MONEY_SCALE, 'allocAmount');
+          const invReturnedUnits = parseScaledInt(invObj.returnedAmount || 0, MONEY_SCALE, 'invReturned');
           const nextPaidUnits = parseScaledInt(invRow.paid_amount_decimal, MONEY_SCALE, 'invPaid') + allocUnits;
-          if (nextPaidUnits > parseScaledInt(invRow.total_decimal, MONEY_SCALE, 'invTotal')) {
-            throw new FinancialValidationError(`تجاوز التخصيص إجمالي الفاتورة (${invObj.invoiceNumber}).`);
+          if (nextPaidUnits + invReturnedUnits > parseScaledInt(invRow.total_decimal, MONEY_SCALE, 'invTotal')) {
+            throw new FinancialValidationError(`تجاوز التخصيص صافي المتبقي من الفاتورة (${invObj.invoiceNumber}) بعد المرتجعات.`);
           }
           invObj.paidAmount = unitsToNumber(nextPaidUnits, MONEY_SCALE);
           database.prepare('UPDATE invoices SET paid_amount_decimal = ?, data_json = ? WHERE tenant_id = ? AND id = ?')
@@ -5336,12 +5158,49 @@ export function createFinancialService(database, core) {
           ? String(entry.entryNumber).trim()
           : allocateSequenceTx(database, tenantId, 'JV', activeBranch.code, terminalCode, nowIso);
 
+        const resolvedInputLines = [];
+        for (const rawLine of Array.isArray(entry.lines) ? entry.lines : []) {
+          const requestedCashBoxId = rawLine?.cashBoxId ? String(rawLine.cashBoxId).trim() : '';
+          const linkedBoxes = database.prepare(
+            'SELECT id, branch_id, account_code, data_json FROM cash_boxes WHERE tenant_id = ? AND account_code = ?'
+          ).all(tenantId, String(rawLine?.accountCode || '').trim());
+
+          let targetBox = null;
+          if (requestedCashBoxId) {
+            targetBox = getCashBoxRowTx(database, tenantId, requestedCashBoxId);
+            if (targetBox.accountCode !== String(rawLine.accountCode || '').trim()) {
+              throw new FinancialValidationError(
+                `الصندوق (${targetBox.nameAr}) مرتبط بالحساب ${targetBox.accountCode} وليس بالحساب ${rawLine.accountCode}.`
+              );
+            }
+            assertCashBoxBranchAccessTx(actor, targetBox, branchId);
+          } else if (linkedBoxes.length > 0) {
+            const branchBoxes = linkedBoxes.filter((b) => {
+              const parsed = parseRowJson(b);
+              return b.branch_id === branchId || Boolean(parsed.isCentral);
+            });
+            if (branchBoxes.length !== 1) {
+              throw new FinancialValidationError(
+                `يرجى تحديد الصندوق الفعلي في سطر الحساب النقدي (${rawLine.accountCode})؛ يتطلب القيد النقدي تحديد صندوق واحد صريح.`
+              );
+            }
+            targetBox = getCashBoxRowTx(database, tenantId, branchBoxes[0].id);
+            assertCashBoxBranchAccessTx(actor, targetBox, branchId);
+          }
+
+          resolvedInputLines.push({
+            ...rawLine,
+            ...(targetBox ? { cashBoxId: targetBox.id } : {}),
+          });
+        }
+
         const { persisted, linesWithUnits } = insertJournalEntryTx(database, tenantId, {
           ...entry,
           id: entry.id || randomUUID(),
           entryNumber,
           date: entry.date || nowIso.split('T')[0],
           branchId,
+          lines: resolvedInputLines,
           status: 'POSTED',
           referenceType: 'MANUAL',
           isAutoGenerated: false,
@@ -5350,22 +5209,8 @@ export function createFinancialService(database, core) {
         for (const line of linesWithUnits) {
           updateAccountBalanceByLineTx(database, tenantId, line.accountCode, line._debitUnits, line._creditUnits);
           const cashDeltaUnits = line._debitUnits - line._creditUnits;
-
-          const linkedBoxes = database.prepare(
-            'SELECT id, branch_id, account_code, data_json FROM cash_boxes WHERE tenant_id = ? AND account_code = ?'
-          ).all(tenantId, line.accountCode);
-          if (linkedBoxes.length > 0) {
-            const branchBoxes = linkedBoxes.filter((b) => {
-              const parsed = parseRowJson(b);
-              return b.branch_id === branchId || Boolean(parsed.isCentral);
-            });
-            if (branchBoxes.length === 1) {
-              const parsed = parseRowJson(branchBoxes[0]);
-              if (parsed.isCentral) {
-                assertPermission(actor, 'cashbox:central_access', 'قيد يدوي على الصندوق المركزي');
-              }
-              updateCashBoxBalanceTx(database, tenantId, branchBoxes[0].id, cashDeltaUnits, true);
-            }
+          if (line.cashBoxId) {
+            updateCashBoxBalanceTx(database, tenantId, line.cashBoxId, cashDeltaUnits, true);
           }
         }
 
@@ -5444,15 +5289,40 @@ export function createFinancialService(database, core) {
         const reversalNumber = allocateSequenceTx(database, tenantId, 'REV', origBranchRow.code || 'BR01', terminalCode, nowIso);
         const reversalId = randomUUID();
 
-        const reversedLines = original.lines.map((l) => ({
-          id: randomUUID(),
-          accountCode: l.accountCode,
-          accountName: l.accountName,
-          debit: l.credit,
-          credit: l.debit,
-          costCenterId: l.costCenterId,
-          memo: `عكس لقيد ${original.entryNumber}: ${reason}`,
-        }));
+        const reversedLines = [];
+        for (const l of original.lines) {
+          let resolvedCashBoxId = l.cashBoxId ? String(l.cashBoxId).trim() : '';
+          const linkedBoxes = database.prepare(
+            'SELECT id, branch_id, account_code, data_json FROM cash_boxes WHERE tenant_id = ? AND account_code = ?'
+          ).all(tenantId, l.accountCode);
+          if (resolvedCashBoxId) {
+            const box = getCashBoxRowTx(database, tenantId, resolvedCashBoxId);
+            assertCashBoxBranchAccessTx(actor, box, originalBranchId);
+          } else if (linkedBoxes.length > 0) {
+            const branchBoxes = linkedBoxes.filter((b) => {
+              const parsed = parseRowJson(b);
+              return b.branch_id === originalBranchId || Boolean(parsed.isCentral);
+            });
+            if (branchBoxes.length !== 1) {
+              throw new FinancialValidationError(
+                `لا يمكن عكس القيد بأمان: حساب الصندوق (${l.accountCode}) لا يرتبط بصندوق واحد محدد في الفرع الأصلي.`
+              );
+            }
+            const box = getCashBoxRowTx(database, tenantId, branchBoxes[0].id);
+            assertCashBoxBranchAccessTx(actor, box, originalBranchId);
+            resolvedCashBoxId = box.id;
+          }
+          reversedLines.push({
+            id: randomUUID(),
+            accountCode: l.accountCode,
+            accountName: l.accountName,
+            debit: l.credit,
+            credit: l.debit,
+            costCenterId: l.costCenterId,
+            ...(resolvedCashBoxId ? { cashBoxId: resolvedCashBoxId } : {}),
+            memo: `عكس لقيد ${original.entryNumber}: ${reason}`,
+          });
+        }
 
         const { persisted: reversalEntry, linesWithUnits } = insertJournalEntryTx(database, tenantId, {
           id: reversalId,
@@ -5473,25 +5343,8 @@ export function createFinancialService(database, core) {
         for (const line of linesWithUnits) {
           updateAccountBalanceByLineTx(database, tenantId, line.accountCode, line._debitUnits, line._creditUnits);
           const cashDeltaUnits = line._debitUnits - line._creditUnits;
-
-          const linkedBoxes = database.prepare(
-            'SELECT id, branch_id, account_code, data_json FROM cash_boxes WHERE tenant_id = ? AND account_code = ?'
-          ).all(tenantId, line.accountCode);
-          if (linkedBoxes.length > 0) {
-            const branchBoxes = linkedBoxes.filter((b) => {
-              const parsed = parseRowJson(b);
-              return b.branch_id === originalBranchId || Boolean(parsed.isCentral);
-            });
-            if (branchBoxes.length !== 1) {
-              throw new FinancialValidationError(
-                `لا يمكن عكس القيد بأمان: حساب الصندوق (${line.accountCode}) لا يرتبط بصندوق واحد محدد في الفرع الأصلي.`
-              );
-            }
-            const parsedBox = parseRowJson(branchBoxes[0]);
-            if (parsedBox.isCentral) {
-              assertPermission(actor, 'cashbox:central_access', 'عكس قيد على الصندوق المركزي');
-            }
-            updateCashBoxBalanceTx(database, tenantId, branchBoxes[0].id, cashDeltaUnits, true);
+          if (line.cashBoxId) {
+            updateCashBoxBalanceTx(database, tenantId, line.cashBoxId, cashDeltaUnits, true);
           }
         }
 

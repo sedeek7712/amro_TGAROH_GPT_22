@@ -118,6 +118,9 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
   const [cloudSyncResult, setCloudSyncResult] = useState<CloudSyncResult | null>(null);
   const [showRlsViewer, setShowRlsViewer] = useState(false);
   const [copiedRls, setCopiedRls] = useState(false);
+  const [supabaseEmail, setSupabaseEmail] = useState(() => supabaseSync.getConfig().supabaseAuthEmail || '');
+  const [supabasePassword, setSupabasePassword] = useState('');
+  const [isSigningInSupabase, setIsSigningInSupabase] = useState(false);
 
   // حالة Django
   const [syncConfig, setSyncConfig] = useState<DjangoSyncConfig>(djangoSync.getConfig());
@@ -346,7 +349,33 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
 
   const handleSaveSupabaseConfig = () => {
     supabaseSync.saveConfig(supabaseConfig);
+    setSupabaseConfig(supabaseSync.getConfig());
     setFeedback({ type: 'success', text: 'تم حفظ إعدادات الربط السحابي (Supabase) واسم الجهاز بنجاح.' });
+  };
+
+  const handleSupabaseCloudSignIn = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!supabaseEmail.trim() || !supabasePassword) {
+      setFeedback({ type: 'error', text: 'يرجى إدخال البريد الإلكتروني وكلمة المرور لحساب Supabase السحابي.' });
+      return;
+    }
+    setIsSigningInSupabase(true);
+    setFeedback(null);
+    try {
+      supabaseSync.saveConfig(supabaseConfig);
+      const res = await supabaseSync.signInWithSupabasePassword(supabaseEmail.trim(), supabasePassword);
+      setSupabasePassword('');
+      setSupabaseConfig(supabaseSync.getConfig());
+      setFeedback({ type: res.success ? 'success' : 'error', text: res.message });
+    } finally {
+      setIsSigningInSupabase(false);
+    }
+  };
+
+  const handleSupabaseCloudSignOut = () => {
+    supabaseSync.signOutSupabaseCloud();
+    setSupabaseConfig(supabaseSync.getConfig());
+    setFeedback({ type: 'info', text: 'تم تسجيل الخروج من جلسة Supabase JWT السحابية.' });
   };
 
   const handleFullCloudSync = async () => {
@@ -701,6 +730,10 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
     PARTY: 'عميل / مورد',
     ACCOUNT: 'حساب',
     CASHBOX: 'صندوق',
+    BRANCH: 'فرع',
+    PAYMENT_ALLOCATION: 'تخصيص دفعة',
+    PARTY_ADVANCE: 'سلفة / رصيد مقدم',
+    ALLOCATION_AUDIT: 'تدقيق تخصيص',
   };
 
   const actionLabels: Record<string, { text: string; color: string }> = {
@@ -1536,6 +1569,82 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
                 <span>{supabaseTestStatus.message}</span>
               </div>
             )}
+
+            {/* Section: Cloud JWT User Authentication (SEC-01) */}
+            <div className="pt-4 border-t border-slate-100 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-xs font-bold text-slate-900">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  <span>توثيق جلسة المستخدم السحابية (Supabase Auth JWT — مطلوب لسياسات RLS)</span>
+                </div>
+                {supabaseConfig.supabaseAccessToken ? (
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-200">
+                    جلسة JWT موثقة ({supabaseConfig.supabaseAuthEmail || 'حساب سحابي'})
+                  </span>
+                ) : (
+                  <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-200">
+                    غير موثق (المفتاح العام وحده لا يكفي للمزامنة)
+                  </span>
+                )}
+              </div>
+
+              {supabaseConfig.supabaseAccessToken ? (
+                <div className="flex flex-wrap items-center justify-between gap-3 p-3 rounded-lg bg-emerald-50 border border-emerald-200 text-xs text-emerald-900">
+                  <div>
+                    <span className="font-bold">الحساب السحابي النشط: </span>
+                    <span className="font-mono">{supabaseConfig.supabaseAuthEmail || 'موثق'}</span>
+                    {supabaseConfig.supabaseTokenExpiresAt && (
+                      <span className="text-[11px] text-emerald-700 mr-2">
+                        (تنتهي: {new Date(supabaseConfig.supabaseTokenExpiresAt).toLocaleString('ar-SA')})
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleSupabaseCloudSignOut}
+                    className="px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-700 border border-rose-200 rounded-lg text-xs font-bold"
+                  >
+                    تسجيل خروج سحابي
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={handleSupabaseCloudSignIn} className="grid grid-cols-1 md:grid-cols-3 gap-3 items-end">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      البريد الإلكتروني لحساب Supabase:
+                    </label>
+                    <input
+                      type="email"
+                      value={supabaseEmail}
+                      onChange={(e) => setSupabaseEmail(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                      placeholder="accountant@company.com"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-700 mb-1">
+                      كلمة المرور السحابية (لا تُحفظ محلياً):
+                    </label>
+                    <input
+                      type="password"
+                      value={supabasePassword}
+                      onChange={(e) => setSupabasePassword(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-300 rounded-lg text-xs font-mono"
+                      placeholder="••••••••"
+                    />
+                  </div>
+                  <div>
+                    <button
+                      type="submit"
+                      disabled={isSigningInSupabase}
+                      className="w-full px-4 py-2 bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white rounded-lg text-xs font-bold"
+                    >
+                      {isSigningInSupabase ? 'جارٍ التوثيق...' : 'تسجيل الدخول وتوثيق JWT'}
+                    </button>
+                  </div>
+                </form>
+              )}
+            </div>
           </div>
 
           {/* Section: Action Center for Multi-Device Sync */}

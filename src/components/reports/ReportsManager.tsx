@@ -56,6 +56,8 @@ import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
 import { authService } from '../../services/authService';
 import { hasPermission } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
+import { buildPartyStatement } from '../../utils/partyStatement';
+import { getProductCostValue } from '../../utils/inventoryValuation';
 
 type ReportTab =
   | 'activity_profits'
@@ -151,8 +153,8 @@ export const ReportsManager: React.FC = () => {
       );
     }
 
-    const totalCost = filtered.reduce((s, p) => s + (p.currentStock || 0) * (p.purchasePrice || 0), 0);
-    const totalRetail = filtered.reduce((s, p) => s + (p.currentStock || 0) * (p.sellPrice || 0), 0);
+    const totalCost = roundMoney(filtered.reduce((s, p) => s + getProductCostValue(p), 0));
+    const totalRetail = roundMoney(filtered.reduce((s, p) => s + (p.currentStock || 0) * (p.sellPrice || 0), 0));
     const totalQty = filtered.reduce((s, p) => s + (p.currentStock || 0), 0);
 
     return {
@@ -165,238 +167,21 @@ export const ReportsManager: React.FC = () => {
     };
   }, [liveProducts, activityFilter, searchQuery]);
 
-  // 2. كشف حساب الطرف المختار (عميل / مورد) شاملاً السندات والتخصيصات والأرصدة المقدمة
+  // 2. كشف حساب الطرف المختار (عميل / مورد) من المصدر الموحد دون تكرار احتساب السداد
   const statementData = useMemo(() => {
     if (!selectedPartyId) return null;
     const party = liveParties.find((p) => p.id === selectedPartyId);
     if (!party) return null;
 
-    const partyInvoices = liveInvoices.filter(
-      (inv) => inv.partyId === party.id && inv.status !== 'REVERSED'
-    );
-    const partyVouchers = liveVouchers.filter(
-      (v) =>
-        v.partyId === party.id &&
-        (v.status || 'POSTED') !== 'DRAFT' &&
-        v.status !== 'CANCELLED'
-    );
-    const partyAdvances = livePartyAdvances.filter(
-      (tx) => tx.partyId === party.id && tx.type === 'APPLY_TO_INVOICE'
-    );
-
-    const rawRows: Array<{
-      id: string;
-      date: string;
-      sortKey: string;
-      type: string;
-      docNumber: string;
-      debit: number;
-      credit: number;
-      memo: string;
-      extraBadge?: string;
-    }> = [];
-
-    for (const inv of partyInvoices) {
-      const cashPaid = Math.max(0, roundMoney(inv.paidAmount - (inv.advanceAppliedAmount || 0)));
-      if (party.type === 'CUSTOMER') {
-        if (inv.type === 'RETURN_SALE') {
-          const advCredited = inv.advanceAppliedAmount || 0;
-          rawRows.push({
-            id: inv.id,
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            type: 'مرتجع مبيعات',
-            docNumber: inv.invoiceNumber,
-            debit: roundMoney(inv.paidAmount + advCredited),
-            credit: inv.total,
-            memo: `مرتجع مبيعات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
-            extraBadge:
-              advCredited > 0
-                ? `تحويل للرصيد المقدم: ${Number(advCredited).toFixed(2)}`
-                : undefined,
-          });
-        } else {
-          rawRows.push({
-            id: inv.id,
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            type: 'فاتورة مبيعات',
-            docNumber: inv.invoiceNumber,
-            debit: inv.total,
-            credit: cashPaid,
-            memo: `فاتورة مبيعات (${inv.paymentMethod})`,
-            extraBadge:
-              (inv.advanceAppliedAmount || 0) > 0
-                ? `خصم من الرصيد المقدم: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
-                : undefined,
-          });
-        }
-      } else {
-        if (inv.type === 'RETURN_PURCHASE') {
-          const advCredited = inv.advanceAppliedAmount || 0;
-          rawRows.push({
-            id: inv.id,
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            type: 'مرتجع مشتريات',
-            docNumber: inv.invoiceNumber,
-            debit: inv.total,
-            credit: roundMoney(inv.paidAmount + advCredited),
-            memo: `مرتجع مشتريات${inv.originalInvoiceNumber ? ` (فاتورة ${inv.originalInvoiceNumber})` : ''}`,
-            extraBadge:
-              advCredited > 0
-                ? `إثبات سلفة مورد: ${Number(advCredited).toFixed(2)}`
-                : undefined,
-          });
-        } else {
-          rawRows.push({
-            id: inv.id,
-            date: inv.date,
-            sortKey: `${inv.date}-1-${inv.invoiceNumber}`,
-            type: 'فاتورة مشتريات',
-            docNumber: inv.invoiceNumber,
-            debit: cashPaid,
-            credit: inv.total,
-            memo: `فاتورة مشتريات (${inv.paymentMethod})`,
-            extraBadge:
-              (inv.advanceAppliedAmount || 0) > 0
-                ? `خصم من سلفة المورد: ${Number(inv.advanceAppliedAmount).toFixed(2)}`
-                : undefined,
-          });
-        }
-      }
-    }
-
-    for (const v of partyVouchers) {
-      const allocs = livePaymentAllocations.filter((a) => a.voucherId === v.id);
-      const allocInfo =
-        allocs.length > 0
-          ? `تخصيص: ${allocs
-              .map((a) => `${a.invoiceNumber || a.invoiceId} (${a.allocatedAmount.toFixed(2)})`)
-              .join('، ')}`
-          : undefined;
-      const isReversed = v.status === 'REVERSED';
-      const settledDebt = v.appliedToDebtAmount ?? v.amount;
-      const badge = [
-        allocInfo,
-        (v.advanceAmount || 0) > 0 ? `رصيد مقدم: ${Number(v.advanceAmount).toFixed(2)}` : '',
-      ]
-        .filter(Boolean)
-        .join(' | ');
-
-      if (v.type === 'RECEIPT') {
-        rawRows.push({
-          id: v.id,
-          date: v.date,
-          sortKey: `${v.date}-2-${v.voucherNumber}`,
-          type: isReversed ? 'سند قبض (معكوس)' : 'سند قبض',
-          docNumber: v.voucherNumber,
-          debit: 0,
-          credit: settledDebt,
-          memo: v.description,
-          extraBadge: badge || undefined,
-        });
-        if (isReversed) {
-          rawRows.push({
-            id: `${v.id}-rev`,
-            date: v.date,
-            sortKey: `${v.date}-3-${v.voucherNumber}-REV`,
-            type: 'عكس سند قبض',
-            docNumber: `${v.voucherNumber}-REV`,
-            debit: settledDebt,
-            credit: 0,
-            memo: v.reversalReason || 'عكس قيد وسند مالي',
-          });
-        }
-      } else {
-        rawRows.push({
-          id: v.id,
-          date: v.date,
-          sortKey: `${v.date}-2-${v.voucherNumber}`,
-          type: isReversed ? 'سند صرف (معكوس)' : 'سند صرف',
-          docNumber: v.voucherNumber,
-          debit: settledDebt,
-          credit: 0,
-          memo: v.description,
-          extraBadge: badge || undefined,
-        });
-        if (isReversed) {
-          rawRows.push({
-            id: `${v.id}-rev`,
-            date: v.date,
-            sortKey: `${v.date}-3-${v.voucherNumber}-REV`,
-            type: 'عكس سند صرف',
-            docNumber: `${v.voucherNumber}-REV`,
-            debit: 0,
-            credit: settledDebt,
-            memo: v.reversalReason || 'عكس قيد وسند مالي',
-          });
-        }
-      }
-    }
-
-    for (const tx of partyAdvances) {
-      rawRows.push({
-        id: tx.id,
-        date: tx.date,
-        sortKey: `${tx.date}-4-${tx.id}`,
-        type: 'تسوية رصيد مقدم',
-        docNumber: 'ADV-SET',
-        debit: party.type === 'SUPPLIER' ? Math.abs(tx.amount) : 0,
-        credit: party.type === 'CUSTOMER' ? Math.abs(tx.amount) : 0,
-        memo: tx.description,
-        extraBadge: `متبقي مقدم: ${tx.balanceAfter.toFixed(2)}`,
-      });
-    }
-
-    rawRows.sort((a, b) => a.sortKey.localeCompare(b.sortKey, 'en'));
-
-    let openingBalance = 0;
-    let runningBalance = 0;
-    const transactions: Array<{
-      id: string;
-      date: string;
-      type: string;
-      docNumber: string;
-      debit: number;
-      credit: number;
-      balanceAfter: number;
-      memo: string;
-      extraBadge?: string;
-    }> = [];
-
-    for (const r of rawRows) {
-      if (endDate && r.date > endDate) continue;
-      const delta =
-        party.type === 'CUSTOMER' ? r.debit - r.credit : r.credit - r.debit;
-      if (startDate && r.date < startDate) {
-        openingBalance = roundMoney(openingBalance + delta);
-        runningBalance = openingBalance;
-        continue;
-      }
-      runningBalance = roundMoney(runningBalance + delta);
-      transactions.push({
-        id: r.id,
-        date: r.date,
-        type: r.type,
-        docNumber: r.docNumber,
-        debit: r.debit,
-        credit: r.credit,
-        balanceAfter: runningBalance,
-        memo: r.memo,
-        extraBadge: r.extraBadge,
-      });
-    }
-
-    return {
+    return buildPartyStatement({
       party,
-      openingBalance,
-      transactions,
-      periodClosingBalance: runningBalance,
-      finalBalance: party.balance,
-      advanceBalance: roundMoney(party.advanceBalance || 0),
-      invoicesCount: partyInvoices.length,
-    };
+      invoices: liveInvoices,
+      vouchers: liveVouchers,
+      paymentAllocations: livePaymentAllocations,
+      partyAdvances: livePartyAdvances,
+      startDate,
+      endDate,
+    });
   }, [
     selectedPartyId,
     liveParties,
@@ -1310,7 +1095,7 @@ export const ReportsManager: React.FC = () => {
                   </tr>
                 ) : (
                   stockValuation.filtered.map((prod) => {
-                    const totalCost = (prod.currentStock || 0) * (prod.purchasePrice || 0);
+                    const totalCost = getProductCostValue(prod);
                     const todayStr = new Date().toISOString().split('T')[0];
 
                     return (

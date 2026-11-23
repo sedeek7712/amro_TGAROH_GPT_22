@@ -32,6 +32,9 @@ import {
   PaymentVoucher,
   AmanatRecord,
   Branch,
+  PaymentAllocation,
+  PartyAdvanceTransaction,
+  AllocationAudit,
 } from '../types/erp';
 
 const SUPABASE_CONFIG_KEY = 'multi_activity_erp_supabase_sync_config';
@@ -233,10 +236,166 @@ export class SupabaseSyncService {
     }
   }
 
+  private decodeJwtClaims(token: string): Record<string, unknown> | null {
+    const parts = token.trim().split('.');
+    if (parts.length !== 3 || !parts[1]) return null;
+    try {
+      const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+      const padded = base64 + '='.repeat((4 - (base64.length % 4)) % 4);
+      const jsonStr =
+        typeof atob === 'function'
+          ? decodeURIComponent(
+              Array.from(atob(padded), (ch) => `%${ch.charCodeAt(0).toString(16).padStart(2, '0')}`).join('')
+            )
+          : Buffer.from(padded, 'base64').toString('utf8');
+      const parsed = JSON.parse(jsonStr);
+      return parsed && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private validateUserJwt(
+    token: string | undefined,
+    anonKey: string,
+    expectedTenantId: string
+  ): { ok: boolean; accessToken?: string; error?: string } {
+    const cleanToken = token?.trim() || '';
+    if (!cleanToken || cleanToken === anonKey.trim()) {
+      return {
+        ok: false,
+        error:
+          'المزامنة السحابية معطلة بأمان: يلزم ربط مصادقة سحابية حقيقية وإرسال JWT للمستخدم؛ المفتاح العام وحده لا يكفي.',
+      };
+    }
+
+    const claims = this.decodeJwtClaims(cleanToken);
+    if (!claims) {
+      return {
+        ok: false,
+        error: 'المزامنة السحابية مرفوضة: رمز JWT المستخدم غير صالح التشفير أو التوقيع.',
+      };
+    }
+
+    const rawRole = String(claims.role || '');
+    if (rawRole === 'service_role') {
+      return {
+        ok: false,
+        error: 'حظر أمني: ممنوع استخدام مفتاح service_role داخل تطبيق المتصفح أو سطح المكتب.',
+      };
+    }
+    if (rawRole === 'anon') {
+      return {
+        ok: false,
+        error:
+          'المزامنة السحابية معطلة بأمان: يلزم ربط مصادقة سحابية حقيقية وإرسال JWT للمستخدم؛ المفتاح العام وحده لا يكفي.',
+      };
+    }
+
+    if (typeof claims.exp === 'number' && claims.exp * 1000 <= Date.now()) {
+      return {
+        ok: false,
+        error: 'انتهت صلاحية جلسة Supabase (JWT منتهي). يرجى إعادة تسجيل الدخول السحابي.',
+      };
+    }
+
+    const appMeta =
+      claims.app_metadata && typeof claims.app_metadata === 'object'
+        ? (claims.app_metadata as Record<string, unknown>)
+        : {};
+    const jwtTenant = String(claims.tenant_id || appMeta.tenant_id || '').trim();
+    if (!jwtTenant) {
+      return {
+        ok: false,
+        error: 'رمز JWT لا يحتوي على مطالبة المؤسسة (tenant_id) المطلوبة بواسطة سياسات RLS.',
+      };
+    }
+    if (jwtTenant !== expectedTenantId) {
+      return {
+        ok: false,
+        error: `حظر عزل المؤسسات: مؤسسة JWT (${jwtTenant}) لا تطابق مؤسسة الجلسة (${expectedTenantId}).`,
+      };
+    }
+
+    const erpRole = String(claims.erp_role || appMeta.role || claims.role || '').trim();
+    if (!['ADMIN', 'ACCOUNTANT', 'CASHIER', 'INVENTORY_KEEPER'].includes(erpRole)) {
+      return {
+        ok: false,
+        error: 'رمز JWT لا يحمل دوراً معتمداً للنظام (ADMIN/ACCOUNTANT/CASHIER/INVENTORY_KEEPER).',
+      };
+    }
+
+    return { ok: true, accessToken: cleanToken };
+  }
+
+  public async signInWithSupabasePassword(
+    email: string,
+    password: string
+  ): Promise<{ success: boolean; message: string }> {
+    const config = this.getConfig();
+    if (!config.supabaseUrl || !config.supabaseAnonKey) {
+      return { success: false, message: 'يرجى إدخال رابط مشروع Supabase والمفتاح العام أولاً.' };
+    }
+    const authTenant = authService.getActiveTenantIdSync()?.trim();
+    if (!authTenant) {
+      return { success: false, message: 'يجب تسجيل الدخول محلياً أولاً قبل ربط الحساب السحابي.' };
+    }
+    try {
+      const cleanUrl = config.supabaseUrl.replace(/\/+$/, '');
+      const res = await fetch(`${cleanUrl}/auth/v1/token?grant_type=password`, {
+        method: 'POST',
+        headers: {
+          apikey: config.supabaseAnonKey,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ email: email.trim(), password }),
+      });
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        return {
+          success: false,
+          message: `فشل تسجيل الدخول السحابي (${res.status}): ${errText.slice(0, 160) || res.statusText}`,
+        };
+      }
+      const data = (await res.json()) as Record<string, unknown>;
+      const accessToken = typeof data.access_token === 'string' ? data.access_token : '';
+      const check = this.validateUserJwt(accessToken, config.supabaseAnonKey, authTenant);
+      if (!check.ok || !check.accessToken) {
+        return { success: false, message: check.error || 'فشل التحقق من مطالبات JWT السحابي.' };
+      }
+      const expiresAt =
+        typeof data.expires_at === 'number'
+          ? new Date(data.expires_at * 1000).toISOString()
+          : typeof data.expires_in === 'number'
+          ? new Date(Date.now() + data.expires_in * 1000).toISOString()
+          : undefined;
+      this.saveConfig({
+        supabaseAccessToken: check.accessToken,
+        supabaseAuthEmail: email.trim(),
+        supabaseTokenExpiresAt: expiresAt,
+      });
+      return { success: true, message: 'تم توثيق جلسة Supabase JWT بنجاح للمؤسسة الحالية.' };
+    } catch (err: unknown) {
+      return {
+        success: false,
+        message: `تعذر الاتصال بخادم مصادقة Supabase: ${err instanceof Error ? err.message : 'خطأ غير معروف'}`,
+      };
+    }
+  }
+
+  public signOutSupabaseCloud(): void {
+    this.saveConfig({
+      supabaseAccessToken: '',
+      supabaseTokenExpiresAt: undefined,
+    });
+  }
+
   /**
-   * التحقق من تطابق معرف المؤسسة مع الجلسة المصادق عليها (SYNC-05)
+   * التحقق من تطابق معرف المؤسسة مع الجلسة المصادق عليها وتوافر JWT حقيقي للمستخدم (SYNC-05 & SEC-01)
    */
-  private resolveEffectiveTenant(config: SupabaseSyncConfig): { ok: boolean; tenantId: string; error?: string } {
+  private resolveEffectiveTenant(
+    config: SupabaseSyncConfig
+  ): { ok: boolean; tenantId: string; accessToken?: string; error?: string } {
     const session = authService.getCurrentSessionSync();
     const authTenant = authService.getActiveTenantIdSync()?.trim();
     const configured = config.tenantId?.trim();
@@ -250,12 +409,18 @@ export class SupabaseSyncService {
         error: `حظر عزل المؤسسات: المؤسسة المضبوطة (${configured}) لا تطابق مؤسسة الجلسة المصادق عليها (${authTenant}).`,
       };
     }
-    // المفتاح العام ليس JWT لمستخدم ولا يحمل مطالبات المؤسسة والدور المطلوبة بواسطة سياسات قاعدة البيانات.
-    // لا يوجد حالياً تكامل مصادقة سحابي يوفر JWT مستخدم؛ لا نرسل بيانات محلية بهوية مجهولة.
+    const jwtCheck = this.validateUserJwt(config.supabaseAccessToken, config.supabaseAnonKey, authTenant);
+    if (!jwtCheck.ok || !jwtCheck.accessToken) {
+      return {
+        ok: false,
+        tenantId: authTenant,
+        error: jwtCheck.error,
+      };
+    }
     return {
-      ok: false,
+      ok: true,
       tenantId: authTenant,
-      error: 'المزامنة السحابية معطلة بأمان: يلزم ربط مصادقة سحابية حقيقية وإرسال JWT للمستخدم؛ المفتاح العام وحده لا يكفي.',
+      accessToken: jwtCheck.accessToken,
     };
   }
 
@@ -361,7 +526,7 @@ export class SupabaseSyncService {
         method: 'GET',
         headers: {
           apikey: config.supabaseAnonKey,
-          Authorization: `Bearer ${config.supabaseAnonKey}`,
+          Authorization: `Bearer ${tenantResolution.accessToken}`,
           'Content-Type': 'application/json',
           'x-tenant-id': tenantResolution.tenantId,
           'x-device-id': config.deviceId,
@@ -427,7 +592,7 @@ export class SupabaseSyncService {
         method: 'POST',
         headers: {
           apikey: config.supabaseAnonKey,
-          Authorization: `Bearer ${config.supabaseAnonKey}`,
+          Authorization: `Bearer ${tenantResolution.accessToken}`,
           'Content-Type': 'application/json',
           Prefer: 'resolution=merge-duplicates',
           'x-tenant-id': tenantResolution.tenantId,
@@ -558,7 +723,7 @@ export class SupabaseSyncService {
           method,
           headers: {
             apikey: config.supabaseAnonKey,
-            Authorization: `Bearer ${config.supabaseAnonKey}`,
+            Authorization: `Bearer ${tenantResolution.accessToken}`,
             'Content-Type': 'application/json',
             Prefer: preferHeader,
             'x-tenant-id': effectiveTenantId,
@@ -597,7 +762,7 @@ export class SupabaseSyncService {
             method: 'POST',
             headers: {
               apikey: config.supabaseAnonKey,
-              Authorization: `Bearer ${config.supabaseAnonKey}`,
+              Authorization: `Bearer ${tenantResolution.accessToken}`,
               'Content-Type': 'application/json',
               Prefer: 'resolution=ignore-duplicates',
               'x-tenant-id': effectiveTenantId,
@@ -703,7 +868,7 @@ export class SupabaseSyncService {
           barcode: p.barcode || null,
           oem_number: p.oemNumber || null,
           batches_data: p.batches || [],
-          is_active: true,
+          is_active: p.isActive !== false,
           is_deleted: false,
         };
       }
@@ -719,6 +884,7 @@ export class SupabaseSyncService {
           address: c.address || null,
           tax_number: c.taxNumber || null,
           balance: c.balance || 0,
+          advance_balance: c.advanceBalance || 0,
           credit_limit: c.creditLimit || 0,
           notes: c.notes || null,
           is_deleted: false,
@@ -737,15 +903,19 @@ export class SupabaseSyncService {
           party_id: inv.partyId || null,
           party_name: inv.partyName || 'نقدي',
           date: inv.date,
+          due_date: inv.dueDate || null,
           items: inv.items || [],
           subtotal: inv.subtotal || 0,
           discount: inv.discount || 0,
           tax: inv.tax || 0,
           total: inv.total || 0,
           paid_amount: inv.paidAmount || 0,
+          returned_amount: inv.returnedAmount || 0,
+          advance_applied_amount: inv.advanceAppliedAmount || 0,
           payment_method: inv.paymentMethod || 'CASH',
           cash_box_id: inv.cashBoxId || null,
           journal_entry_id: inv.journalEntryId || null,
+          status: inv.status || 'POSTED',
           is_posted: inv.isPosted ?? true,
           is_deleted: false,
           notes: inv.notes || null,
@@ -795,7 +965,72 @@ export class SupabaseSyncService {
           description: v.description || '',
           cost_center_id: v.costCenterId,
           journal_entry_id: v.journalEntryId || null,
+          status: v.status || 'POSTED',
+          applied_to_debt_amount: v.appliedToDebtAmount || 0,
+          advance_amount: v.advanceAmount || 0,
+          manual_override: Boolean(v.manualOverride),
+          override_reason: v.overrideReason || null,
+          manual_allocations: v.manualAllocations || null,
+          allocations: v.allocations || null,
           is_deleted: false,
+        };
+      }
+
+      case 'PAYMENT_ALLOCATION': {
+        const alloc = raw as unknown as PaymentAllocation;
+        return {
+          id: alloc.id || item.entityId,
+          tenant_id: tenantId,
+          branch_id: alloc.branchId || defaultBranchId,
+          voucher_id: alloc.voucherId || null,
+          advance_transaction_id: alloc.advanceTransactionId || null,
+          party_id: alloc.partyId,
+          invoice_id: alloc.invoiceId,
+          invoice_number: alloc.invoiceNumber || null,
+          invoice_date: alloc.invoiceDate || null,
+          allocated_amount: Number(alloc.allocatedAmount || 0),
+          allocation_method: alloc.allocationMethod || 'FIFO',
+          status: alloc.status || 'ACTIVE',
+          created_by: alloc.createdBy || null,
+          created_at: alloc.createdAt || new Date().toISOString(),
+        };
+      }
+
+      case 'PARTY_ADVANCE': {
+        const adv = raw as unknown as PartyAdvanceTransaction;
+        return {
+          id: adv.id || item.entityId,
+          tenant_id: tenantId,
+          branch_id: adv.branchId || defaultBranchId,
+          party_id: adv.partyId,
+          party_type: adv.partyType,
+          tx_type: adv.type,
+          amount: Number(adv.amount || 0),
+          balance_after: Number(adv.balanceAfter || 0),
+          voucher_id: adv.voucherId || null,
+          invoice_id: adv.invoiceId || null,
+          journal_entry_id: adv.journalEntryId || null,
+          tx_date: adv.date,
+          description: adv.description || null,
+          created_by: adv.createdBy || null,
+          created_at: adv.createdAt || new Date().toISOString(),
+        };
+      }
+
+      case 'ALLOCATION_AUDIT': {
+        const audit = raw as unknown as AllocationAudit;
+        return {
+          id: audit.id || item.entityId,
+          tenant_id: tenantId,
+          branch_id: audit.branchId || defaultBranchId,
+          voucher_id: audit.voucherId,
+          party_id: audit.partyId,
+          user_id: audit.userId,
+          user_name: audit.userName,
+          reason: audit.reason,
+          previous_allocations: audit.previousAllocations || [],
+          new_allocations: audit.newAllocations || [],
+          audit_timestamp: audit.timestamp,
         };
       }
 
@@ -873,6 +1108,9 @@ export class SupabaseSyncService {
       { name: 'erp_invoices', entityType: 'INVOICE', pkField: 'id' },
       { name: 'erp_journal_entries', entityType: 'JOURNAL_ENTRY', pkField: 'id' },
       { name: 'erp_payment_vouchers', entityType: 'VOUCHER', pkField: 'id' },
+      { name: 'erp_payment_allocations', entityType: 'PAYMENT_ALLOCATION', pkField: 'id' },
+      { name: 'erp_party_advances', entityType: 'PARTY_ADVANCE', pkField: 'id' },
+      { name: 'erp_allocation_audits', entityType: 'ALLOCATION_AUDIT', pkField: 'id' },
       { name: 'erp_amanat_items', entityType: 'AMANAT', pkField: 'id' },
     ];
 
@@ -904,7 +1142,18 @@ export class SupabaseSyncService {
 
       try {
         while (true) {
-          const branchScopedTables = new Set(['erp_branches', 'erp_devices', 'erp_cash_boxes', 'erp_invoices', 'erp_journal_entries', 'erp_payment_vouchers', 'erp_amanat_items']);
+          const branchScopedTables = new Set([
+            'erp_branches',
+            'erp_devices',
+            'erp_cash_boxes',
+            'erp_invoices',
+            'erp_journal_entries',
+            'erp_payment_vouchers',
+            'erp_payment_allocations',
+            'erp_party_advances',
+            'erp_allocation_audits',
+            'erp_amanat_items',
+          ]);
           const branchFilter = branchScopedTables.has(table.name)
             ? `&branch_id=eq.${encodeURIComponent(branchResolution.branchId)}`
             : '';
@@ -916,7 +1165,7 @@ export class SupabaseSyncService {
             method: 'GET',
             headers: {
               apikey: config.supabaseAnonKey,
-              Authorization: `Bearer ${config.supabaseAnonKey}`,
+              Authorization: `Bearer ${tenantResolution.accessToken}`,
               'Content-Type': 'application/json',
               'x-tenant-id': effectiveTenantId,
               'x-device-id': config.deviceId,
@@ -1090,6 +1339,7 @@ export class SupabaseSyncService {
           minStockAlert: Number(row.min_limit || 0),
           barcode: row.barcode ? String(row.barcode) : undefined,
           oemNumber: row.oem_number ? String(row.oem_number) : undefined,
+          isActive: row.is_active !== false,
           batches: Array.isArray(row.batches_data) ? (row.batches_data as Product['batches']) : [],
         };
         await db.products.put(product);
@@ -1110,6 +1360,7 @@ export class SupabaseSyncService {
           address: row.address ? String(row.address) : undefined,
           taxNumber: row.tax_number ? String(row.tax_number) : undefined,
           balance: Number(row.balance || 0),
+          advanceBalance: Number(row.advance_balance || 0),
           creditLimit: row.credit_limit ? Number(row.credit_limit) : undefined,
           notes: row.notes ? String(row.notes) : undefined,
         };
@@ -1127,15 +1378,19 @@ export class SupabaseSyncService {
           partyId: row.party_id ? String(row.party_id) : undefined,
           partyName: String(row.party_name || 'عميل نقدي'),
           date: String(row.date),
+          dueDate: row.due_date ? String(row.due_date) : undefined,
           items: Array.isArray(row.items) ? (row.items as Invoice['items']) : [],
           subtotal: Number(row.subtotal || 0),
           discount: Number(row.discount || 0),
           tax: Number(row.tax || 0),
           total: Number(row.total || 0),
           paidAmount: Number(row.paid_amount || 0),
+          returnedAmount: Number(row.returned_amount || 0),
+          advanceAppliedAmount: Number(row.advance_applied_amount || 0),
           paymentMethod: (row.payment_method as Invoice['paymentMethod']) || 'CASH',
           cashBoxId: String(row.cash_box_id || 'cb-1'),
           journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : undefined,
+          status: (row.status as Invoice['status']) || 'POSTED',
           isPosted: row.is_posted !== false,
           notes: row.notes ? String(row.notes) : undefined,
         };
@@ -1178,8 +1433,84 @@ export class SupabaseSyncService {
           description: String(row.description || ''),
           costCenterId: (row.cost_center_id as PaymentVoucher['costCenterId']) || 'general',
           journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : undefined,
+          status: (row.status as PaymentVoucher['status']) || 'POSTED',
+          appliedToDebtAmount: Number(row.applied_to_debt_amount || 0),
+          advanceAmount: Number(row.advance_amount || 0),
+          manualOverride: Boolean(row.manual_override),
+          overrideReason: row.override_reason ? String(row.override_reason) : undefined,
+          manualAllocations: Array.isArray(row.manual_allocations)
+            ? (row.manual_allocations as PaymentVoucher['manualAllocations'])
+            : undefined,
+          allocations: Array.isArray(row.allocations)
+            ? (row.allocations as PaymentVoucher['allocations'])
+            : undefined,
         };
         await db.vouchers.put(voucher);
+        break;
+      }
+
+      case 'PAYMENT_ALLOCATION': {
+        const allocation: PaymentAllocation = {
+          id: String(row.id),
+          tenantId: row.tenant_id ? String(row.tenant_id) : undefined,
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
+          voucherId: row.voucher_id ? String(row.voucher_id) : undefined,
+          advanceTransactionId: row.advance_transaction_id ? String(row.advance_transaction_id) : undefined,
+          partyId: String(row.party_id),
+          invoiceId: String(row.invoice_id),
+          invoiceNumber: row.invoice_number ? String(row.invoice_number) : undefined,
+          invoiceDate: row.invoice_date ? String(row.invoice_date) : undefined,
+          allocatedAmount: Number(row.allocated_amount ?? row.allocatedAmount ?? 0),
+          allocationMethod: (row.allocation_method || row.allocationMethod || 'FIFO') as PaymentAllocation['allocationMethod'],
+          status: (row.status as PaymentAllocation['status']) || 'ACTIVE',
+          createdAt: String(row.created_at || row.createdAt || new Date().toISOString()),
+          createdBy: row.created_by ? String(row.created_by) : undefined,
+        };
+        await db.paymentAllocations.put(allocation);
+        break;
+      }
+
+      case 'PARTY_ADVANCE': {
+        const adv: PartyAdvanceTransaction = {
+          id: String(row.id),
+          tenantId: row.tenant_id ? String(row.tenant_id) : undefined,
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
+          partyId: String(row.party_id),
+          partyType: (row.party_type || row.partyType || 'CUSTOMER') as PartyAdvanceTransaction['partyType'],
+          type: (row.tx_type || row.type || 'OVERPAYMENT_DEPOSIT') as PartyAdvanceTransaction['type'],
+          amount: Number(row.amount || 0),
+          balanceAfter: Number(row.balance_after ?? row.balanceAfter ?? 0),
+          voucherId: row.voucher_id ? String(row.voucher_id) : undefined,
+          invoiceId: row.invoice_id ? String(row.invoice_id) : undefined,
+          journalEntryId: row.journal_entry_id ? String(row.journal_entry_id) : undefined,
+          date: String(row.tx_date || row.date || new Date().toISOString()),
+          description: String(row.description || ''),
+          createdBy: row.created_by ? String(row.created_by) : undefined,
+          createdAt: String(row.created_at || row.createdAt || new Date().toISOString()),
+        };
+        await db.partyAdvanceTransactions.put(adv);
+        break;
+      }
+
+      case 'ALLOCATION_AUDIT': {
+        const audit: AllocationAudit = {
+          id: String(row.id),
+          tenantId: row.tenant_id ? String(row.tenant_id) : undefined,
+          branchId: row.branch_id ? String(row.branch_id) : undefined,
+          voucherId: String(row.voucher_id),
+          partyId: String(row.party_id),
+          userId: String(row.user_id),
+          userName: String(row.user_name || ''),
+          reason: String(row.reason || ''),
+          previousAllocations: Array.isArray(row.previous_allocations)
+            ? (row.previous_allocations as AllocationAudit['previousAllocations'])
+            : [],
+          newAllocations: Array.isArray(row.new_allocations)
+            ? (row.new_allocations as AllocationAudit['newAllocations'])
+            : [],
+          timestamp: String(row.audit_timestamp || row.timestamp || new Date().toISOString()),
+        };
+        await db.allocationAudits.put(audit);
         break;
       }
 

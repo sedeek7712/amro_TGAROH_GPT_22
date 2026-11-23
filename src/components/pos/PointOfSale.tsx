@@ -27,7 +27,7 @@ import { inventory } from '../../services/inventoryService';
 import { dataService } from '../../services/dataService';
 import { desktopSession } from '../../services/desktopSession';
 import { authService } from '../../services/authService';
-import { hasPermission } from '../../config/rbac';
+import { hasPermission, getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes, useLiveInvoices } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
@@ -49,16 +49,31 @@ export const PointOfSale: React.FC<POSProps> = ({
   setSelectedActivity,
   onRefresh,
 }) => {
-  // النشاط الحالي للبيع (إذا كان all نحدد أول نشاط تجاري)
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
+  const actor =
+    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
+  const authorizedActivityIds = getAuthorizedActivityIds(actor);
+  const isActivityAllowed = (id: ActivityId) =>
+    actor?.role === 'ADMIN' || authorizedActivityIds.has(id);
+  const firstAllowedActivity: ActivityId =
+    (['pharmacy', 'grocery', 'bike_parts', 'equipment_parts'] as ActivityId[]).find((id) =>
+      isActivityAllowed(id)
+    ) || 'pharmacy';
+
+  // النشاط الحالي للبيع (إذا كان all نحدد أول نشاط تجاري مصرح به للمستخدم)
   const [currentActivity, setCurrentActivity] = useState<ActivityId>(
-    selectedActivity === 'all' ? 'pharmacy' : selectedActivity
+    selectedActivity !== 'all' && isActivityAllowed(selectedActivity)
+      ? selectedActivity
+      : firstAllowedActivity
   );
 
   useEffect(() => {
-    if (selectedActivity !== 'all') {
+    if (selectedActivity !== 'all' && isActivityAllowed(selectedActivity)) {
       setCurrentActivity(selectedActivity);
+    } else if (!isActivityAllowed(currentActivity)) {
+      setCurrentActivity(firstAllowedActivity);
     }
-  }, [selectedActivity]);
+  }, [selectedActivity, firstAllowedActivity]);
 
   const [searchQuery, setSearchQuery] = useState('');
   const [cart, setCart] = useState<CartItem[]>([]);
@@ -93,9 +108,6 @@ export const PointOfSale: React.FC<POSProps> = ({
 
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
-  const actor =
-    authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const canUseAdvance = hasPermission(actor, 'party:advance:use');
   const canReturnSale = hasPermission(actor, 'pos:return');
 
@@ -120,8 +132,10 @@ export const PointOfSale: React.FC<POSProps> = ({
     }
   }, [defaultCashBoxId, selectedCashBoxId, returnCashBoxId]);
 
+  const activeProducts = products.filter((p) => p.isActive !== false);
+
   // تصفية المنتجات حسب البحث
-  const filteredProducts = products.filter((p) => {
+  const filteredProducts = activeProducts.filter((p) => {
     if (!searchQuery.trim()) return true;
     const q = searchQuery.toLowerCase();
     return (
@@ -195,7 +209,7 @@ export const PointOfSale: React.FC<POSProps> = ({
     if (!searchQuery.trim()) return;
 
     // بحث بالمطابقة التامة للباركود أو الكود
-    const match = products.find(
+    const match = activeProducts.find(
       (p) =>
         (p.barcode && p.barcode.toLowerCase() === searchQuery.trim().toLowerCase()) ||
         p.code.toLowerCase() === searchQuery.trim().toLowerCase()
@@ -506,12 +520,16 @@ export const PointOfSale: React.FC<POSProps> = ({
     }
   };
 
-  const activities = [
+  const allActivities = [
     { id: 'pharmacy' as ActivityId, name: 'الصيدلية' },
     { id: 'grocery' as ActivityId, name: 'البقالة والأغذية' },
     { id: 'bike_parts' as ActivityId, name: 'قطع غيار الدراجات' },
     { id: 'equipment_parts' as ActivityId, name: 'قطع غيار المعدات' },
   ];
+  const activities =
+    actor?.role === 'ADMIN'
+      ? allActivities
+      : allActivities.filter((act) => authorizedActivityIds.has(act.id));
 
   return (
     <div className="p-2.5 sm:p-4 lg:p-6 h-[calc(100vh-3.5rem)] lg:h-[calc(100vh-4rem)] flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto overflow-hidden relative">
@@ -547,7 +565,7 @@ export const PointOfSale: React.FC<POSProps> = ({
             </button>
           )}
           <div className="text-xs text-slate-500 font-medium hidden sm:block shrink-0">
-            أصناف المستودع: <span className="font-bold text-slate-800">{products.length}</span>
+            أصناف المستودع: <span className="font-bold text-slate-800">{activeProducts.length}</span>
           </div>
         </div>
       </div>

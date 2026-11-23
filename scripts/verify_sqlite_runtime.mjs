@@ -1,19 +1,40 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { createSqliteBackup, openErpDatabase } from '../electron/sqlite/database.mjs';
 
+const MIGRATIONS_DIR = path.resolve('electron/sqlite/migrations');
+const expectedMigrationVersions = readdirSync(MIGRATIONS_DIR)
+  .map((name) => name.match(/^(\d{3,})_([a-z0-9_]+)\.sql$/i))
+  .filter(Boolean)
+  .map((m) => Number(m[1]))
+  .sort((a, b) => a - b);
+
 const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'erp-sqlite-runtime-'));
 
 try {
   const firstOpen = await openErpDatabase({ userDataPath });
-  assert.deepEqual(firstOpen.appliedMigrations, [1]);
+  assert.ok(expectedMigrationVersions.length >= 2, 'Expected at least 2 SQLite migrations');
+  assert.deepEqual(firstOpen.appliedMigrations, expectedMigrationVersions);
   assert.equal(path.basename(firstOpen.databasePath), 'erp.sqlite');
   assert.equal(path.basename(path.dirname(firstOpen.databasePath)), 'Database');
 
   const db = firstOpen.database;
+  const recordedVersions = db
+    .prepare('SELECT version FROM schema_migrations ORDER BY version')
+    .all()
+    .map((r) => r.version);
+  assert.deepEqual(recordedVersions, expectedMigrationVersions);
+
+  for (const v2Table of ['payment_allocations', 'party_advance_transactions', 'allocation_audits']) {
+    const exists = db
+      .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")
+      .get(v2Table);
+    assert.ok(exists, `Expected v2 table to exist after migrations: ${v2Table}`);
+  }
+
   db.prepare('INSERT INTO activities (tenant_id,id,code,data_json) VALUES (?,?,?,?)')
     .run('tenant_main', 'pharmacy', 'PH', '{"id":"pharmacy"}');
 

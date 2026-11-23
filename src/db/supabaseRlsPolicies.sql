@@ -142,6 +142,7 @@ CREATE TABLE IF NOT EXISTS erp_parties (
     address TEXT,
     tax_number TEXT,
     balance NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    advance_balance NUMERIC(15, 4) NOT NULL DEFAULT 0,
     credit_limit NUMERIC(15, 4) DEFAULT 0,
     notes TEXT,
     is_deleted BOOLEAN DEFAULT FALSE,
@@ -162,15 +163,19 @@ CREATE TABLE IF NOT EXISTS erp_invoices (
     party_id TEXT,
     party_name TEXT NOT NULL,
     date TIMESTAMPTZ NOT NULL,
+    due_date TEXT,
     items JSONB NOT NULL DEFAULT '[]'::jsonb,
     subtotal NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (subtotal >= 0),
     discount NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (discount >= 0),
     tax NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (tax >= 0),
     total NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (total >= 0),
     paid_amount NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (paid_amount >= 0),
+    returned_amount NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (returned_amount >= 0),
+    advance_applied_amount NUMERIC(15, 4) NOT NULL DEFAULT 0 CHECK (advance_applied_amount >= 0),
     payment_method TEXT NOT NULL,
     cash_box_id TEXT,
     journal_entry_id TEXT,
+    status TEXT NOT NULL DEFAULT 'POSTED',
     is_posted BOOLEAN DEFAULT TRUE,
     is_deleted BOOLEAN DEFAULT FALSE,
     notes TEXT,
@@ -223,12 +228,87 @@ CREATE TABLE IF NOT EXISTS erp_payment_vouchers (
     description TEXT NOT NULL,
     cost_center_id TEXT NOT NULL,
     journal_entry_id TEXT,
+    status TEXT NOT NULL DEFAULT 'POSTED' CHECK (status IN ('DRAFT', 'POSTED', 'CANCELLED', 'REVERSED')),
+    applied_to_debt_amount NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    advance_amount NUMERIC(15, 4) NOT NULL DEFAULT 0,
+    manual_override BOOLEAN DEFAULT FALSE,
+    override_reason TEXT,
+    manual_allocations JSONB,
+    allocations JSONB,
     is_deleted BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (tenant_id, id),
     UNIQUE (tenant_id, voucher_number),
     CONSTRAINT fk_vouchers_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS erp_payment_allocations (
+    id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
+    branch_id TEXT NOT NULL,
+    voucher_id TEXT,
+    advance_transaction_id TEXT,
+    party_id TEXT NOT NULL,
+    invoice_id TEXT NOT NULL,
+    invoice_number TEXT,
+    invoice_date TEXT,
+    allocated_amount NUMERIC(15, 4) NOT NULL CHECK (allocated_amount > 0),
+    allocation_method TEXT NOT NULL CHECK (allocation_method IN ('FIFO', 'MANUAL', 'ADVANCE_SETTLEMENT')),
+    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'REVERSED')),
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, id),
+    CONSTRAINT fk_allocations_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_allocations_party FOREIGN KEY (tenant_id, party_id)
+        REFERENCES erp_parties(tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_allocations_invoice FOREIGN KEY (tenant_id, invoice_id)
+        REFERENCES erp_invoices(tenant_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS erp_party_advances (
+    id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
+    branch_id TEXT NOT NULL,
+    party_id TEXT NOT NULL,
+    party_type TEXT NOT NULL CHECK (party_type IN ('CUSTOMER', 'SUPPLIER')),
+    tx_type TEXT NOT NULL CHECK (tx_type IN ('OVERPAYMENT_DEPOSIT', 'PREPAYMENT_DEPOSIT', 'APPLY_TO_INVOICE', 'REFUND', 'REVERSAL')),
+    amount NUMERIC(15, 4) NOT NULL,
+    balance_after NUMERIC(15, 4) NOT NULL CHECK (balance_after >= 0),
+    voucher_id TEXT,
+    invoice_id TEXT,
+    journal_entry_id TEXT,
+    tx_date TIMESTAMPTZ NOT NULL,
+    description TEXT,
+    created_by TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, id),
+    CONSTRAINT fk_party_advances_branch FOREIGN KEY (tenant_id, branch_id)
+        REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT,
+    CONSTRAINT fk_party_advances_party FOREIGN KEY (tenant_id, party_id)
+        REFERENCES erp_parties(tenant_id, id) ON DELETE RESTRICT
+);
+
+CREATE TABLE IF NOT EXISTS erp_allocation_audits (
+    id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
+    branch_id TEXT NOT NULL,
+    voucher_id TEXT NOT NULL,
+    party_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    user_name TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    previous_allocations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    new_allocations JSONB NOT NULL DEFAULT '[]'::jsonb,
+    audit_timestamp TIMESTAMPTZ NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, id),
+    CONSTRAINT fk_allocation_audits_branch FOREIGN KEY (tenant_id, branch_id)
         REFERENCES erp_branches(tenant_id, id) ON DELETE RESTRICT
 );
 
@@ -287,6 +367,12 @@ CREATE INDEX IF NOT EXISTS idx_vouchers_tenant_updated ON erp_payment_vouchers(t
 CREATE INDEX IF NOT EXISTS idx_amanat_tenant_updated ON erp_amanat_items(tenant_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_accounts_tenant_updated ON erp_accounts(tenant_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_cash_boxes_tenant_updated ON erp_cash_boxes(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_payment_allocations_tenant_updated ON erp_payment_allocations(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_payment_allocations_tenant_voucher ON erp_payment_allocations(tenant_id, voucher_id);
+CREATE INDEX IF NOT EXISTS idx_party_advances_tenant_updated ON erp_party_advances(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_party_advances_tenant_party ON erp_party_advances(tenant_id, party_id);
+CREATE INDEX IF NOT EXISTS idx_allocation_audits_tenant_updated ON erp_allocation_audits(tenant_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_allocation_audits_tenant_voucher ON erp_allocation_audits(tenant_id, voucher_id);
 CREATE INDEX IF NOT EXISTS idx_sync_log_tenant_key ON erp_outbox_sync_log(tenant_id, idempotency_key);
 
 -- ==============================================================================
@@ -370,7 +456,7 @@ END;
 $$ LANGUAGE plpgsql STABLE SECURITY DEFINER;
 
 -- ==============================================================================
--- 5. تفعيل Row-Level Security (RLS) على كافة الجداول الـ 13
+-- 5. تفعيل Row-Level Security (RLS) على كافة الجداول الـ 16
 -- ==============================================================================
 
 ALTER TABLE erp_tenants ENABLE ROW LEVEL SECURITY;
@@ -384,6 +470,9 @@ ALTER TABLE erp_parties ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_invoices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_journal_entries ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_payment_vouchers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE erp_payment_allocations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE erp_party_advances ENABLE ROW LEVEL SECURITY;
+ALTER TABLE erp_allocation_audits ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_amanat_items ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_outbox_sync_log ENABLE ROW LEVEL SECURITY;
 
@@ -453,6 +542,18 @@ CREATE POLICY tenant_isolation_vouchers ON erp_payment_vouchers
     FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
     WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
 
+CREATE POLICY tenant_isolation_payment_allocations ON erp_payment_allocations
+    FOR ALL USING (has_verified_tenant_branch_access(tenant_id, branch_id) AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER'))
+    WITH CHECK (has_verified_tenant_branch_access(tenant_id, branch_id) AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER'));
+
+CREATE POLICY tenant_isolation_party_advances ON erp_party_advances
+    FOR ALL USING (has_verified_tenant_branch_access(tenant_id, branch_id) AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER'))
+    WITH CHECK (has_verified_tenant_branch_access(tenant_id, branch_id) AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER'));
+
+CREATE POLICY tenant_isolation_allocation_audits ON erp_allocation_audits
+    FOR ALL USING (has_verified_tenant_branch_access(tenant_id, branch_id) AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
+    WITH CHECK (has_verified_tenant_branch_access(tenant_id, branch_id) AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
+
 CREATE POLICY tenant_isolation_amanat ON erp_amanat_items
     FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'))
     WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT'));
@@ -481,6 +582,9 @@ CREATE OR REPLACE TRIGGER trg_parties_updated_at BEFORE UPDATE ON erp_parties FO
 CREATE OR REPLACE TRIGGER trg_invoices_updated_at BEFORE UPDATE ON erp_invoices FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_journal_updated_at BEFORE UPDATE ON erp_journal_entries FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_vouchers_updated_at BEFORE UPDATE ON erp_payment_vouchers FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_payment_allocations_updated_at BEFORE UPDATE ON erp_payment_allocations FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_party_advances_updated_at BEFORE UPDATE ON erp_party_advances FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_allocation_audits_updated_at BEFORE UPDATE ON erp_allocation_audits FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_amanat_updated_at BEFORE UPDATE ON erp_amanat_items FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 
 -- SYNC-01: تنفيذ الحركة المالية/المخزنية وتسجيل مفتاح عدم التكرار في معاملة واحدة لا تقبل التجزئة

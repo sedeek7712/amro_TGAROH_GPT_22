@@ -1,14 +1,29 @@
 import { randomUUID } from 'node:crypto';
-import { assertPermission } from '../rbac.mjs';
 import {
+  assertActivityAccess,
+  assertPermission,
+  filterRecordsByActivityScope,
+} from '../rbac.mjs';
+import {
+  divBigIntHalfUp,
   formatScaledInt,
   MONEY_SCALE,
+  mulScaledHalfUp,
   parseScaledInt,
   QTY_SCALE,
   toMoneyNumber,
+  TOTALS_SCALE,
   unitsToNumber,
 } from '../money.mjs';
-import { enqueueOutboxTx, parseRowJson, writeAuditLogTx } from './core-service.mjs';
+import { allocateSequenceTx, enqueueOutboxTx, parseRowJson, writeAuditLogTx } from './core-service.mjs';
+import {
+  ACTIVITY_INVENTORY_ACCOUNTS,
+  ensureCanonicalAccountTx,
+  getTerminalCodeValue,
+  insertJournalEntryTx,
+  resolveBranchTx,
+  updateAccountBalanceByLineTx,
+} from './accounting-tx-helpers.mjs';
 
 const VALID_PARTY_TYPES = new Set(['CUSTOMER', 'SUPPLIER']);
 
@@ -120,6 +135,7 @@ export function syncProductAndBatchesTx(database, tenantId, product) {
     purchasePrice: unitsToNumber(purchaseUnits, QTY_SCALE),
     sellPrice: toMoneyNumber(product.sellPrice ?? 0),
     minStockAlert: unitsToNumber(parseScaledInt(product.minStockAlert ?? 0, QTY_SCALE, 'minStockAlert'), QTY_SCALE),
+    isActive: product.isActive !== false,
     batches: publicBatches,
   };
 
@@ -179,7 +195,28 @@ export function loadProductWithBatches(database, tenantId, productId) {
   return hydrateProductRow(row, batchRows.map(hydrateBatchRow));
 }
 
-export function createInventoryPartiesService(database) {
+function computeProductStockCostUnits(product) {
+  const batches = Array.isArray(product?.batches) ? product.batches : [];
+  let rawTotal = 0n;
+  if (batches.length > 0) {
+    for (const b of batches) {
+      const qUnits = parseScaledInt(b.quantity ?? 0, QTY_SCALE, 'batch.quantity');
+      const cUnits = parseScaledInt(b.costPrice ?? product.purchasePrice ?? 0, QTY_SCALE, 'batch.costPrice');
+      if (qUnits > 0n && cUnits > 0n) {
+        rawTotal += mulScaledHalfUp(qUnits, cUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
+      }
+    }
+  } else {
+    const qUnits = parseScaledInt(product?.currentStock ?? 0, QTY_SCALE, 'product.currentStock');
+    const cUnits = parseScaledInt(product?.purchasePrice ?? 0, QTY_SCALE, 'product.purchasePrice');
+    if (qUnits > 0n && cUnits > 0n) {
+      rawTotal = mulScaledHalfUp(qUnits, cUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
+    }
+  }
+  return divBigIntHalfUp(rawTotal * MONEY_SCALE, TOTALS_SCALE);
+}
+
+export function createInventoryPartiesService(database, core = null) {
   return {
     // --- المنتجات والمخزون والتشغيلات ---
     getProducts(actor, activityId) {
@@ -203,15 +240,18 @@ export function createInventoryPartiesService(database) {
         batchesByProduct.set(bRow.product_id, list);
       }
 
-      return productRows.map((row) =>
+      const products = productRows.map((row) =>
         hydrateProductRow(row, batchesByProduct.get(row.id) || [])
       );
+      return filterRecordsByActivityScope(products, actor);
     },
 
     getProductById(actor, id) {
       assertPermission(actor, 'inventory:view', 'عرض بيانات الصنف');
       if (!id) return undefined;
-      return loadProductWithBatches(database, actor.tenantId, String(id));
+      const product = loadProductWithBatches(database, actor.tenantId, String(id));
+      if (!product) return undefined;
+      return filterRecordsByActivityScope([product], actor)[0];
     },
 
     saveProductAtomic(actor, product, isUpdate = false) {
@@ -225,6 +265,7 @@ export function createInventoryPartiesService(database) {
       if (!nameAr || !code || !activityId) {
         throw new Error('اسم الصنف وكوده والنشاط التجاري حقول مطلوبة.');
       }
+      assertActivityAccess(actor, activityId, isUpdate ? 'تعديل صنف' : 'إضافة صنف');
 
       const actRow = database.prepare(
         'SELECT 1 FROM activities WHERE tenant_id = ? AND id = ?'
@@ -249,13 +290,17 @@ export function createInventoryPartiesService(database) {
         activityId,
       };
       const nowIso = new Date().toISOString();
+      const entryDate = nowIso.split('T')[0];
       let persisted;
 
       database.exec('BEGIN IMMEDIATE');
       try {
         const existed = database.prepare(
-          'SELECT 1 FROM products WHERE tenant_id = ? AND id = ?'
+          'SELECT activity_id FROM products WHERE tenant_id = ? AND id = ?'
         ).get(actor.tenantId, id);
+        if (existed?.activity_id) {
+          assertActivityAccess(actor, existed.activity_id, 'تعديل صنف');
+        }
         persisted = syncProductAndBatchesTx(database, actor.tenantId, normalizedInput);
         enqueueOutboxTx(database, actor, {
           entityType: 'PRODUCT',
@@ -264,6 +309,73 @@ export function createInventoryPartiesService(database) {
           payload: persisted,
           nowIso,
         });
+
+        if (!existed && !isUpdate) {
+          const openingValUnits = computeProductStockCostUnits(persisted);
+          if (openingValUnits > 0n) {
+            const openingValNum = unitsToNumber(openingValUnits, MONEY_SCALE);
+            const activeBranch = resolveBranchTx(database, core, actor, product.branchId);
+            const terminalCode = getTerminalCodeValue(database, actor.tenantId);
+            const invCode = ACTIVITY_INVENTORY_ACCOUNTS[persisted.activityId] || '11041';
+            const invAcc = ensureCanonicalAccountTx(database, actor.tenantId, invCode);
+            const eqAcc = ensureCanonicalAccountTx(database, actor.tenantId, '3101');
+            const entryNumber = allocateSequenceTx(
+              database,
+              actor.tenantId,
+              'JV',
+              activeBranch.code,
+              terminalCode,
+              nowIso
+            );
+            const { persisted: openingJv, linesWithUnits } = insertJournalEntryTx(database, actor.tenantId, {
+              id: randomUUID(),
+              entryNumber,
+              date: entryDate,
+              description: `قيد رصيد افتتاحي للمخزون - ${persisted.nameAr} (${persisted.code})`,
+              costCenterId: persisted.activityId,
+              branchId: activeBranch.id,
+              lines: [
+                {
+                  id: randomUUID(),
+                  accountCode: invCode,
+                  accountName: invAcc?.nameAr || 'مخزون النشاط',
+                  debit: openingValNum,
+                  credit: 0,
+                  costCenterId: persisted.activityId,
+                  memo: `إثبات رصيد افتتاحي: ${persisted.nameAr}`,
+                },
+                {
+                  id: randomUUID(),
+                  accountCode: '3101',
+                  accountName: eqAcc?.nameAr || 'رأس المال المخصص',
+                  debit: 0,
+                  credit: openingValNum,
+                  costCenterId: 'general',
+                  memo: `مقابل رصيد مخزون افتتاحي: ${persisted.nameAr}`,
+                },
+              ],
+              status: 'POSTED',
+              referenceType: 'INVENTORY',
+              referenceId: persisted.id,
+              isAutoGenerated: true,
+            });
+            for (const line of linesWithUnits) {
+              updateAccountBalanceByLineTx(database, actor.tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+            }
+            enqueueOutboxTx(database, actor, {
+              entityType: 'JOURNAL_ENTRY',
+              entityId: openingJv.id,
+              action: 'CREATE',
+              payload: openingJv,
+              priority: 4,
+              dependsOn: [persisted.id],
+              idempotencyKey: `${actor.tenantId}_JOURNAL_ENTRY_${openingJv.id}_CREATE`,
+              branchId: activeBranch.id,
+              nowIso,
+            });
+          }
+        }
+
         writeAuditLogTx(
           database,
           actor,
@@ -293,6 +405,7 @@ export function createInventoryPartiesService(database) {
           database.exec('COMMIT');
           return;
         }
+        assertActivityAccess(actor, existing.activityId, 'حذف صنف');
         const usedInInvoices = database.prepare(
           'SELECT 1 FROM invoice_items WHERE tenant_id = ? AND product_id = ? LIMIT 1'
         ).get(actor.tenantId, id);
@@ -301,6 +414,71 @@ export function createInventoryPartiesService(database) {
         ).get(actor.tenantId, id);
         if (usedInInvoices || usedInDeductions) {
           throw new Error('لا يمكن حذف صنف مرتبط بفواتير مرحلة حفاظاً على سلامة السجل المالي.');
+        }
+
+        const remainingValUnits = computeProductStockCostUnits(existing);
+        const hasInvJv = database.prepare(
+          "SELECT 1 FROM journal_entries WHERE tenant_id = ? AND reference_type = 'INVENTORY' AND reference_id = ? LIMIT 1"
+        ).get(actor.tenantId, id);
+        if (remainingValUnits > 0n && hasInvJv) {
+          const remainingValNum = unitsToNumber(remainingValUnits, MONEY_SCALE);
+          const activeBranch = resolveBranchTx(database, core, actor, existing.branchId);
+          const terminalCode = getTerminalCodeValue(database, actor.tenantId);
+          const invCode = ACTIVITY_INVENTORY_ACCOUNTS[existing.activityId] || '11041';
+          const invAcc = ensureCanonicalAccountTx(database, actor.tenantId, invCode);
+          const eqAcc = ensureCanonicalAccountTx(database, actor.tenantId, '3101');
+          const entryNumber = allocateSequenceTx(
+            database,
+            actor.tenantId,
+            'REV',
+            activeBranch.code,
+            terminalCode,
+            nowIso
+          );
+          const { persisted: delJv, linesWithUnits } = insertJournalEntryTx(database, actor.tenantId, {
+            id: randomUUID(),
+            entryNumber,
+            date: nowIso.split('T')[0],
+            description: `إلغاء أثر رصيد مخزون محذوف - ${existing.nameAr} (${existing.code})`,
+            costCenterId: existing.activityId,
+            branchId: activeBranch.id,
+            lines: [
+              {
+                id: randomUUID(),
+                accountCode: '3101',
+                accountName: eqAcc?.nameAr || 'رأس المال المخصص',
+                debit: remainingValNum,
+                credit: 0,
+                costCenterId: 'general',
+                memo: `إلغاء رصيد صنف محذوف: ${existing.nameAr}`,
+              },
+              {
+                id: randomUUID(),
+                accountCode: invCode,
+                accountName: invAcc?.nameAr || 'مخزون النشاط',
+                debit: 0,
+                credit: remainingValNum,
+                costCenterId: existing.activityId,
+                memo: `تخفيض مخزون صنف محذوف: ${existing.nameAr}`,
+              },
+            ],
+            status: 'POSTED',
+            referenceType: 'INVENTORY',
+            referenceId: id,
+            isAutoGenerated: true,
+          });
+          for (const line of linesWithUnits) {
+            updateAccountBalanceByLineTx(database, actor.tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+          }
+          enqueueOutboxTx(database, actor, {
+            entityType: 'JOURNAL_ENTRY',
+            entityId: delJv.id,
+            action: 'CREATE',
+            payload: delJv,
+            priority: 4,
+            branchId: activeBranch.id,
+            nowIso,
+          });
         }
 
         database.prepare('DELETE FROM product_batches WHERE tenant_id = ? AND product_id = ?')
@@ -353,15 +531,19 @@ export function createInventoryPartiesService(database) {
         if (!product) {
           throw new Error(`الصنف ذو المعرف ${productId} غير موجود.`);
         }
+        assertActivityAccess(actor, product.activityId, 'تسوية مخزنية');
 
         const batches = Array.isArray(product.batches)
           ? product.batches.map((b) => ({
               ...b,
               _qtyUnits: parseScaledInt(b.quantity, QTY_SCALE, 'batchQty'),
+              _costUnits: parseScaledInt(b.costPrice ?? product.purchasePrice ?? 0, QTY_SCALE, 'batchCost'),
             }))
           : [];
         const hasBatches = batches.length > 0;
         const currentStockUnits = parseScaledInt(product.currentStock, QTY_SCALE, 'currentStock');
+        const productPurchaseUnits = parseScaledInt(product.purchasePrice ?? 0, QTY_SCALE, 'purchasePrice');
+        let adjustmentCostRawUnits = 0n;
 
         if (hasBatches) {
           const sumUnits = batches.reduce((sum, b) => sum + b._qtyUnits, 0n);
@@ -391,6 +573,7 @@ export function createInventoryPartiesService(database) {
                 );
               }
               targetBatch._qtyUnits -= deductUnits;
+              adjustmentCostRawUnits += mulScaledHalfUp(deductUnits, targetBatch._costUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
             } else {
               let remaining = deductUnits;
               const sorted = [...batches]
@@ -401,19 +584,21 @@ export function createInventoryPartiesService(database) {
                 const take = b._qtyUnits < remaining ? b._qtyUnits : remaining;
                 b._qtyUnits -= take;
                 remaining -= take;
+                adjustmentCostRawUnits += mulScaledHalfUp(take, b._costUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
               }
               if (remaining > 0n) {
                 throw new Error('تعذر استيفاء كمية الخصم بالكامل من التشغيلات.');
               }
             }
             const nextSum = batches.reduce((sum, b) => sum + b._qtyUnits, 0n);
-            product.batches = batches.map(({ _qtyUnits, ...rest }) => ({
+            product.batches = batches.map(({ _qtyUnits, _costUnits, ...rest }) => ({
               ...rest,
               quantity: unitsToNumber(_qtyUnits, QTY_SCALE),
             }));
             product.currentStock = unitsToNumber(nextSum, QTY_SCALE);
           } else {
             product.currentStock = unitsToNumber(currentStockUnits - deductUnits, QTY_SCALE);
+            adjustmentCostRawUnits = mulScaledHalfUp(deductUnits, productPurchaseUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
           }
         } else {
           if (product.trackExpiry || hasBatches) {
@@ -427,6 +612,7 @@ export function createInventoryPartiesService(database) {
             const existingBatch = batches.find((b) => b.batchNumber === batchNumber);
             if (existingBatch) {
               existingBatch._qtyUnits += deltaUnits;
+              adjustmentCostRawUnits = mulScaledHalfUp(deltaUnits, existingBatch._costUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
             } else {
               batches.push({
                 id: randomUUID(),
@@ -436,16 +622,19 @@ export function createInventoryPartiesService(database) {
                 costPrice: product.purchasePrice,
                 quantity: unitsToNumber(deltaUnits, QTY_SCALE),
                 _qtyUnits: deltaUnits,
+                _costUnits: productPurchaseUnits,
               });
+              adjustmentCostRawUnits = mulScaledHalfUp(deltaUnits, productPurchaseUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
             }
             const nextSum = batches.reduce((sum, b) => sum + b._qtyUnits, 0n);
-            product.batches = batches.map(({ _qtyUnits, ...rest }) => ({
+            product.batches = batches.map(({ _qtyUnits, _costUnits, ...rest }) => ({
               ...rest,
               quantity: unitsToNumber(_qtyUnits, QTY_SCALE),
             }));
             product.currentStock = unitsToNumber(nextSum, QTY_SCALE);
           } else {
             product.currentStock = unitsToNumber(currentStockUnits + deltaUnits, QTY_SCALE);
+            adjustmentCostRawUnits = mulScaledHalfUp(deltaUnits, productPurchaseUnits, QTY_SCALE, QTY_SCALE, TOTALS_SCALE);
           }
         }
 
@@ -457,6 +646,95 @@ export function createInventoryPartiesService(database) {
           payload: persisted,
           nowIso,
         });
+
+        const adjMoneyUnits = divBigIntHalfUp(adjustmentCostRawUnits * MONEY_SCALE, TOTALS_SCALE);
+        if (adjMoneyUnits > 0n) {
+          const adjValNum = unitsToNumber(adjMoneyUnits, MONEY_SCALE);
+          const activeBranch = resolveBranchTx(database, core, actor, params.branchId);
+          const terminalCode = getTerminalCodeValue(database, actor.tenantId);
+          const invCode = ACTIVITY_INVENTORY_ACCOUNTS[persisted.activityId] || '11041';
+          const invAcc = ensureCanonicalAccountTx(database, actor.tenantId, invCode);
+          const adjExpAcc = ensureCanonicalAccountTx(database, actor.tenantId, '5205');
+          const entryNumber = allocateSequenceTx(
+            database,
+            actor.tenantId,
+            'JV',
+            activeBranch.code,
+            terminalCode,
+            nowIso
+          );
+          const isShortage = deltaUnits < 0n;
+          const adjLines = isShortage
+            ? [
+                {
+                  id: randomUUID(),
+                  accountCode: '5205',
+                  accountName: adjExpAcc?.nameAr || 'فروقات وتسويات وتلف المخزون',
+                  debit: adjValNum,
+                  credit: 0,
+                  costCenterId: persisted.activityId,
+                  memo: `عجز/تلف تسوية مخزنية: ${persisted.nameAr} - ${reason}`,
+                },
+                {
+                  id: randomUUID(),
+                  accountCode: invCode,
+                  accountName: invAcc?.nameAr || 'مخزون النشاط',
+                  debit: 0,
+                  credit: adjValNum,
+                  costCenterId: persisted.activityId,
+                  memo: `تخفيض مخزون بالتسوية: ${persisted.nameAr}`,
+                },
+              ]
+            : [
+                {
+                  id: randomUUID(),
+                  accountCode: invCode,
+                  accountName: invAcc?.nameAr || 'مخزون النشاط',
+                  debit: adjValNum,
+                  credit: 0,
+                  costCenterId: persisted.activityId,
+                  memo: `زيادة جردية للمخزون: ${persisted.nameAr} - ${reason}`,
+                },
+                {
+                  id: randomUUID(),
+                  accountCode: '5205',
+                  accountName: adjExpAcc?.nameAr || 'فروقات وتسويات وتلف المخزون',
+                  debit: 0,
+                  credit: adjValNum,
+                  costCenterId: persisted.activityId,
+                  memo: `فائض تسوية جردية: ${persisted.nameAr}`,
+                },
+              ];
+
+          const { persisted: adjJv, linesWithUnits } = insertJournalEntryTx(database, actor.tenantId, {
+            id: randomUUID(),
+            entryNumber,
+            date: nowIso.split('T')[0],
+            description: `قيد تسوية مخزنية (${isShortage ? 'نقص/تلف' : 'زيادة جردية'}) - ${persisted.nameAr}: ${reason}`,
+            costCenterId: persisted.activityId,
+            branchId: activeBranch.id,
+            lines: adjLines,
+            status: 'POSTED',
+            referenceType: 'INVENTORY',
+            referenceId: persisted.id,
+            isAutoGenerated: true,
+          });
+          for (const line of linesWithUnits) {
+            updateAccountBalanceByLineTx(database, actor.tenantId, line.accountCode, line._debitUnits, line._creditUnits);
+          }
+          enqueueOutboxTx(database, actor, {
+            entityType: 'JOURNAL_ENTRY',
+            entityId: adjJv.id,
+            action: 'CREATE',
+            payload: adjJv,
+            priority: 4,
+            dependsOn: [persisted.id],
+            idempotencyKey: `${actor.tenantId}_JOURNAL_ENTRY_${adjJv.id}_CREATE`,
+            branchId: activeBranch.id,
+            nowIso,
+          });
+        }
+
         writeAuditLogTx(
           database,
           actor,

@@ -29,7 +29,7 @@ import { dataService } from '../../services/dataService';
 import { authService } from '../../services/authService';
 import { hasPermission } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
-import { useLiveAccounts, useLiveJournalEntries } from '../../hooks/useLiveDexie';
+import { useLiveAccounts, useLiveCashBoxes, useLiveJournalEntries } from '../../hooks/useLiveDexie';
 import { Account, JournalEntry, JournalEntryLine, ActivityId, AccountType } from '../../types/erp';
 
 interface AccountingModuleProps {
@@ -53,13 +53,14 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
   const [entryLines, setEntryLines] = useState<
     Array<{
       accountCode: string;
+      cashBoxId?: string;
       debit: string;
       credit: string;
       memo: string;
     }>
   >([
-    { accountCode: '1101', debit: '', credit: '', memo: '' },
-    { accountCode: '4101', debit: '', credit: '', memo: '' },
+    { accountCode: '1101', cashBoxId: '', debit: '', credit: '', memo: '' },
+    { accountCode: '4101', cashBoxId: '', debit: '', credit: '', memo: '' },
   ]);
   const [entryError, setEntryError] = useState<string | null>(null);
   const [entrySuccess, setEntrySuccess] = useState<string | null>(null);
@@ -77,9 +78,14 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
   const actor =
     authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
   const canViewProfits = hasPermission(actor, 'view:profits');
+  const canAccessCentralBox = hasPermission(actor, 'cashbox:central_access');
   const currencySymbol = getActiveCurrencyConfig().symbol;
+  const currentActiveBranchId = isDesktop
+    ? desktopSession.getActiveBranchId() || 'branch_main'
+    : storage.getActiveBranchId();
 
   const accounts = useLiveAccounts();
+  const cashBoxes = useLiveCashBoxes();
   const journalEntries = useLiveJournalEntries();
   const trialBalanceData = accounting.getTrialBalance(accounts, journalEntries);
   const incomeStatementData = accounting.getIncomeStatement(
@@ -88,6 +94,13 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
     journalEntries
   );
 
+  const getLinkedCashBoxesForAccount = (accountCode: string) =>
+    cashBoxes.filter(
+      (b) =>
+        b.accountCode === accountCode &&
+        ((b.branchId === currentActiveBranchId) || (b.isCentral && canAccessCentralBox))
+    );
+
   // حساب توازن القيد اليدوي لحظياً
   const totalDebit = entryLines.reduce((s, l) => s + (Number(l.debit) || 0), 0);
   const totalCredit = entryLines.reduce((s, l) => s + (Number(l.credit) || 0), 0);
@@ -95,7 +108,7 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
   const isBalanced = balanceDifference < 0.009 && totalDebit > 0;
 
   const handleAddLine = () => {
-    setEntryLines((prev) => [...prev, { accountCode: '', debit: '', credit: '', memo: '' }]);
+    setEntryLines((prev) => [...prev, { accountCode: '', cashBoxId: '', debit: '', credit: '', memo: '' }]);
   };
 
   const handleRemoveLine = (index: number) => {
@@ -106,7 +119,12 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
   const handleLineChange = (index: number, field: string, value: string) => {
     setEntryLines((prev) => {
       const updated = [...prev];
-      updated[index] = { ...updated[index], [field]: value };
+      const next = { ...updated[index], [field]: value };
+      if (field === 'accountCode') {
+        const boxes = getLinkedCashBoxesForAccount(value);
+        next.cashBoxId = boxes.length === 1 ? boxes[0].id : '';
+      }
+      updated[index] = next;
       return updated;
     });
   };
@@ -122,8 +140,18 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
       return;
     }
 
+    for (const l of entryLines) {
+      const linked = getLinkedCashBoxesForAccount(l.accountCode);
+      if (linked.length > 1 && !l.cashBoxId) {
+        setEntryError(`يرجى اختيار الصندوق المحدد للحساب النقدي (${l.accountCode}).`);
+        return;
+      }
+    }
+
     const lines: JournalEntryLine[] = entryLines.map((l) => {
       const acc = accounts.find((a) => a.code === l.accountCode);
+      const linked = getLinkedCashBoxesForAccount(l.accountCode);
+      const resolvedCashBoxId = l.cashBoxId || (linked.length === 1 ? linked[0].id : undefined);
       return {
         id: storage.generateUUID(),
         accountCode: l.accountCode,
@@ -131,22 +159,20 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
         debit: roundMoney(Number(l.debit) || 0),
         credit: roundMoney(Number(l.credit) || 0),
         costCenterId: entryCostCenter,
+        ...(resolvedCashBoxId ? { cashBoxId: resolvedCashBoxId } : {}),
         memo: l.memo || entryDescription.trim(),
       };
     });
 
     setIsSubmitting(true);
     try {
-      const activeBranchId = isDesktop
-        ? desktopSession.getActiveBranchId() || 'branch_main'
-        : storage.getActiveBranchId();
       const persisted = await dataService.createJournalEntryAtomic({
         id: storage.generateUUID(),
         entryNumber: '',
         date: entryDate,
         description: entryDescription.trim(),
         costCenterId: entryCostCenter,
-        branchId: activeBranchId,
+        branchId: currentActiveBranchId,
         lines,
         status: 'POSTED',
         referenceType: 'MANUAL',
@@ -156,8 +182,8 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
       setEntrySuccess(`تم ترحيل القيد بنجاح برقم: ${persisted.entryNumber}`);
       setEntryDescription('');
       setEntryLines([
-        { accountCode: '1101', debit: '', credit: '', memo: '' },
-        { accountCode: '4101', debit: '', credit: '', memo: '' },
+        { accountCode: '1101', cashBoxId: '', debit: '', credit: '', memo: '' },
+        { accountCode: '4101', cashBoxId: '', debit: '', credit: '', memo: '' },
       ]);
       onRefresh();
     } catch (err: unknown) {
@@ -618,9 +644,12 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {entryLines.map((line, idx) => (
+                  {entryLines.map((line, idx) => {
+                    const linkedBoxes = getLinkedCashBoxesForAccount(line.accountCode);
+                    const activeBoxVal = line.cashBoxId || (linkedBoxes.length === 1 ? linkedBoxes[0].id : '');
+                    return (
                     <tr key={idx}>
-                      <td className="py-2 px-3">
+                      <td className="py-2 px-3 space-y-1">
                         <select
                           value={line.accountCode}
                           onChange={(e) => handleLineChange(idx, 'accountCode', e.target.value)}
@@ -635,6 +664,23 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
                               </option>
                             ))}
                         </select>
+                        {linkedBoxes.length > 0 && (
+                          <select
+                            value={activeBoxVal}
+                            onChange={(e) => handleLineChange(idx, 'cashBoxId', e.target.value)}
+                            aria-label="تحديد الصندوق النقدي"
+                            className="w-full px-2 py-1 border border-emerald-300 bg-emerald-50/70 rounded text-[11px] font-semibold text-emerald-950"
+                          >
+                            {linkedBoxes.length > 1 && (
+                              <option value="">-- اختر الصندوق النقدي المحدد --</option>
+                            )}
+                            {linkedBoxes.map((box) => (
+                              <option key={box.id} value={box.id}>
+                                {box.nameAr} ({box.balance.toFixed(2)} {currencySymbol})
+                              </option>
+                            ))}
+                          </select>
+                        )}
                       </td>
                       <td className="py-2 px-3">
                         <input
@@ -677,7 +723,8 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
                         </button>
                       </td>
                     </tr>
-                  ))}
+                    );
+                  })}
                 </tbody>
                 <tfoot className="bg-slate-50 border-t border-slate-200 font-bold font-mono">
                   <tr>

@@ -37,7 +37,7 @@ export const SalesInvoiceDocument: React.FC<SalesInvoiceDocumentProps> = ({
   paperSize,
   partyPhone,
 }) => {
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const isPurchase = invoice.type === 'PURCHASE' || invoice.type === 'RETURN_PURCHASE';
   const isReturn = invoice.type === 'RETURN_SALE' || invoice.type === 'RETURN_PURCHASE';
   const isReversed = invoice.status === 'REVERSED';

@@ -157,8 +157,8 @@ test('invoice notification payload deducts returnedAmount and omits balanceRemai
   assert.ok(retPayload.notes?.includes('INV-1001'));
 });
 
-test('amanat notification payload preserves AMANAT_RETURN, partial balances, and item details', () => {
-  const heldCash: AmanatRecord = {
+test('amanat notification payload preserves AMANAT_RETURN, partial return event amount, and item details (DOC-01)', () => {
+  const heldCashPartial: AmanatRecord = {
     id: 'am-1',
     recordNumber: 'AMN-101',
     type: 'CASH',
@@ -171,22 +171,36 @@ test('amanat notification payload preserves AMANAT_RETURN, partial balances, and
     receivedBy: 'أمير',
     status: 'HELD',
     branchId: 'branch_main',
+    returnHistory: [
+      {
+        id: 'ret-ev-1',
+        date: '2026-11-23',
+        amount: 20000,
+        createdByName: 'أمير',
+        recipientSignatureName: 'محمد صالح',
+        notes: 'دفعة أولى',
+      },
+    ],
   };
-  const partialPayload = buildAmanatNotificationPayload(heldCash);
-  assert.equal(partialPayload.documentType, 'AMANAT_RECEIPT');
-  assert.equal(partialPayload.amount, 30000);
+  const partialPayload = buildAmanatNotificationPayload(heldCashPartial);
+  assert.equal(partialPayload.documentType, 'AMANAT_RETURN');
+  assert.equal(partialPayload.amount, 20000);
+  assert.equal(partialPayload.balanceRemaining, 30000);
+  assert.equal(partialPayload.isPartialReturn, true);
+  assert.equal(partialPayload.error, undefined);
 
-  const returnedCash: AmanatRecord = {
-    ...heldCash,
+  const missingHistoryReturned: AmanatRecord = {
+    ...heldCashPartial,
     returnedAmount: 50000,
     remainingAmount: 0,
     returnedDate: '2026-11-23',
     status: 'RETURNED',
+    returnHistory: [],
   };
-  const returnPayload = buildAmanatNotificationPayload(returnedCash);
-  assert.equal(returnPayload.documentType, 'AMANAT_RETURN');
-  assert.equal(returnPayload.amount, 50000);
-  assert.equal(returnPayload.date, '2026-11-23');
+  const blockedPayload = buildAmanatNotificationPayload(missingHistoryReturned, { mode: 'RETURN' });
+  assert.equal(blockedPayload.documentType, 'AMANAT_RETURN');
+  assert.equal(blockedPayload.amount, undefined);
+  assert.ok(blockedPayload.error && blockedPayload.error.length > 10);
 
   const itemAmanat: AmanatRecord = {
     id: 'am-2',
@@ -208,11 +222,14 @@ test('amanat notification payload preserves AMANAT_RETURN, partial balances, and
   assert.ok(itemPayload.itemsSummary?.includes('BOX-99'));
 });
 
-test('buildPrintPageCss generates valid @page sizes for A4 and 80mm thermal receipts', () => {
+test('buildPrintPageCss generates valid @page sizes for A4, 80mm, and 58mm thermal receipts', () => {
   const a4Css = buildPrintPageCss('A4');
-  const thermalCss = buildPrintPageCss('80mm');
+  const thermal80Css = buildPrintPageCss('80mm');
+  const thermal58Css = buildPrintPageCss('58mm');
   assert.ok(a4Css.includes('A4 portrait'));
-  assert.ok(thermalCss.includes('80mm 297mm'));
+  assert.ok(a4Css.includes('counter(page)'));
+  assert.ok(thermal80Css.includes('80mm 297mm'));
+  assert.ok(thermal58Css.includes('58mm 297mm'));
 });
 
 test('buildPartyStatement maintains non-duplication of voucher settlement against invoice paidAmount', () => {

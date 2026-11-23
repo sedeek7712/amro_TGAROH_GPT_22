@@ -23,7 +23,7 @@ export const AmanatDocument: React.FC<AmanatDocumentProps> = ({
   paperSize,
   cashBoxName,
 }) => {
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const dec = meta.currency.decimalPlaces ?? 2;
   const sym = meta.currency.symbol;
   const returnedAmt = Number(record.returnedAmount || 0);

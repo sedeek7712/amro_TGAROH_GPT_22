@@ -104,10 +104,16 @@ const desktopBridge = Object.freeze({
   resolveConflict: (input) => ipcRenderer.invoke('erp:sync:resolve-conflict', input),
   applyRemoteSyncEntity: (input) => ipcRenderer.invoke('erp:sync:apply-remote', input),
 
-  // --- Diagnostics & Print ---
+  // --- Diagnostics, Print & Share ---
   getDiagnosticLog: (input) => ipcRenderer.invoke('erp:diagnostics:get-log', input),
   exportDiagnosticLogDialog: (input) => ipcRenderer.invoke('erp:diagnostics:export-dialog', input),
   exportDocumentPdf: (input) => ipcRenderer.invoke('erp:print:export-pdf', input),
+  exportDocumentPng: (input) => ipcRenderer.invoke('erp:print:export-png', input),
+  runNativePrint: (input) => ipcRenderer.invoke('erp:print:run-native', input),
+  prepareShareTempFile: (input) => ipcRenderer.invoke('erp:share:prepare-temp-file', input),
+  revealShareTempFile: (input) => ipcRenderer.invoke('erp:share:reveal-temp-file', input),
+  cleanupShareTempFile: (input) => ipcRenderer.invoke('erp:share:cleanup-temp-file', input),
+  openWhatsAppUrl: (input) => ipcRenderer.invoke('erp:share:open-whatsapp-url', input),
 
   onDataChanged: (callback) => {
     if (typeof callback !== 'function') return () => {};

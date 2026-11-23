@@ -39,6 +39,8 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isDepositModalOpen, setIsDepositModalOpen] = useState(false);
   const [selectedRecordToPrint, setSelectedRecordToPrint] = useState<AmanatRecord | null>(null);
+  const [selectedPrintMode, setSelectedPrintMode] = useState<'AUTO' | 'DEPOSIT' | 'RETURN'>('AUTO');
+  const [selectedPrintReturnEventId, setSelectedPrintReturnEventId] = useState<string | undefined>(undefined);
   const [returnConfirmRecord, setReturnConfirmRecord] = useState<AmanatRecord | null>(null);
   const [returnAmountInput, setReturnAmountInput] = useState<string>('');
   const [returnCashBoxId, setReturnCashBoxId] = useState<string>('');
@@ -157,6 +159,8 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
         cashBoxId: targetBox,
       });
       setIsDepositModalOpen(false);
+      setSelectedPrintMode('DEPOSIT');
+      setSelectedPrintReturnEventId(undefined);
       setSelectedRecordToPrint(res.record);
 
       // تصفير النموذج
@@ -211,6 +215,12 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
         recipientSignatureName: record.depositorName,
         notes: returnNotes.trim() || undefined,
       });
+      const lastReturnEvent =
+        res.record.returnHistory && res.record.returnHistory.length > 0
+          ? res.record.returnHistory[res.record.returnHistory.length - 1]
+          : undefined;
+      setSelectedPrintMode('RETURN');
+      setSelectedPrintReturnEventId(lastReturnEvent?.id);
       setSelectedRecordToPrint(res.record);
       setReturnConfirmRecord(null);
       onRefresh();
@@ -240,6 +250,8 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
         recordId: cancelConfirmRecord.id,
         reason: cancelReason.trim(),
       });
+      setSelectedPrintMode('AUTO');
+      setSelectedPrintReturnEventId(undefined);
       setSelectedRecordToPrint(res.record);
       setCancelConfirmRecord(null);
       setCancelReason('');
@@ -828,7 +840,13 @@ export const AmanatManager: React.FC<AmanatManagerProps> = ({ onRefresh }) => {
       {/* Printable Voucher Modal */}
       <AmanatReceiptModal
         record={selectedRecordToPrint}
-        onClose={() => setSelectedRecordToPrint(null)}
+        initialNotificationMode={selectedPrintMode}
+        initialReturnEventId={selectedPrintReturnEventId}
+        onClose={() => {
+          setSelectedRecordToPrint(null);
+          setSelectedPrintMode('AUTO');
+          setSelectedPrintReturnEventId(undefined);
+        }}
       />
     </div>
   );

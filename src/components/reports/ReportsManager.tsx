@@ -51,8 +51,10 @@ import { formatLocalDate, formatLocalDateTime } from '../../utils/localDate';
 import {
   applyPrintPageStyle,
   exportDocumentPdf,
+  getSaveStatusLabel,
   triggerNativePrint,
   type DocumentPaperSize,
+  type SaveDocumentStatus,
 } from '../../utils/printDocument';
 import {
   buildAmanatNotificationPayload,
@@ -60,6 +62,14 @@ import {
   computeInvoiceOpenRemaining,
   type NotificationPayload,
 } from '../../utils/documentNotifications';
+import {
+  buildAmanatDocumentSnapshot,
+  buildInvoiceDocumentSnapshot,
+  buildPartyStatementDocumentSnapshot,
+  buildReportDocumentSnapshot,
+  buildStructuredBaseName,
+  type DocumentSnapshot,
+} from '../../services/documents/documentService';
 import {
   DocumentFooter,
   DocumentHeader,
@@ -92,6 +102,8 @@ export const ReportsManager: React.FC = () => {
   );
   const [printSize, setPrintSize] = useState<DocumentPaperSize>('A4');
   const [isExportingPdf, setIsExportingPdf] = useState(false);
+  const [pdfSaveState, setPdfSaveState] = useState<SaveDocumentStatus>('IDLE');
+  const [reportActionNotice, setReportActionNotice] = useState<string | null>(null);
 
   // فلاتر كشف الحساب وأعمار الديون
   const [selectedPartyId, setSelectedPartyId] = useState<string>('');
@@ -108,9 +120,9 @@ export const ReportsManager: React.FC = () => {
   const [printableInvoice, setPrintableInvoice] = useState<Invoice | null>(null);
   const [printableAmanat, setPrintableAmanat] = useState<AmanatRecord | null>(null);
 
-  // نافذة إرسال الإشعار للعميل/المورد/المودع
+  // نافذة إرسال الإشعار للعميل/المورد/المودع/التقرير
   const [notificationState, setNotificationState] = useState<
-    NotificationPayload & { isOpen: boolean }
+    NotificationPayload & { isOpen: boolean; snapshot?: DocumentSnapshot }
   >({
     isOpen: false,
     recipientName: '',
@@ -288,26 +300,171 @@ export const ReportsManager: React.FC = () => {
     [liveJournalEntries]
   );
 
-  const handlePrint = (mode: DocumentPaperSize = printSize) => {
+  const buildActiveReportSnapshot = (size: DocumentPaperSize = printSize): DocumentSnapshot => {
+    const dec = docMeta.currency.decimalPlaces ?? 2;
+    if (activeTab === 'customer_statement' && statementData) {
+      return buildPartyStatementDocumentSnapshot({
+        statement: statementData,
+        meta: docMeta,
+        paperSize: size,
+        startDate: startDate || undefined,
+        endDate: endDate || undefined,
+      });
+    }
+
+    if (activeTab === 'trial_balance') {
+      return buildReportDocumentSnapshot({
+        reportKey: 'trial_balance',
+        reportTitle: 'ميزان المراجعة الشامل',
+        reportSubtitle: `السنة المالية ${yemenNow.year}`,
+        meta: docMeta,
+        paperSize: size,
+        date: todayLocal,
+        summaryRows: [
+          { label: 'إجمالي المدين', value: `${trialBalanceData.totalDebit.toFixed(dec)} ${currencySymbol}` },
+          { label: 'إجمالي الدائن', value: `${trialBalanceData.totalCredit.toFixed(dec)} ${currencySymbol}` },
+          { label: 'التطابق', value: trialBalanceData.isBalanced ? 'متوازن' : 'يوجد فرق' },
+        ],
+        table: {
+          columns: [
+            { label: 'الحساب', align: 'right', widthWeight: 2.8 },
+            { label: 'مدين', align: 'center', widthWeight: 1.2 },
+            { label: 'دائن', align: 'center', widthWeight: 1.2 },
+          ],
+          rows: trialBalanceData.rows.slice(0, 80).map((r) => [
+            `${r.code} - ${r.nameAr}`,
+            r.debit > 0 ? r.debit.toFixed(dec) : '-',
+            r.credit > 0 ? r.credit.toFixed(dec) : '-',
+          ]),
+        },
+      });
+    }
+
+    if (activeTab === 'balance_sheet') {
+      return buildReportDocumentSnapshot({
+        reportKey: 'balance_sheet',
+        reportTitle: 'الميزانية العمومية (المركز المالي)',
+        reportSubtitle: `بتاريخ ${todayLocal}`,
+        meta: docMeta,
+        paperSize: size,
+        date: todayLocal,
+        summaryRows: [
+          { label: 'إجمالي الأصول', value: `${balanceSheetData.totalAssets.toFixed(dec)} ${currencySymbol}` },
+          {
+            label: 'الالتزامات وحقوق الملكية',
+            value: `${(balanceSheetData.totalLiabilities + balanceSheetData.totalEquity + balanceSheetData.netProfit).toFixed(dec)} ${currencySymbol}`,
+          },
+        ],
+      });
+    }
+
+    if (activeTab === 'stock_valuation') {
+      return buildReportDocumentSnapshot({
+        reportKey: 'stock_valuation',
+        reportTitle: 'تقرير جرد وتقييم المخزون',
+        reportSubtitle: activityFilter === 'ALL' ? 'جميع الأنشطة' : activityFilter,
+        meta: docMeta,
+        paperSize: size,
+        date: todayLocal,
+        summaryRows: [
+          { label: 'عدد الأصناف', value: String(stockValuation.filtered.length) },
+          { label: 'إجمالي التكلفة', value: `${stockValuation.totalCost.toFixed(dec)} ${currencySymbol}` },
+          { label: 'القيمة البيعية', value: `${stockValuation.totalRetail.toFixed(dec)} ${currencySymbol}` },
+        ],
+        table: {
+          columns: [
+            { label: 'الصنف', align: 'right', widthWeight: 2.8 },
+            { label: 'الكمية', align: 'center', widthWeight: 1.0 },
+            { label: 'التكلفة', align: 'left', widthWeight: 1.3 },
+          ],
+          rows: stockValuation.filtered.slice(0, 80).map((p) => [
+            p.nameAr,
+            String(p.currentStock),
+            getProductCostValue(p).toFixed(dec),
+          ]),
+        },
+      });
+    }
+
+    return buildReportDocumentSnapshot({
+      reportKey: activeTab,
+      reportTitle: `تقرير (${activeTab})`,
+      reportSubtitle: `السنة المالية ${yemenNow.year}`,
+      meta: docMeta,
+      paperSize: size,
+      date: todayLocal,
+      summaryRows: [
+        { label: 'الفرع', value: docMeta.branchName },
+        { label: 'تاريخ الإصدار', value: todayLocal },
+      ],
+    });
+  };
+
+  const handlePrint = async (mode: DocumentPaperSize = printSize) => {
     setPrintSize(mode);
     applyPrintPageStyle(mode);
-    triggerNativePrint(mode);
+    const snap = buildActiveReportSnapshot(mode);
+    const res = await triggerNativePrint(mode, {
+      snapshot: snap,
+      userId: actor?.id,
+      userName: actor?.fullName,
+    });
+    setReportActionNotice(res.message);
   };
 
   const handleExportPdf = async () => {
     if (isExportingPdf) return;
     setIsExportingPdf(true);
+    setPdfSaveState('PREPARING');
+    setReportActionNotice(null);
     try {
-      await exportDocumentPdf({
-        title: `REPORT_${activeTab.toUpperCase()}_${todayLocal}`,
+      const snap = buildActiveReportSnapshot(printSize);
+      const res = await exportDocumentPdf({
+        title: buildStructuredBaseName({
+          kind: 'REPORT',
+          documentNumber: activeTab.toUpperCase(),
+          date: todayLocal,
+        }),
         pageSize: printSize,
+        snapshot: snap,
+        userId: actor?.id,
+        userName: actor?.fullName,
+        onStatusChange: setPdfSaveState,
       });
+      setPdfSaveState(res.status);
+      setReportActionNotice(res.message);
     } finally {
       setIsExportingPdf(false);
     }
   };
 
+  const handleShareActiveReportPdf = () => {
+    const snap = buildActiveReportSnapshot(printSize);
+    setNotificationState({
+      isOpen: true,
+      recipientName: snap.partyName || docMeta.companyNameAr,
+      recipientPhone: snap.partyPhone || '',
+      documentNumber: snap.documentNumber,
+      documentType: 'STATEMENT',
+      amount: snap.amount,
+      date: todayLocal,
+      balanceRemaining: snap.remainingBalance,
+      notes: `${snap.documentTitle} - ${snap.documentSubtitle || ''}`.trim(),
+      snapshot: snap,
+    });
+  };
+
   const openNotificationForParty = (party: Party, docNum?: string, amount?: number) => {
+    const snap =
+      statementData && statementData.party.id === party.id
+        ? buildPartyStatementDocumentSnapshot({
+            statement: statementData,
+            meta: docMeta,
+            paperSize: 'A4',
+            startDate: startDate || undefined,
+            endDate: endDate || undefined,
+          })
+        : undefined;
     setNotificationState({
       isOpen: true,
       recipientName: party.nameAr,
@@ -318,11 +475,15 @@ export const ReportsManager: React.FC = () => {
       date: todayLocal,
       balanceRemaining: party.balance,
       notes: `كشف حساب مالي صادر من ${activeBranch?.nameAr || docMeta.branchName}`,
+      snapshot: snap,
     });
   };
 
-  const isThermal = printSize === '80mm';
-  const sheetContainerClass = isThermal
+  const is58 = printSize === '58mm';
+  const isThermal = printSize === '80mm' || is58;
+  const sheetContainerClass = is58
+    ? 'bg-white border border-slate-300 p-2 shadow-sm printable-area doc-sheet-58mm max-w-[56mm] mx-auto rounded-lg'
+    : isThermal
     ? 'bg-white border border-slate-300 p-3 shadow-sm printable-area doc-sheet-80mm max-w-[80mm] mx-auto rounded-lg'
     : 'bg-white rounded-2xl border border-slate-200 p-6 shadow-sm printable-area doc-sheet-a4';
 
@@ -334,85 +495,141 @@ export const ReportsManager: React.FC = () => {
   return (
     <div className="p-4 sm:p-6 space-y-6 max-w-7xl mx-auto">
       {/* Top Header & Actions Bar (No Print) */}
-      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm flex flex-col md:flex-row items-start md:items-center justify-between gap-4 no-print">
-        <div className="flex items-center gap-3">
-          <div className="p-2.5 bg-blue-50 text-blue-700 rounded-xl">
-            <BarChart3 className="w-6 h-6" />
+      <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-sm space-y-3 no-print">
+        <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-blue-50 text-blue-700 rounded-xl">
+              <BarChart3 className="w-6 h-6" />
+            </div>
+            <div>
+              <h1 className="text-base font-extrabold text-slate-900">
+                التقارير المالية والمحاسبية والمطبوعات
+              </h1>
+              <p className="text-xs text-slate-500">
+                المنشأة: <span className="font-bold text-slate-800">{docMeta.companyNameAr}</span> |
+                الفرع: <span className="font-bold text-slate-800">{docMeta.branchName}</span> | السنة
+                المالية: <span className="font-mono font-bold text-slate-800">{yemenNow.year}</span>
+              </p>
+            </div>
           </div>
-          <div>
-            <h1 className="text-base font-extrabold text-slate-900">
-              التقارير المالية والمحاسبية والمطبوعات
-            </h1>
-            <p className="text-xs text-slate-500">
-              المنشأة: <span className="font-bold text-slate-800">{docMeta.companyNameAr}</span> |
-              الفرع: <span className="font-bold text-slate-800">{docMeta.branchName}</span> | السنة
-              المالية: <span className="font-mono font-bold text-slate-800">{yemenNow.year}</span>
-            </p>
+
+          {/* Print Size Selector + Print, PDF & Share Strip */}
+          <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
+            <div
+              className="inline-flex rounded-xl bg-slate-100 p-1 text-xs font-bold border border-slate-200"
+              role="group"
+              aria-label="مقاس ورقة التقرير"
+            >
+              <button
+                type="button"
+                onClick={() => setPrintSize('A4')}
+                className={`px-2.5 py-1.5 rounded-lg transition-all ${
+                  printSize === 'A4'
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                معاينة A4
+              </button>
+              <button
+                type="button"
+                onClick={() => setPrintSize('80mm')}
+                className={`px-2.5 py-1.5 rounded-lg transition-all ${
+                  printSize === '80mm'
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                معاينة 80mm
+              </button>
+              <button
+                type="button"
+                onClick={() => setPrintSize('58mm')}
+                className={`px-2.5 py-1.5 rounded-lg transition-all ${
+                  printSize === '58mm'
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                معاينة 58mm
+              </button>
+            </div>
+
+            <button
+              type="button"
+              onClick={handleExportPdf}
+              disabled={isExportingPdf}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-xl text-xs font-bold transition-all shrink-0 disabled:opacity-60"
+              title="حفظ التقرير بصيغة PDF بالمقاس المحدد"
+            >
+              <FileDown className="w-4 h-4 text-blue-700" />
+              <span>
+                {isExportingPdf ? getSaveStatusLabel(pdfSaveState) || 'جاري الحفظ...' : 'حفظ PDF'}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleShareActiveReportPdf}
+              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all shrink-0"
+              title="مشاركة التقرير الرسمي بصيغة PDF عبر واتساب"
+            >
+              <Send className="w-4 h-4" />
+              <span>مشاركة PDF</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handlePrint('A4')}
+              className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm shrink-0"
+              title="طباعة التقرير بحجم صفحة A4 القياسية"
+            >
+              <Printer className="w-4 h-4 text-emerald-400" />
+              <span>طباعة تقرير A4</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handlePrint('80mm')}
+              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition-all shrink-0"
+              title="طباعة ملخص حراري لطابعات نقاط البيع 80mm"
+            >
+              <Printer className="w-4 h-4 text-emerald-600" />
+              <span>طابعة 80mm</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handlePrint('58mm')}
+              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition-all shrink-0"
+              title="طباعة ملخص حراري لطابعات نقاط البيع 58mm"
+            >
+              <Printer className="w-4 h-4 text-emerald-600" />
+              <span>طابعة 58mm</span>
+            </button>
           </div>
         </div>
 
-        {/* Print Size Selector + Print & PDF Strip */}
-        <div className="flex flex-wrap items-center gap-2 w-full md:w-auto">
-          <div
-            className="inline-flex rounded-xl bg-slate-100 p-1 text-xs font-bold border border-slate-200"
-            role="group"
-            aria-label="مقاس ورقة التقرير"
-          >
+        {(reportActionNotice || (pdfSaveState !== 'IDLE' && getSaveStatusLabel(pdfSaveState))) && (
+          <div className="px-3 py-2 rounded-xl bg-slate-50 border border-slate-200 text-[11px] font-semibold text-slate-800 flex items-center justify-between">
+            <span>
+              {pdfSaveState !== 'IDLE' && (
+                <strong className="ml-2 text-blue-800">[{getSaveStatusLabel(pdfSaveState)}]</strong>
+              )}
+              {reportActionNotice}
+            </span>
             <button
               type="button"
-              onClick={() => setPrintSize('A4')}
-              className={`px-2.5 py-1.5 rounded-lg transition-all ${
-                printSize === 'A4'
-                  ? 'bg-white text-slate-900 shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
+              onClick={() => {
+                setReportActionNotice(null);
+                setPdfSaveState('IDLE');
+              }}
+              className="text-slate-500 hover:text-slate-900"
             >
-              معاينة A4
-            </button>
-            <button
-              type="button"
-              onClick={() => setPrintSize('80mm')}
-              className={`px-2.5 py-1.5 rounded-lg transition-all ${
-                printSize === '80mm'
-                  ? 'bg-white text-slate-900 shadow-sm'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              معاينة 80mm
+              إخفاء
             </button>
           </div>
-
-          <button
-            type="button"
-            onClick={handleExportPdf}
-            disabled={isExportingPdf}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 border border-slate-300 rounded-xl text-xs font-bold transition-all shrink-0 disabled:opacity-60"
-            title="تصدير التقرير بصيغة PDF بالمقاس المحدد"
-          >
-            <FileDown className="w-4 h-4 text-blue-700" />
-            <span>{isExportingPdf ? 'جاري التصدير...' : 'حفظ PDF'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handlePrint('A4')}
-            className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm shrink-0"
-            title="طباعة التقرير بحجم صفحة A4 القياسية"
-          >
-            <Printer className="w-4 h-4 text-emerald-400" />
-            <span>طباعة تقرير A4</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => handlePrint('80mm')}
-            className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition-all shrink-0"
-            title="طباعة ملخص حراري لطابعات نقاط البيع 80mm"
-          >
-            <Printer className="w-4 h-4 text-emerald-600" />
-            <span>طابعة إيصالات 80mm</span>
-          </button>
-        </div>
+        )}
       </div>
 
       {/* Tabs Navigation (No Print) */}
@@ -1610,7 +1827,13 @@ export const ReportsManager: React.FC = () => {
                                     activityName: actName,
                                     recipientPhone: party?.phone,
                                   });
-                                  setNotificationState({ isOpen: true, ...payload });
+                                  const snap = buildInvoiceDocumentSnapshot({
+                                    invoice: inv,
+                                    meta: resolveMeta({ branchId: inv.branchId, activityId: inv.activityId }),
+                                    paperSize: 'A4',
+                                    partyPhone: party?.phone,
+                                  });
+                                  setNotificationState({ isOpen: true, ...payload, snapshot: snap });
                                 }}
                                 className="p-1.5 text-emerald-700 hover:bg-emerald-50 rounded-lg transition-colors"
                                 title={`إرسال إشعار ${inv.invoiceNumber}`}
@@ -1765,7 +1988,14 @@ export const ReportsManager: React.FC = () => {
                               type="button"
                               onClick={() => {
                                 const payload = buildAmanatNotificationPayload(r);
-                                setNotificationState({ isOpen: true, ...payload });
+                                const matchedEv = r.returnHistory?.find((ev) => ev.id === payload.returnEventId);
+                                const snap = buildAmanatDocumentSnapshot({
+                                  record: r,
+                                  meta: resolveMeta({ branchId: r.branchId, issuerName: r.receivedBy }),
+                                  paperSize: 'A4',
+                                  returnEvent: payload.documentType === 'AMANAT_RETURN' ? matchedEv : undefined,
+                                });
+                                setNotificationState({ isOpen: true, ...payload, snapshot: snap });
                               }}
                               className="p-1.5 text-purple-700 hover:bg-purple-100 rounded-lg transition-colors"
                               title={`إرسال إشعار الأمانة ${r.recordNumber}`}
@@ -2053,6 +2283,11 @@ export const ReportsManager: React.FC = () => {
         activityName={notificationState.activityName}
         itemsSummary={notificationState.itemsSummary}
         notes={notificationState.notes}
+        snapshot={notificationState.snapshot}
+        notificationError={notificationState.error}
+        isPartialReturn={notificationState.isPartialReturn}
+        totalOriginalAmount={notificationState.totalOriginalAmount}
+        cumulativeReturnedAmount={notificationState.cumulativeReturnedAmount}
       />
     </div>
   );

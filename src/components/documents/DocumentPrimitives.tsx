@@ -35,29 +35,30 @@ export const DocumentHeader: React.FC<DocumentHeaderProps> = ({
   periodText,
 }) => {
   const issuedNow = formatLocalDateTime();
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
+  const is58 = paperSize === '58mm';
 
   if (isThermal) {
     return (
-      <header className="border-b-2 border-slate-900 pb-2.5 mb-3 text-center space-y-1.5">
+      <header className={`border-b-2 border-slate-900 text-center ${is58 ? 'pb-2 mb-2 space-y-1' : 'pb-2.5 mb-3 space-y-1.5'}`}>
         {meta.hasLogo && meta.logoUrl && (
           <div className="flex justify-center pb-1">
             <img
               src={meta.logoUrl}
               alt={meta.companyNameAr}
-              className="h-11 max-w-[140px] object-contain"
+              className={`${is58 ? 'h-9 max-w-[110px]' : 'h-11 max-w-[140px]'} object-contain`}
             />
           </div>
         )}
-        <div className="text-[13px] font-black text-slate-900 leading-tight">
+        <div className={`${is58 ? 'text-[11.5px]' : 'text-[13px]'} font-black text-slate-900 leading-tight`}>
           {meta.companyNameAr}
         </div>
         {meta.companyNameEn && (
-          <div dir="ltr" className="text-[10px] font-semibold text-slate-500">
+          <div dir="ltr" className={`${is58 ? 'text-[9px]' : 'text-[10px]'} font-semibold text-slate-500`}>
             {meta.companyNameEn}
           </div>
         )}
-        <div className="text-[10px] text-slate-600 leading-snug space-y-0.5">
+        <div className={`${is58 ? 'text-[9px]' : 'text-[10px]'} text-slate-600 leading-snug space-y-0.5`}>
           <div>الفرع: {meta.branchName}{meta.activityName ? ` — ${meta.activityName}` : ''}</div>
           {(meta.phone || meta.branchPhone) && (
             <div className="font-mono">هاتف: {meta.phone || meta.branchPhone}</div>
@@ -203,11 +204,12 @@ export const DocumentMetaGrid: React.FC<{
   );
   if (visible.length === 0) return null;
 
-  if (paperSize === '80mm') {
+  if (paperSize === '80mm' || paperSize === '58mm') {
+    const is58 = paperSize === '58mm';
     return (
-      <div className="bg-slate-50 border border-slate-200 rounded p-2 mb-3 text-[10px] space-y-1 doc-break-inside-avoid">
+      <div className={`bg-slate-50 border border-slate-200 rounded mb-3 space-y-1 doc-break-inside-avoid ${is58 ? 'p-1.5 text-[9px]' : 'p-2 text-[10px]'}`}>
         {visible.map((f, idx) => (
-          <div key={idx} className="flex items-start justify-between gap-2 border-b border-slate-100 last:border-b-0 pb-0.5 last:pb-0">
+          <div key={idx} className="flex items-start justify-between gap-1.5 border-b border-slate-100 last:border-b-0 pb-0.5 last:pb-0">
             <span className="text-slate-500 shrink-0">{f.label}:</span>
             <span className={`font-bold text-slate-900 text-left break-words ${f.mono ? 'font-mono tabular-nums' : ''}`}>
               {f.value}
@@ -253,27 +255,32 @@ export const DocumentAmountBanner: React.FC<{
   paperSize?: DocumentPaperSize;
   subLabel?: string;
 }> = ({ label, amount, currencySymbol, currencyNameAr, paperSize = 'A4', subLabel }) => {
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
+  const is58 = paperSize === '58mm';
   const words = numberToArabicWords(amount, currencyNameAr);
 
   return (
     <div
       className={`bg-slate-900 text-white rounded-lg doc-break-inside-avoid ${
-        isThermal ? 'p-2.5 my-2.5 text-center space-y-1' : 'p-4 my-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2'
+        isThermal
+          ? is58
+            ? 'p-2 my-2 text-center space-y-0.5'
+            : 'p-2.5 my-2.5 text-center space-y-1'
+          : 'p-4 my-4 flex flex-col sm:flex-row sm:items-center justify-between gap-2'
       }`}
     >
       <div>
-        <div className={`text-slate-300 font-semibold ${isThermal ? 'text-[10px]' : 'text-[11px]'}`}>
+        <div className={`text-slate-300 font-semibold ${is58 ? 'text-[9px]' : isThermal ? 'text-[10px]' : 'text-[11px]'}`}>
           {label}
         </div>
-        <div className={`font-semibold text-emerald-300 mt-0.5 ${isThermal ? 'text-[10px]' : 'text-xs'}`}>
+        <div className={`font-semibold text-emerald-300 mt-0.5 ${is58 ? 'text-[9px]' : isThermal ? 'text-[10px]' : 'text-xs'}`}>
           {words}
         </div>
         {subLabel && <div className="text-[10px] text-slate-300 mt-0.5">{subLabel}</div>}
       </div>
       <div
         className={`font-mono tabular-nums font-black text-white shrink-0 ${
-          isThermal ? 'text-base pt-0.5' : 'text-xl'
+          is58 ? 'text-sm pt-0.5' : isThermal ? 'text-base pt-0.5' : 'text-xl'
         }`}
       >
         {Number(amount || 0).toFixed(2)} <span className="text-xs font-bold text-slate-300">{currencySymbol}</span>
@@ -293,14 +300,15 @@ export const DocumentSignatures: React.FC<{
 }> = ({ slots, paperSize = 'A4' }) => {
   if (slots.length === 0) return null;
 
-  if (paperSize === '80mm') {
+  if (paperSize === '80mm' || paperSize === '58mm') {
+    const is58 = paperSize === '58mm';
     return (
-      <div className="grid grid-cols-2 gap-3 text-center text-[10px] pt-3 mt-3 border-t border-slate-300 doc-break-inside-avoid">
+      <div className={`grid grid-cols-2 gap-2 text-center pt-2.5 mt-2.5 border-t border-slate-300 doc-break-inside-avoid ${is58 ? 'text-[8.5px]' : 'text-[10px]'}`}>
         {slots.slice(0, 2).map((s, idx) => (
           <div key={idx}>
-            <div className="text-slate-600 font-semibold mb-4">{s.roleLabel}</div>
+            <div className="text-slate-600 font-semibold mb-3">{s.roleLabel}</div>
             {s.name && <div className="font-bold text-slate-900 truncate">{s.name}</div>}
-            <div className="border-b border-slate-400 w-24 mx-auto mt-1.5" />
+            <div className={`border-b border-slate-400 mx-auto mt-1.5 ${is58 ? 'w-16' : 'w-24'}`} />
           </div>
         ))}
       </div>
@@ -330,7 +338,7 @@ export const DocumentFooter: React.FC<{
   referenceText?: string;
 }> = ({ meta, paperSize = 'A4', referenceText }) => {
   const issuedNow = formatLocalDateTime();
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
 
   return (
     <footer

@@ -39,7 +39,7 @@ export const JournalVoucherDocument: React.FC<JournalVoucherDocumentProps> = ({
   meta,
   paperSize,
 }) => {
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const dec = meta.currency.decimalPlaces ?? 2;
   const sym = meta.currency.symbol;
 

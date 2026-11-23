@@ -41,7 +41,7 @@ export const CashVoucherDocument: React.FC<CashVoucherDocumentProps> = ({
   cashBoxName,
   allocations = [],
 }) => {
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const isReceipt = voucher.type === 'RECEIPT';
   const statusKey = voucher.status || 'POSTED';
   const statusInfo = STATUS_META[statusKey] || STATUS_META.POSTED;

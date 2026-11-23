@@ -36,6 +36,10 @@ import { formatLocalDate } from '../../utils/localDate';
 import { useDocumentContext } from '../../hooks/useDocumentContext';
 import { DocumentPrintShell } from '../documents/DocumentPrintShell';
 import { JournalVoucherDocument } from '../documents/JournalVoucherDocument';
+import {
+  buildJournalVoucherDocumentSnapshot,
+  buildStructuredBaseName,
+} from '../../services/documents/documentService';
 
 interface AccountingModuleProps {
   onRefresh: () => void;
@@ -1145,9 +1149,20 @@ export const AccountingModule: React.FC<AccountingModuleProps> = ({ onRefresh })
         <DocumentPrintShell
           title={`سند قيد محاسبي (${printableEntry.entryNumber})`}
           subtitle={`${printableEntry.description} — ${printableEntry.date}`}
-          pdfTitle={`JOURNAL_${printableEntry.entryNumber}`}
+          pdfTitle={buildStructuredBaseName({
+            kind: 'JOURNAL',
+            documentNumber: printableEntry.entryNumber,
+            date: printableEntry.date,
+          })}
           defaultSize="A4"
           allowThermal={true}
+          buildSnapshot={(paperSize) =>
+            buildJournalVoucherDocumentSnapshot({
+              entry: printableEntry,
+              meta: resolveMeta({ branchId: printableEntry.branchId }),
+              paperSize,
+            })
+          }
           onClose={() => setPrintableEntry(null)}
         >
           {(paperSize) => (

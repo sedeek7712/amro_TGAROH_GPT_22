@@ -46,6 +46,10 @@ import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
 import { useDocumentContext } from '../../hooks/useDocumentContext';
 import { DocumentPrintShell } from '../documents/DocumentPrintShell';
 import { CashVoucherDocument } from '../documents/CashVoucherDocument';
+import {
+  buildCashVoucherDocumentSnapshot,
+  buildStructuredBaseName,
+} from '../../services/documents/documentService';
 import { formatLocalDate } from '../../utils/localDate';
 import {
   PARTY_CONTROL_ACCOUNTS,
@@ -132,6 +136,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
     amount?: number;
     date?: string;
     notes?: string;
+    voucher?: PaymentVoucher;
   }>({
     isOpen: false,
     recipientName: '',
@@ -325,6 +330,7 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
       amount: v.amount,
       date: v.date,
       notes: `${v.description} - حساب: ${box?.nameAr || 'الخزينة'}`,
+      voucher: v,
     });
   };
 
@@ -1476,12 +1482,28 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
             printableVoucher.voucherNumber || 'مسودة'
           })`}
           subtitle={`${printableVoucher.partyName} — ${printableVoucher.date}`}
-          pdfTitle={`VOUCHER_${printableVoucher.voucherNumber || printableVoucher.id.slice(0, 8)}`}
+          pdfTitle={buildStructuredBaseName({
+            kind: printableVoucher.type === 'RECEIPT' ? 'RECEIPT_VOUCHER' : 'PAYMENT_VOUCHER',
+            documentNumber: printableVoucher.voucherNumber || printableVoucher.id.slice(0, 8),
+            date: printableVoucher.date,
+          })}
           defaultSize="A4"
           allowThermal={true}
+          buildSnapshot={(paperSize) =>
+            buildCashVoucherDocumentSnapshot({
+              voucher: printableVoucher,
+              meta: resolveMeta({
+                branchId: printableVoucher.branchId,
+                issuerName: printableVoucher.createdByName || actor?.fullName,
+              }),
+              paperSize,
+              cashBoxName: cashBoxes.find((b) => b.id === printableVoucher.cashBoxId)?.nameAr,
+              allocations: printableAllocations,
+            })
+          }
           onClose={() => setPrintableVoucher(null)}
           onNotify={() => handleNotifyVoucher(printableVoucher)}
-          notifyLabel="إشعار المستفيد"
+          notifyLabel="إشعار ومشاركة"
         >
           {(paperSize) => (
             <CashVoucherDocument
@@ -1509,6 +1531,21 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
         amount={notificationData.amount}
         date={notificationData.date}
         notes={notificationData.notes}
+        snapshot={
+          notificationData.voucher
+            ? buildCashVoucherDocumentSnapshot({
+                voucher: notificationData.voucher,
+                meta: resolveMeta({
+                  branchId: notificationData.voucher.branchId,
+                  issuerName: notificationData.voucher.createdByName || actor?.fullName,
+                }),
+                paperSize: 'A4',
+                cashBoxName: cashBoxes.find((b) => b.id === notificationData.voucher?.cashBoxId)
+                  ?.nameAr,
+                partyPhone: notificationData.recipientPhone,
+              })
+            : undefined
+        }
       />
     </div>
   );

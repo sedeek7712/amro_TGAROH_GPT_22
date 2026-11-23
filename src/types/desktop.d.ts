@@ -454,12 +454,49 @@ declare global {
       exportDocumentPdf(input: {
         token: string;
         title?: string;
-        pageSize?: 'A4' | '80mm';
+        pageSize?: 'A4' | '80mm' | '58mm';
+        pdfBase64?: string;
       }): Promise<{
         canceled: boolean;
+        status?: 'SAVED' | 'CANCELED' | 'CREATE_FAILED' | 'WRITE_FAILED' | 'PATH_UNREACHABLE';
         path?: string;
         filename?: string;
+        sizeBytes?: number;
+        error?: string;
       }>;
+      exportDocumentPng(input: {
+        token: string;
+        title?: string;
+        bytesBase64: string;
+      }): Promise<{
+        canceled: boolean;
+        status?: 'SAVED' | 'CANCELED' | 'CREATE_FAILED' | 'WRITE_FAILED' | 'PATH_UNREACHABLE';
+        path?: string;
+        filename?: string;
+        sizeBytes?: number;
+        error?: string;
+      }>;
+      runNativePrint(input: { token: string }): Promise<{
+        printed: boolean;
+        canceled: boolean;
+        failureReason?: string;
+      }>;
+      prepareShareTempFile(input: {
+        token: string;
+        fileName: string;
+        bytesBase64: string;
+        mimeType?: string;
+      }): Promise<{
+        tempToken: string;
+        fileName: string;
+        sizeBytes: number;
+      }>;
+      revealShareTempFile(input: {
+        token: string;
+        tempToken: string;
+      }): Promise<{ revealed: boolean; error?: string }>;
+      cleanupShareTempFile(input: { token: string; tempToken: string }): Promise<{ cleaned: boolean }>;
+      openWhatsAppUrl(input: { token: string; url: string }): Promise<{ opened: boolean }>;
 
       onDataChanged(callback: (domains: string[]) => void): () => void;
       onAuthInvalidated(callback: (reason: string) => void): () => void;

@@ -1,6 +1,6 @@
 /**
  * نافذة معاينة وطباعة الفواتير والمرتجعات (مبيعات / مشتريات)
- * متوافقة مع طابعات الإيصالات 80mm وطابعات A4 الرسمية وتصدير PDF
+ * متوافقة مع طابعات الإيصالات 58mm و 80mm وطابعات A4 الرسمية وتصدير PDF/PNG والمشاركة
  */
 
 import React, { useMemo, useState } from 'react';
@@ -8,6 +8,10 @@ import { Invoice, CommercialActivity } from '../../types/erp';
 import { CustomerNotificationModal } from './CustomerNotificationModal';
 import { useDocumentContext } from '../../hooks/useDocumentContext';
 import { useLiveParties } from '../../hooks/useLiveDexie';
+import {
+  buildInvoiceDocumentSnapshot,
+  buildStructuredBaseName,
+} from '../../services/documents/documentService';
 import { buildInvoiceNotificationPayload } from '../../utils/documentNotifications';
 import { DocumentPrintShell } from '../documents/DocumentPrintShell';
 import { SalesInvoiceDocument } from '../documents/SalesInvoiceDocument';
@@ -72,17 +76,38 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
     recipientPhone: resolvedPhone,
   });
 
+  const baseFileName = buildStructuredBaseName({
+    kind: invoice.type,
+    documentNumber: invoice.invoiceNumber,
+    date: invoice.date,
+  });
+
+  const shareSnapshot = buildInvoiceDocumentSnapshot({
+    invoice,
+    meta,
+    paperSize: initialSize,
+    partyPhone: resolvedPhone,
+  });
+
   return (
     <>
       <DocumentPrintShell
         title={titleByType[invoice.type]}
         subtitle={`${invoice.partyName} — ${invoice.date}`}
-        pdfTitle={`${invoice.type}_${invoice.invoiceNumber}`}
+        pdfTitle={baseFileName}
         defaultSize={initialSize}
         allowThermal={true}
+        buildSnapshot={(paperSize) =>
+          buildInvoiceDocumentSnapshot({
+            invoice,
+            meta,
+            paperSize,
+            partyPhone: resolvedPhone,
+          })
+        }
         onClose={onClose}
         onNotify={() => setIsNotificationOpen(true)}
-        notifyLabel={isPurchase ? 'إشعار المورد' : 'إشعار العميل'}
+        notifyLabel={isPurchase ? 'إشعار ومشاركة للمورد' : 'إشعار ومشاركة للعميل'}
         headerBadge={
           isReturn ? (
             <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-200 border border-amber-400/40 text-[10px] font-bold">
@@ -114,6 +139,7 @@ export const ReceiptModal: React.FC<ReceiptModalProps> = ({
         balanceRemaining={notifyPayload.balanceRemaining}
         itemsSummary={notifyPayload.itemsSummary}
         notes={notifyPayload.notes}
+        snapshot={shareSnapshot}
       />
     </>
   );

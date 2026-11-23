@@ -24,7 +24,7 @@ export const PartyStatementDocument: React.FC<PartyStatementDocumentProps> = ({
   startDate,
   endDate,
 }) => {
-  const isThermal = paperSize === '80mm';
+  const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const dec = meta.currency.decimalPlaces ?? 2;
   const sym = meta.currency.symbol;
   const isCustomer = statement.party.type === 'CUSTOMER';

@@ -48,6 +48,10 @@ import { useDocumentContext } from '../../hooks/useDocumentContext';
 import { DocumentPrintShell } from '../documents/DocumentPrintShell';
 import { PartyStatementDocument } from '../documents/PartyStatementDocument';
 import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
+import {
+  buildPartyStatementDocumentSnapshot,
+  buildStructuredBaseName,
+} from '../../services/documents/documentService';
 
 interface PartiesManagerProps {
   onRefresh: () => void;
@@ -943,12 +947,22 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
         <DocumentPrintShell
           title={`كشف حساب: ${selectedPartyForStatement.nameAr}`}
           subtitle={selectedPartyForStatement.type === 'CUSTOMER' ? 'حساب عميل' : 'حساب مورد'}
-          pdfTitle={`STATEMENT_${selectedPartyForStatement.id.slice(0, 8)}`}
+          pdfTitle={buildStructuredBaseName({
+            kind: 'STATEMENT',
+            documentNumber: selectedPartyForStatement.nameAr || selectedPartyForStatement.id.slice(0, 8),
+          })}
           defaultSize="A4"
           allowThermal={true}
+          buildSnapshot={(paperSize) =>
+            buildPartyStatementDocumentSnapshot({
+              statement: selectedPartyStatement,
+              meta: resolveMeta(),
+              paperSize,
+            })
+          }
           onClose={() => setSelectedPartyForStatement(null)}
           onNotify={() => setIsStatementNotifyOpen(true)}
-          notifyLabel="إرسال واتساب"
+          notifyLabel="مشاركة وإشعار واتساب"
         >
           {(paperSize) => (
             <PartyStatementDocument
@@ -971,6 +985,15 @@ export const PartiesManager: React.FC<PartiesManagerProps> = ({ onRefresh }) => 
           amount={Math.abs(selectedPartyForStatement.balance)}
           balanceRemaining={selectedPartyForStatement.balance}
           notes={`كشف حساب مالي صادر من ${resolveMeta().branchName}`}
+          snapshot={
+            selectedPartyStatement
+              ? buildPartyStatementDocumentSnapshot({
+                  statement: selectedPartyStatement,
+                  meta: resolveMeta(),
+                  paperSize: 'A4',
+                })
+              : undefined
+          }
         />
       )}
     </div>

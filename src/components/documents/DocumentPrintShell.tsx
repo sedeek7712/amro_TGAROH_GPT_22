@@ -1,11 +1,16 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Printer, FileDown, X, MessageSquare, FileText, Receipt } from 'lucide-react';
+import { Printer, FileDown, Image as ImageIcon, X, MessageSquare, FileText, Receipt } from 'lucide-react';
+import type { DocumentSnapshot } from '../../services/documents/documentService';
+import { computeDocumentCanvasSpec } from '../../services/documents/pngDocumentService';
 import {
   applyPrintPageStyle,
   exportDocumentPdf,
+  exportDocumentPng,
+  getSaveStatusLabel,
   triggerNativePrint,
   type DocumentPaperSize,
+  type SaveDocumentStatus,
 } from '../../utils/printDocument';
 
 const PORTAL_ROOT_ID = 'doc-print-portal';
@@ -29,6 +34,8 @@ interface DocumentPrintShellProps {
   pdfTitle?: string;
   defaultSize?: DocumentPaperSize;
   allowThermal?: boolean;
+  snapshot?: DocumentSnapshot;
+  buildSnapshot?: (paperSize: DocumentPaperSize) => DocumentSnapshot;
   onClose: () => void;
   onNotify?: () => void;
   notifyLabel?: string;
@@ -42,15 +49,19 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
   pdfTitle,
   defaultSize = 'A4',
   allowThermal = true,
+  snapshot,
+  buildSnapshot,
   onClose,
   onNotify,
-  notifyLabel = 'إشعار واتساب',
+  notifyLabel = 'مشاركة / إشعار واتساب',
   headerBadge,
   children,
 }) => {
   const [paperSize, setPaperSize] = useState<DocumentPaperSize>(defaultSize);
-  const [exportStatus, setExportStatus] = useState<string | null>(null);
-  const [isExporting, setIsExporting] = useState(false);
+  const [saveState, setSaveState] = useState<SaveDocumentStatus>('IDLE');
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [statusTone, setStatusTone] = useState<'info' | 'success' | 'warning' | 'error'>('info');
+  const [isBusy, setIsBusy] = useState(false);
 
   useEffect(() => {
     setPaperSize(defaultSize);
@@ -81,33 +92,119 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
     applyPrintPageStyle(paperSize);
   }, [paperSize]);
 
-  const handlePrint = () => {
-    triggerNativePrint(paperSize);
+  const activeSnapshot = useMemo(() => {
+    if (buildSnapshot) {
+      return buildSnapshot(paperSize);
+    }
+    if (snapshot) {
+      return { ...snapshot, paperSize };
+    }
+    return undefined;
+  }, [buildSnapshot, snapshot, paperSize]);
+
+  const pngSpec = useMemo(() => {
+    return activeSnapshot ? computeDocumentCanvasSpec(activeSnapshot) : null;
+  }, [activeSnapshot]);
+
+  const handlePrint = async () => {
+    if (isBusy) return;
+    setIsBusy(true);
+    try {
+      const res = await triggerNativePrint(paperSize, { snapshot: activeSnapshot });
+      setStatusMessage(res.message);
+      setStatusTone(res.canceled ? 'warning' : res.printed ? 'success' : 'error');
+    } catch (err: unknown) {
+      setStatusMessage(err instanceof Error ? err.message : 'تعذر تنفيذ أمر الطباعة.');
+      setStatusTone('error');
+    } finally {
+      setIsBusy(false);
+    }
   };
 
   const handleExportPdf = async () => {
-    if (isExporting) return;
-    setExportStatus(null);
-    setIsExporting(true);
+    if (isBusy) return;
+    setStatusMessage(null);
+    setSaveState('PREPARING');
+    setStatusTone('info');
+    setIsBusy(true);
     try {
       const res = await exportDocumentPdf({
         title: pdfTitle || title,
         pageSize: paperSize,
+        snapshot: activeSnapshot,
+        onStatusChange: (next) => setSaveState(next),
       });
-      if (res.mode === 'ELECTRON_PDF' && !res.canceled && res.path) {
-        setExportStatus(`تم حفظ ملف PDF بنجاح: ${res.path}`);
+      setSaveState(res.status);
+      setStatusMessage(res.message);
+      if (res.status === 'SAVED') {
+        setStatusTone('success');
+      } else if (res.status === 'CANCELED') {
+        setStatusTone('warning');
+      } else {
+        setStatusTone('error');
       }
     } catch (err: unknown) {
-      setExportStatus(err instanceof Error ? err.message : 'تعذر تصدير ملف PDF');
+      setSaveState('CREATE_FAILED');
+      setStatusMessage(err instanceof Error ? err.message : 'تعذر تصدير ملف PDF.');
+      setStatusTone('error');
     } finally {
-      setIsExporting(false);
+      setIsBusy(false);
+    }
+  };
+
+  const handleExportPng = async () => {
+    if (isBusy || !activeSnapshot) return;
+    if (pngSpec && !pngSpec.allowSinglePng) {
+      setStatusMessage(
+        pngSpec.rejectionReasonForPng ||
+          'المستند طويل أو متعدد الصفحات؛ يجب حفظه بصيغة PDF بدلاً من صورة PNG واحدة.'
+      );
+      setStatusTone('warning');
+      return;
+    }
+
+    setStatusMessage(null);
+    setSaveState('PREPARING');
+    setStatusTone('info');
+    setIsBusy(true);
+    try {
+      const res = await exportDocumentPng({
+        snapshot: activeSnapshot,
+        onStatusChange: (next) => setSaveState(next),
+      });
+      setSaveState(res.status);
+      setStatusMessage(res.message);
+      if (res.status === 'SAVED') {
+        setStatusTone('success');
+      } else if (res.status === 'CANCELED') {
+        setStatusTone('warning');
+      } else {
+        setStatusTone('error');
+      }
+    } catch (err: unknown) {
+      setSaveState('CREATE_FAILED');
+      setStatusMessage(err instanceof Error ? err.message : 'تعذر تصدير صورة PNG.');
+      setStatusTone('error');
+    } finally {
+      setIsBusy(false);
     }
   };
 
   const portalRoot = ensurePortalRoot();
   if (!portalRoot) return null;
 
-  const isThermal = paperSize === '80mm';
+  const is58 = paperSize === '58mm';
+  const is80 = paperSize === '80mm';
+  const isThermal = is58 || is80;
+
+  const bannerColors =
+    statusTone === 'success'
+      ? 'bg-emerald-50 border-emerald-200 text-emerald-900'
+      : statusTone === 'warning'
+      ? 'bg-amber-50 border-amber-200 text-amber-900'
+      : statusTone === 'error'
+      ? 'bg-rose-50 border-rose-200 text-rose-900'
+      : 'bg-slate-100 border-slate-200 text-slate-800';
 
   const modalContent = (
     <div
@@ -119,7 +216,7 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
     >
       <div
         className={`doc-modal-card relative w-full bg-white rounded-xl shadow-2xl border border-slate-200 my-2 sm:my-4 overflow-hidden print:shadow-none print:border-none print:max-w-none print:w-full print:my-0 print:rounded-none ${
-          isThermal ? 'max-w-[390px]' : 'max-w-[920px]'
+          isThermal ? 'max-w-[740px]' : 'max-w-[940px]'
         }`}
       >
         {/* Modal Preview Toolbar (Hidden in print) */}
@@ -166,6 +263,19 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
                   <Receipt className="w-3 h-3" />
                   <span>80mm</span>
                 </button>
+                <button
+                  type="button"
+                  onClick={() => setPaperSize('58mm')}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-md text-[11px] font-bold transition-colors ${
+                    paperSize === '58mm'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-300 hover:text-white'
+                  }`}
+                  title="معاينة وطباعة بمقاس إيصال حراري 58mm"
+                >
+                  <Receipt className="w-3 h-3" />
+                  <span>58mm</span>
+                </button>
               </div>
             )}
 
@@ -180,21 +290,43 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
               </button>
             )}
 
+            {activeSnapshot && (
+              <button
+                type="button"
+                onClick={handleExportPng}
+                disabled={isBusy || (pngSpec ? !pngSpec.allowSinglePng : false)}
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
+                title={
+                  pngSpec && !pngSpec.allowSinglePng
+                    ? pngSpec.rejectionReasonForPng
+                    : 'حفظ المستند النظيف كصورة PNG'
+                }
+              >
+                <ImageIcon className="w-3.5 h-3.5" />
+                <span>حفظ PNG</span>
+              </button>
+            )}
+
             <button
               type="button"
               onClick={handleExportPdf}
-              disabled={isExporting}
+              disabled={isBusy}
               className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-50"
               title="حفظ المستند بصيغة PDF"
             >
               <FileDown className="w-3.5 h-3.5" />
-              <span>{isExporting ? 'جارٍ التصدير...' : 'حفظ PDF'}</span>
+              <span>
+                {isBusy && (saveState === 'PREPARING' || saveState === 'SAVING')
+                  ? getSaveStatusLabel(saveState)
+                  : 'حفظ PDF'}
+              </span>
             </button>
 
             <button
               type="button"
               onClick={handlePrint}
-              className="flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-900 text-[11px] font-extrabold rounded-lg transition-colors"
+              disabled={isBusy}
+              className="flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-900 text-[11px] font-extrabold rounded-lg transition-colors disabled:opacity-50"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>طباعة ({paperSize})</span>
@@ -211,13 +343,26 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
           </div>
         </div>
 
-        {exportStatus && (
-          <div className="no-print px-4 py-2 bg-slate-100 border-b border-slate-200 text-[11px] font-semibold text-slate-800 flex items-center justify-between">
-            <span>{exportStatus}</span>
+        {(statusMessage || (saveState !== 'IDLE' && getSaveStatusLabel(saveState))) && (
+          <div
+            className={`no-print px-4 py-2 border-b text-[11px] font-semibold flex items-center justify-between gap-2 ${bannerColors}`}
+          >
+            <div className="flex items-center gap-2">
+              {saveState !== 'IDLE' && (
+                <span className="px-2 py-0.5 rounded bg-white/70 border border-current/20 text-[10px] font-extrabold">
+                  {getSaveStatusLabel(saveState)}
+                </span>
+              )}
+              <span>{statusMessage || getSaveStatusLabel(saveState)}</span>
+            </div>
             <button
               type="button"
-              onClick={() => setExportStatus(null)}
-              className="text-slate-500 hover:text-slate-900"
+              onClick={() => {
+                setStatusMessage(null);
+                setSaveState('IDLE');
+              }}
+              className="opacity-70 hover:opacity-100"
+              aria-label="إخفاء الحالة"
             >
               <X className="w-3.5 h-3.5" />
             </button>
@@ -228,7 +373,9 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
         <div className="bg-slate-100/70 p-2 sm:p-5 print:p-0 print:bg-white">
           <div
             className={`printable-area mx-auto bg-white text-slate-900 border border-slate-200 shadow-xs print:border-none print:shadow-none ${
-              isThermal
+              is58
+                ? 'doc-sheet-58mm w-[54mm] max-w-full p-2 rounded-lg'
+                : isThermal
                 ? 'doc-sheet-80mm w-[76mm] max-w-full p-3 rounded-lg'
                 : 'doc-sheet-a4 w-full p-5 sm:p-8 rounded-lg'
             }`}

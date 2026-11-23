@@ -260,7 +260,9 @@ describe('Inventory Valuation (INV-02), Opening/Adjustment JVs (INV-01) & Archiv
         partyName: 'عميل نقدي',
         items: [
           {
+            id: 'item-inv03-lock-1',
             productId: 'inv03-p1',
+            productCode: 'GRO-P1',
             productName: 'زيت زيتون',
             quantity: 1,
             unitPrice: 30,

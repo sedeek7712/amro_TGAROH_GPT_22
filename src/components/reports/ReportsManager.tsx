@@ -550,10 +550,10 @@ export const ReportsManager: React.FC = () => {
                     <td className="py-2.5 px-3 font-bold text-slate-900">{row.nameAr}</td>
                     <td className="py-2.5 px-3 text-slate-500 text-[11px]">{row.type}</td>
                     <td className="py-2.5 px-3 text-center font-mono tabular-nums">
-                      {row.debit > 0 ? `${row.debit.toFixed(2)} {currencySymbol}` : '-'}
+                      {row.debit > 0 ? `${row.debit.toFixed(2)} ${currencySymbol}` : '-'}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono tabular-nums">
-                      {row.credit > 0 ? `${row.credit.toFixed(2)} {currencySymbol}` : '-'}
+                      {row.credit > 0 ? `${row.credit.toFixed(2)} ${currencySymbol}` : '-'}
                     </td>
                     <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
                       {row.balance.toFixed(2)} {currencySymbol}

@@ -52,14 +52,16 @@ export function buildPartyStatement(params: {
     endDate,
   } = params;
 
-  const partyInvoices = invoices.filter(
-    (inv) =>
+  const partyInvoices = invoices.filter((inv) => {
+    const invStatus = String(inv.status || 'POSTED');
+    return (
       inv.partyId === party.id &&
-      inv.status !== 'REVERSED' &&
-      inv.status !== 'DRAFT' &&
-      inv.status !== 'CANCELLED' &&
+      invStatus !== 'REVERSED' &&
+      invStatus !== 'DRAFT' &&
+      invStatus !== 'CANCELLED' &&
       inv.isPosted !== false
-  );
+    );
+  });
   const partyVouchers = vouchers.filter(
     (v) =>
       v.partyId === party.id &&

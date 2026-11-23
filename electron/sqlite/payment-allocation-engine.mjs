@@ -510,14 +510,28 @@ function convertIntegerToArabic(num) {
   return segments.join(' و');
 }
 
-export function numberToArabicWords(amount, currencyName = 'ريال') {
+function resolveArabicSubUnit(currencyName, explicitSubUnit) {
+  if (typeof explicitSubUnit === 'string' && explicitSubUnit.trim()) {
+    return explicitSubUnit.trim();
+  }
+  const normalized = String(currencyName || '');
+  if (normalized.includes('دولار')) return 'سنت';
+  if (normalized.includes('جنيه')) return 'قرش';
+  if (normalized.includes('يمني') || normalized.includes('درهم') || normalized.includes('دينار')) {
+    return 'فلس';
+  }
+  return 'هللة';
+}
+
+export function numberToArabicWords(amount, currencyName = 'ريال', subUnitName = undefined) {
   const cents = Math.abs(toCents(amount));
   const whole = Math.floor(cents / 100);
   const frac = cents % 100;
   const wholeWords = convertIntegerToArabic(whole);
   if (frac > 0) {
     const fracWords = convertIntegerToArabic(frac);
-    return `فقط ${wholeWords} ${currencyName} و${fracWords} هللة لا غير`;
+    const subUnit = resolveArabicSubUnit(currencyName, subUnitName);
+    return `فقط ${wholeWords} ${currencyName} و${fracWords} ${subUnit} لا غير`;
   }
   return `فقط ${wholeWords} ${currencyName} لا غير`;
 }

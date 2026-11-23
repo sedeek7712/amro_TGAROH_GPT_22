@@ -588,11 +588,10 @@ describe('Dexie Payment Allocations, Advances (2103/1105), Voucher Lifecycle & R
     await dexieDataService.createCashBoxAtomic({
       id: 'cb-pos-2',
       code: 'POS-2',
-      type: 'CASH',
       nameAr: 'صندوق الكاشير الثاني',
       accountCode: '1101',
       balance: 1000,
-      currency: 'YER',
+      isDefault: false,
       branchId: 'branch_main',
     });
 

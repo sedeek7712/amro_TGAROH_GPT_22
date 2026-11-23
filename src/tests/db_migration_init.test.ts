@@ -272,6 +272,24 @@ describe('DB InitState, Non-Destructive Migration, Atomic Backup & Currency Test
     const restoredInv = await db.invoices.get('leg-inv-1');
     assert.equal(restoredInv?.status, 'POSTED');
     assert.equal(restoredInv?.advanceAppliedAmount, 0);
+
+    // Incomplete backup missing required core tables (e.g. accounts) must fail without wiping live DB
+    const incompleteData = { products: [], parties: [] };
+    const incSer = JSON.stringify(incompleteData);
+    let incChecksum = 0;
+    for (let i = 0; i < incSer.length; i++) {
+      incChecksum = (incChecksum + incSer.charCodeAt(i) * (i + 1)) % 1000000007;
+    }
+    const incompleteRes = await dexieDataService.importBackupJSON(
+      JSON.stringify({
+        systemIdentifier: 'multi_activity_erp',
+        version: '2.0.0',
+        checksum: incChecksum.toString(16),
+        data: incompleteData,
+      })
+    );
+    assert.equal(incompleteRes.success, false);
+    assert.equal((await db.products.get('legacy-prod-1'))?.id, 'legacy-prod-1');
   });
 });
 

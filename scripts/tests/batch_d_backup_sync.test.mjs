@@ -436,7 +436,7 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
         branch_id: 'branch_main',
         party_id: supplier.id,
         party_type: 'SUPPLIER',
-        tx_type: 'ADVANCE_CREATED',
+        tx_type: 'OVERPAYMENT_DEPOSIT',
         amount: 40,
         balance_after: 40,
         tx_date: '2026-11-22',

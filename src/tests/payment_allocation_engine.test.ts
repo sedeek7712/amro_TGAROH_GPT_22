@@ -241,9 +241,12 @@ describe('Payment Allocation & Advance Engine Unit Tests', () => {
     );
   });
 
-  test('numberToArabicWords formats integer and decimal halalas accurately', () => {
+  test('numberToArabicWords formats integer and currency-aware fractional units accurately', () => {
     assert.equal(numberToArabicWords(100, 'ريال'), 'فقط مائة ريال لا غير');
     assert.equal(numberToArabicWords(2500.5, 'ريال'), 'فقط ألفان وخمسمائة ريال وخمسون هللة لا غير');
+    assert.equal(numberToArabicWords(10.25, 'ريال يمني'), 'فقط عشرة ريال يمني وخمسة وعشرون فلس لا غير');
+    assert.equal(numberToArabicWords(10.75, 'دولار أمريكي'), 'فقط عشرة دولار أمريكي وخمسة وسبعون سنت لا غير');
+    assert.equal(numberToArabicWords(5.1, 'جنيه مصري'), 'فقط خمسة جنيه مصري وعشرة قرش لا غير');
   });
 
   test('FIN-01: Manual allocation and openTotalCents deduct returnedAmount so returned portion becomes customer advance (2103)', () => {

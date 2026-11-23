@@ -3525,6 +3525,30 @@ export class DexieDataService implements IDataService {
       }
 
       const d = parsed.data;
+      const requiredKeys = [
+        'accounts',
+        'products',
+        'parties',
+        'invoices',
+        'journalEntries',
+        'cashBoxes',
+        'vouchers',
+        'users',
+      ];
+      for (const key of requiredKeys) {
+        if (!Array.isArray(d[key])) {
+          return {
+            success: false,
+            error: `النسخة الاحتياطية ناقصة: القائمة (${key}) غير موجودة أو غير صالحة.`,
+          };
+        }
+        if (!d[key].every((row: unknown) => Boolean(row) && typeof row === 'object' && !Array.isArray(row))) {
+          return {
+            success: false,
+            error: `توجد سجلات غير صالحة في القائمة (${key}) داخل النسخة الاحتياطية.`,
+          };
+        }
+      }
       const batchMap = new Map<string, ProductBatch>();
       if (Array.isArray(d.productBatches)) {
         for (const b of d.productBatches as ProductBatch[]) {

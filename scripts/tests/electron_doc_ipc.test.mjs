@@ -5,6 +5,7 @@ import path from 'node:path';
 import test from 'node:test';
 import {
   classifyFsErrorStatus,
+  copyShareTempPngToClipboardOnDisk,
   executeCleanupShareTempFileIpc,
   executeExportPdfIpc,
   executeExportPngIpc,
@@ -419,6 +420,67 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
     });
     assert.equal(waFail.opened, false);
     assert.ok(waFail.error.includes('No handler'));
+  } finally {
+    rmSync(workDir, { recursive: true, force: true });
+  }
+});
+
+test('DOC-004-09: prepared PNG invoice can be copied to the OS clipboard with text metadata, while PDF is rejected', () => {
+  const workDir = mkdtempSync(path.join(os.tmpdir(), 'amro-share-clipboard-'));
+  const tempDir = path.join(workDir, 'AmroErpShareTemp');
+  const shareTempFiles = new Map();
+  let clipboardPayload = null;
+
+  try {
+    const png = prepareShareTempFileOnDisk({
+      tempDir,
+      shareTempFiles,
+      input: {
+        fileName: 'INVOICE-CLIPBOARD.png',
+        bytesBase64: makeValidPngBuffer().toString('base64'),
+        mimeType: 'image/png',
+      },
+    });
+    const copied = copyShareTempPngToClipboardOnDisk({
+      tempDir,
+      shareTempFiles,
+      tempToken: png.tempToken,
+      messageText: 'فاتورة رقم INV-CLIPBOARD',
+      nativeImage: {
+        createFromPath(filePath) {
+          assert.ok(existsSync(filePath));
+          return { filePath, isEmpty: () => false };
+        },
+      },
+      clipboard: {
+        write(payload) { clipboardPayload = payload; },
+      },
+    });
+
+    assert.equal(copied.copied, true);
+    assert.equal(copied.imageCopied, true);
+    assert.equal(clipboardPayload.text, 'فاتورة رقم INV-CLIPBOARD');
+    assert.ok(clipboardPayload.image.filePath.endsWith('INVOICE-CLIPBOARD.png'));
+
+    const pdf = prepareShareTempFileOnDisk({
+      tempDir,
+      shareTempFiles,
+      input: {
+        fileName: 'INVOICE-CLIPBOARD.pdf',
+        bytesBase64: makeValidPdfBuffer().toString('base64'),
+        mimeType: 'application/pdf',
+      },
+    });
+    const rejectedPdf = copyShareTempPngToClipboardOnDisk({
+      tempDir,
+      shareTempFiles,
+      tempToken: pdf.tempToken,
+      messageText: 'فاتورة PDF',
+      nativeImage: { createFromPath() { throw new Error('Must not be called'); } },
+      clipboard: { write() { throw new Error('Must not be called'); } },
+    });
+    assert.equal(rejectedPdf.copied, false);
+    assert.match(rejectedPdf.error, /PNG فقط/);
   } finally {
     rmSync(workDir, { recursive: true, force: true });
   }

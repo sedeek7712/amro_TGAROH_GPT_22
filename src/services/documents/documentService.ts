@@ -15,7 +15,7 @@ import type {
   SystemUser,
 } from '../../types/erp';
 import { roundMoney } from '../../config/currency';
-import { hasPermission } from '../../config/rbac';
+import { hasPermission, type Permission } from '../../config/rbac';
 import { numberToArabicWords } from '../../../electron/sqlite/payment-allocation-engine.mjs';
 import type { ResolvedDocumentHeader } from '../../utils/documentBranding';
 import { formatLocalDate, formatLocalDateTime } from '../../utils/localDate';
@@ -152,36 +152,45 @@ export function validateShareAuthorization(params: {
   actualRecipientName?: string;
 }): { allowed: boolean; error?: string } {
   const { actor, documentKind, expectedPartyName, actualRecipientName } = params;
-  if (actor) {
-    if (documentKind === 'REPORT') {
-      if (!hasPermission(actor, 'view:reports')) {
-        return { allowed: false, error: 'ليست لديك صلاحية تصدير أو مشاركة هذا التقرير.' };
-      }
-    } else if (documentKind === 'JOURNAL') {
-      if (!hasPermission(actor, 'view:accounting')) {
-        return { allowed: false, error: 'ليست لديك صلاحية تصدير أو مشاركة القيود المحاسبية.' };
-      }
-    } else if (documentKind === 'AMANAT_RECEIPT' || documentKind === 'AMANAT_RETURN') {
-      if (!hasPermission(actor, 'amanat:view')) {
-        return { allowed: false, error: 'ليست لديك صلاحية مشاركة مستندات الأمانات.' };
-      }
-    }
+
+  if (!actor || !actor.active) {
+    return { allowed: false, error: 'لا يمكن مشاركة المستند دون جلسة مستخدم نشطة ومصادق عليها.' };
   }
 
-  if (
-    expectedPartyName &&
-    actualRecipientName &&
-    expectedPartyName.trim() !== actualRecipientName.trim()
-  ) {
+  const requiredPermissionByKind: Record<DocumentKind, Permission> = {
+    SALE: 'invoices:view',
+    RETURN_SALE: 'invoices:view',
+    PURCHASE: 'invoices:view',
+    RETURN_PURCHASE: 'invoices:view',
+    RECEIPT_VOUCHER: 'voucher:receipt',
+    PAYMENT_VOUCHER: 'voucher:payment',
+    AMANAT_RECEIPT: 'amanat:view',
+    AMANAT_RETURN: 'amanat:view',
+    STATEMENT: 'party:view',
+    JOURNAL: 'view:accounting',
+    REPORT: 'view:reports',
+  };
+  const requiredPermission = requiredPermissionByKind[documentKind];
+  if (!requiredPermission || !hasPermission(actor, requiredPermission)) {
     return {
       allowed: false,
-      error: 'عدم تطابق اسم المستلم مع صاحب المستند؛ أوقفت المشاركة منعاً لتسريب بيانات عميل آخر.',
+      error: 'ليست لديك الصلاحية اللازمة لمشاركة هذا النوع من المستندات.',
     };
+  }
+
+  if (expectedPartyName !== undefined) {
+    const expected = String(expectedPartyName).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    const actual = String(actualRecipientName || '').normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    if (!expected || !actual || expected !== actual) {
+      return {
+        allowed: false,
+        error: 'عدم تطابق اسم المستلم مع صاحب المستند؛ أوقفت المشاركة منعاً لتسريب بيانات طرف آخر.',
+      };
+    }
   }
 
   return { allowed: true };
 }
-
 export function buildInvoiceDocumentSnapshot(params: {
   invoice: Invoice;
   meta: ResolvedDocumentHeader;

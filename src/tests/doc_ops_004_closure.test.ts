@@ -383,6 +383,10 @@ test('DOC-004-03: Clipboard failures are never falsified & modal ref fallback ex
       messageText: 'نص الإشعار',
       recipientPhone: '771112233',
       recipientName: snap.partyName || 'عميل الاختبار',
+    actor: {
+      id: 'u-test', username: 'tester', fullName: 'محاسب الاختبار', role: 'ADMIN',
+      allowedActivities: ['grocery'], branchId: 'branch_main', active: true,
+    },
     });
     const outcome = await executeWhatsAppOrNativeShare({
       snapshot: snap,
@@ -724,6 +728,10 @@ test('DOC-004-09: Android Web Share API MIME probes, AbortError CANCELED, and No
       messageText: 'مشاركة',
       recipientPhone: '770001122',
       recipientName: snap.partyName || 'عميل الاختبار',
+    actor: {
+      id: 'u-test', username: 'tester', fullName: 'محاسب الاختبار', role: 'ADMIN',
+      allowedActivities: ['grocery'], branchId: 'branch_main', active: true,
+    },
     });
     const abortOutcome = await executeWhatsAppOrNativeShare({
       snapshot: snap,

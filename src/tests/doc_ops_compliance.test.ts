@@ -34,6 +34,7 @@ import {
   buildWhatsAppLaunchUrl,
   executeWhatsAppOrNativeShare,
   formatWhatsAppPhone,
+  maskWhatsAppPhone,
   prepareSharePackage,
   supportsNativeFileShare,
 } from '../services/documents/shareService';
@@ -311,7 +312,12 @@ test('DOC-OPS-001: NotificationLogService records valid statuses, strips raw pat
 test('DOC-OPS-001: Share authorization, phone normalization, native share probe, and 7 save states behave strictly', () => {
   assert.equal(formatWhatsAppPhone('0551234567'), '966551234567');
   assert.equal(formatWhatsAppPhone('771234567'), '967771234567');
+  assert.equal(formatWhatsAppPhone('+967 771 234 567'), '967771234567');
+  assert.equal(formatWhatsAppPhone('00967 771 234 567'), '967771234567');
+  assert.equal(formatWhatsAppPhone('77123'), '');
+  assert.equal(maskWhatsAppPhone('771234567'), '967••••4567');
   assert.ok(buildWhatsAppLaunchUrl('771234567', 'مرحبا').startsWith('https://wa.me/967771234567'));
+  assert.throws(() => buildWhatsAppLaunchUrl('غير صالح', 'مرحبا'), /رقم واتساب غير صالح/);
   assert.equal(supportsNativeFileShare('image/png'), false);
 
   const cashier: SystemUser = {
@@ -329,13 +335,49 @@ test('DOC-OPS-001: Share authorization, phone normalization, native share probe,
   });
   assert.equal(blockedReportShare.allowed, false);
 
-  const mismatchedParty = validateShareAuthorization({
+  const noActorShare = validateShareAuthorization({ documentKind: 'REPORT' });
+  assert.equal(noActorShare.allowed, false);
+  const inactiveShare = validateShareAuthorization({
+    actor: { ...cashier, active: false },
+    documentKind: 'SALE',
+  });
+  assert.equal(inactiveShare.allowed, false);
+  const permittedSaleShare = validateShareAuthorization({
     actor: cashier,
+    documentKind: 'SALE',
+    expectedPartyName: 'عميل أ',
+    actualRecipientName: 'عميل أ',
+  });
+  assert.equal(permittedSaleShare.allowed, true);
+
+  const adminForShare: SystemUser = {
+    ...cashier,
+    id: 'u-admin',
+    username: 'admin',
+    role: 'ADMIN',
+  };
+  const mismatchedParty = validateShareAuthorization({
+    actor: adminForShare,
     documentKind: 'RECEIPT_VOUCHER',
     expectedPartyName: 'عميل أ',
     actualRecipientName: 'عميل ب',
   });
   assert.equal(mismatchedParty.allowed, false);
+
+  const blockedVoucherShare = validateShareAuthorization({
+    actor: cashier,
+    documentKind: 'RECEIPT_VOUCHER',
+    expectedPartyName: 'عميل أ',
+    actualRecipientName: 'عميل أ',
+  });
+  assert.equal(blockedVoucherShare.allowed, false);
+
+  const missingRecipientName = validateShareAuthorization({
+    actor: adminForShare,
+    documentKind: 'RECEIPT_VOUCHER',
+    expectedPartyName: 'عميل أ',
+  });
+  assert.equal(missingRecipientName.allowed, false);
 
   for (const st of [
     'PREPARING',
@@ -348,6 +390,28 @@ test('DOC-OPS-001: Share authorization, phone normalization, native share probe,
   ] as const) {
     assert.ok(getSaveStatusLabel(st).length > 0);
   }
+});
+
+test('DOC-OPS-WA-01: dispatch events retain a shared correlation ID and masked recipient number', async () => {
+  clearDocumentOperationLogs();
+  await recordDocumentOperation({
+    operationType: 'SHARE',
+    status: 'PREPARED',
+    documentId: 'doc-wa-01',
+    documentNumber: 'RCT-WA-01',
+    documentType: 'RECEIPT_VOUCHER',
+    dispatchId: 'dispatch-wa-01',
+    recipientPhoneMasked: '967••••4567',
+    recipientName: 'عميل الاختبار',
+    channel: 'WHATSAPP',
+    syncAudit: false,
+  });
+
+  const logs = getDocumentOperationLogs({ dispatchId: 'dispatch-wa-01' });
+  assert.equal(logs.length, 1);
+  assert.equal(logs[0].dispatchId, 'dispatch-wa-01');
+  assert.equal(logs[0].recipientPhoneMasked, '967••••4567');
+  assert.ok(!JSON.stringify(logs[0]).includes('967771234567'));
 });
 
 test('Zero Accounting Impact Invariance: Generating snapshots, notifications, PDFs, and logs does not alter balances or numbers', async () => {
@@ -846,6 +910,10 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
       messageText: 'سند رقم RCT-4001',
       recipientPhone: '771112233',
       recipientName: 'سعيد محمد',
+    actor: {
+      id: 'u-test', username: 'tester', fullName: 'محاسب الاختبار', role: 'ADMIN',
+      allowedActivities: ['grocery'], branchId: 'branch_main', active: true,
+    },
     });
     assert.equal(onlinePkg.tempToken, 'tmp-tok-1');
     const onlineOutcome = await executeWhatsAppOrNativeShare({
@@ -884,6 +952,10 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
       messageText: 'رسالة أوفلاين',
       recipientPhone: '771112233',
       recipientName: 'سعيد محمد',
+    actor: {
+      id: 'u-test', username: 'tester', fullName: 'محاسب الاختبار', role: 'ADMIN',
+      allowedActivities: ['grocery'], branchId: 'branch_main', active: true,
+    },
     });
     assert.equal(offlinePkg.isOffline, true);
     const offlineOutcome = await executeWhatsAppOrNativeShare({
@@ -914,6 +986,10 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
       messageText: 'مشاركة أندرويد',
       recipientPhone: '771112233',
       recipientName: 'سعيد محمد',
+    actor: {
+      id: 'u-test', username: 'tester', fullName: 'محاسب الاختبار', role: 'ADMIN',
+      allowedActivities: ['grocery'], branchId: 'branch_main', active: true,
+    },
     });
     const abortOutcome = await executeWhatsAppOrNativeShare({
       snapshot: voucherSnap,

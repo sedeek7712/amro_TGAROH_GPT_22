@@ -33,6 +33,7 @@ export interface PreparedSharePackage {
   canShareFilesNatively: boolean;
   isDesktopElectron: boolean;
   tempToken?: string;
+  dispatchId: string;
 }
 
 export interface ShareExecutionOutcome {
@@ -82,30 +83,48 @@ export async function copyTextToClipboard(
 }
 
 export function formatWhatsAppPhone(rawPhone: string): string {
-  let cleanPhone = String(rawPhone || '').replace(/[^\d+]/g, '');
-  if (cleanPhone.startsWith('05')) {
-    cleanPhone = '966' + cleanPhone.slice(1);
-  } else if (cleanPhone.startsWith('7') && cleanPhone.length === 9) {
-    cleanPhone = '967' + cleanPhone;
+  const raw = String(rawPhone || '').trim();
+  let digits = raw.replace(/\D/g, '');
+  if (digits.startsWith('00')) {
+    digits = digits.slice(2);
   }
-  return cleanPhone.replace(/^\+/, '');
+
+  if (digits.startsWith('05') && digits.length === 10) {
+    digits = '966' + digits.slice(1);
+  } else if (digits.startsWith('5') && digits.length === 9) {
+    digits = '966' + digits;
+  } else if (digits.startsWith('7') && digits.length === 9) {
+    digits = '967' + digits;
+  }
+
+  return /^[1-9]\d{7,14}$/.test(digits) ? digits : '';
+}
+
+export function maskWhatsAppPhone(rawPhone: string): string {
+  const normalized = formatWhatsAppPhone(rawPhone);
+  if (!normalized) return '';
+  return `${normalized.slice(0, 3)}••••${normalized.slice(-4)}`;
+}
+
+function createDispatchId(): string {
+  if (typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+  return `wa_${Date.now()}_${Math.random().toString(36).slice(2, 12)}`;
 }
 
 export function buildWhatsAppLaunchUrl(phone: string, text: string): string {
   const cleanPhone = formatWhatsAppPhone(phone);
-  const encoded = encodeURIComponent(text);
-  return cleanPhone
-    ? `https://wa.me/${cleanPhone}?text=${encoded}`
-    : `https://api.whatsapp.com/send?text=${encoded}`;
+  if (!cleanPhone) throw new Error('رقم واتساب غير صالح؛ أدخل الرقم مع مفتاح الدولة.');
+  return `https://wa.me/${cleanPhone}?text=${encodeURIComponent(text)}`;
 }
 
 export function buildWhatsAppDesktopProtocolUrl(phone: string, text: string): string {
   const cleanPhone = formatWhatsAppPhone(phone);
-  const encoded = encodeURIComponent(text);
-  return cleanPhone
-    ? `whatsapp://send?phone=${cleanPhone}&text=${encoded}`
-    : `whatsapp://send?text=${encoded}`;
+  if (!cleanPhone) throw new Error('رقم واتساب غير صالح؛ أدخل الرقم مع مفتاح الدولة.');
+  return `whatsapp://send?phone=${cleanPhone}&text=${encodeURIComponent(text)}`;
 }
+
 
 /**
  * فحص صارم لدعم مشاركة الملفات فعلياً (البند 7.3)
@@ -156,10 +175,17 @@ export async function prepareSharePackage(params: {
   messageText: string;
   recipientPhone: string;
   recipientName: string;
-  actor?: SystemUser | null;
+  actor: SystemUser | null;
 }): Promise<PreparedSharePackage> {
   const { snapshot, preferredFormat = 'AUTO', messageText, recipientPhone, recipientName, actor } =
     params;
+  if (!actor || !actor.active) {
+    throw new Error('لا يمكن تجهيز مشاركة المستند دون مستخدم نشط ومصادق عليه.');
+  }
+  const normalizedPhone = formatWhatsAppPhone(recipientPhone);
+  if (!normalizedPhone) throw new Error('رقم واتساب غير صالح؛ تحقق من الرقم ومفتاح الدولة.');
+  if (!String(messageText || '').trim()) throw new Error('نص رسالة واتساب فارغ.');
+  if (!String(recipientName || '').trim()) throw new Error('اسم مستلم المستند غير محدد.');
 
   const authCheck = validateShareAuthorization({
     actor,
@@ -170,6 +196,8 @@ export async function prepareSharePackage(params: {
   if (!authCheck.allowed) {
     throw new Error(authCheck.error || 'غير مصرح بمشاركة هذا المستند.');
   }
+
+  const dispatchId = createDispatchId();
 
   let targetFormat: 'PNG' | 'PDF';
   if (preferredFormat === 'PDF' || snapshot.isMultiPage || snapshot.documentKind === 'REPORT') {
@@ -216,6 +244,7 @@ export async function prepareSharePackage(params: {
     const token = desktopSession.requireToken();
     const prep = await window.amroDesktop.prepareShareTempFile({
       token,
+      documentKind: snapshot.documentKind,
       fileName,
       bytesBase64: uint8ToBase64(bytes),
       mimeType: file.type,
@@ -232,9 +261,12 @@ export async function prepareSharePackage(params: {
     documentId: snapshot.documentId,
     documentNumber: snapshot.documentNumber,
     documentType: snapshot.documentKind,
-    userId: actor?.id,
-    userName: actor?.fullName || snapshot.meta.issuerName,
-    branchId: snapshot.meta.branchName,
+    dispatchId,
+    recipientPhoneMasked: maskWhatsAppPhone(normalizedPhone),
+    userId: actor.id,
+    userName: actor.fullName || snapshot.meta.issuerName,
+    branchId: actor.branchId || 'branch_main',
+    branchName: snapshot.meta.branchName,
     activityName: snapshot.meta.activityName,
     fileName,
     recipientName,
@@ -248,9 +280,10 @@ export async function prepareSharePackage(params: {
     fileName,
     sizeBytes: file.size,
     messageText,
-    recipientPhone,
-    whatsappUrl: buildWhatsAppLaunchUrl(recipientPhone, messageText),
-    whatsappProtocolUrl: buildWhatsAppDesktopProtocolUrl(recipientPhone, messageText),
+    recipientPhone: normalizedPhone,
+    dispatchId,
+    whatsappUrl: buildWhatsAppLaunchUrl(normalizedPhone, messageText),
+    whatsappProtocolUrl: buildWhatsAppDesktopProtocolUrl(normalizedPhone, messageText),
     isOffline: !networkMonitor.isOnline(),
     canShareFilesNatively: supportsNativeFileShare(file.type),
     isDesktopElectron,
@@ -299,8 +332,14 @@ export async function executeWhatsAppOrNativeShare(params: {
         documentId: snapshot.documentId,
         documentNumber: snapshot.documentNumber,
         documentType: snapshot.documentKind,
+        dispatchId: pkg.dispatchId,
+        recipientPhoneMasked: maskWhatsAppPhone(pkg.recipientPhone),
         userId: actor?.id,
         userName: actor?.fullName,
+
+        branchId: actor?.branchId || 'branch_main',
+
+        branchName: snapshot.meta.branchName,
         fileName: pkg.fileName,
         recipientName,
         channel: 'WEB_SHARE',
@@ -326,8 +365,14 @@ export async function executeWhatsAppOrNativeShare(params: {
           documentId: snapshot.documentId,
           documentNumber: snapshot.documentNumber,
           documentType: snapshot.documentKind,
+        dispatchId: pkg.dispatchId,
+        recipientPhoneMasked: maskWhatsAppPhone(pkg.recipientPhone),
           userId: actor?.id,
           userName: actor?.fullName,
+
+          branchId: actor?.branchId || 'branch_main',
+
+          branchName: snapshot.meta.branchName,
           fileName: pkg.fileName,
           recipientName,
           channel: 'WEB_SHARE',
@@ -381,12 +426,18 @@ export async function executeWhatsAppOrNativeShare(params: {
 
       await recordDocumentOperation({
         operationType: 'SHARE',
-        status: waOpenResult.opened ? 'WHATSAPP_LAUNCHED' : 'SHARE_OPENED',
+        status: waOpenResult.opened ? 'WHATSAPP_LAUNCHED' : 'FAILED',
         documentId: snapshot.documentId,
         documentNumber: snapshot.documentNumber,
         documentType: snapshot.documentKind,
+        dispatchId: pkg.dispatchId,
+        recipientPhoneMasked: maskWhatsAppPhone(pkg.recipientPhone),
         userId: actor?.id,
         userName: actor?.fullName,
+
+        branchId: actor?.branchId || 'branch_main',
+
+        branchName: snapshot.meta.branchName,
         fileName: pkg.fileName,
         recipientName,
         failureReason: waOpenResult.opened ? undefined : waOpenResult.error,
@@ -439,8 +490,14 @@ export async function executeWhatsAppOrNativeShare(params: {
       documentId: snapshot.documentId,
       documentNumber: snapshot.documentNumber,
       documentType: snapshot.documentKind,
+        dispatchId: pkg.dispatchId,
+        recipientPhoneMasked: maskWhatsAppPhone(pkg.recipientPhone),
       userId: actor?.id,
       userName: actor?.fullName,
+
+      branchId: actor?.branchId || 'branch_main',
+
+      branchName: snapshot.meta.branchName,
       fileName: pkg.fileName,
       recipientName,
       failureReason: nativeShareFailureNote || clipResult.error,
@@ -477,8 +534,14 @@ export async function executeWhatsAppOrNativeShare(params: {
       documentId: snapshot.documentId,
       documentNumber: snapshot.documentNumber,
       documentType: snapshot.documentKind,
+      dispatchId: pkg.dispatchId,
+      recipientPhoneMasked: maskWhatsAppPhone(pkg.recipientPhone),
       userId: actor?.id,
       userName: actor?.fullName,
+
+      branchId: actor?.branchId || 'branch_main',
+
+      branchName: snapshot.meta.branchName,
       fileName: pkg.fileName,
       failureReason: reason,
       recipientName,

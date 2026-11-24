@@ -261,6 +261,28 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
     });
     assert.equal(emptyCleanup.removedFiles, 0);
 
+    // Reject malformed payloads and MIME/extension mismatches before writing to disk.
+    assert.throws(
+      () => prepareShareTempFileOnDisk({
+        tempDir,
+        shareTempFiles,
+        input: { fileName: 'bad.pdf', bytesBase64: '%%%%' },
+      }),
+      /Base64/
+    );
+    assert.throws(
+      () => prepareShareTempFileOnDisk({
+        tempDir,
+        shareTempFiles,
+        input: {
+          fileName: 'wrong.pdf',
+          bytesBase64: makeValidPdfBuffer().toString('base64'),
+          mimeType: 'image/png',
+        },
+      }),
+      /PNG/
+    );
+
     // Prepare real temp file
     const prepared = prepareShareTempFileOnDisk({
       tempDir,
@@ -310,8 +332,15 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
     });
     assert.equal(revealBlocked.revealed, false);
     assert.equal(revealBlocked.exists, false);
+    const cleanupBlocked = executeCleanupShareTempFileIpc({
+      tempDir,
+      shareTempFiles,
+      tempToken: 'evil-token',
+    });
+    assert.equal(cleanupBlocked.cleaned, true);
+    assert.equal(existsSync(outsideFile), true);
 
-    // Backdated (> 7 days) vs fresh file + subdirectory + symlink safety
+    // Backdated (> 7 days) vs fresh file + active-session expiry + subdirectory + symlink safety
     const stalePath = path.join(tempDir, 'stale-old.pdf');
     const freshPath = path.join(tempDir, 'fresh-new.pdf');
     const subDir = path.join(tempDir, 'nested-dir');
@@ -328,6 +357,7 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
     utimesSync(freshPath, twoDaysAgoSec, twoDaysAgoSec);
     const activePath = shareTempFiles.get(prepared.tempToken).path;
     utimesSync(activePath, eightDaysAgoSec, eightDaysAgoSec);
+    shareTempFiles.get(prepared.tempToken).createdAt = nowMs - 8 * 24 * 60 * 60 * 1000;
 
     const purged = purgeStaleShareTempFiles({
       tempDir,
@@ -335,11 +365,11 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
       retentionMs: SHARE_TEMP_RETENTION_MS,
       nowMs,
     });
-    assert.equal(purged.removedFiles, 1);
+    assert.equal(purged.removedFiles, 2);
     assert.equal(existsSync(stalePath), false);
     assert.equal(existsSync(freshPath), true);
-    assert.equal(existsSync(activePath), true);
-    assert.equal(shareTempFiles.has(prepared.tempToken), true);
+    assert.equal(existsSync(activePath), false);
+    assert.equal(shareTempFiles.has(prepared.tempToken), false);
     assert.equal(existsSync(subDir), true);
     assert.equal(existsSync(outsideFile), true);
 
@@ -366,6 +396,14 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
     );
     await assert.rejects(
       () => openAllowedWhatsAppUrl({ shell: { openExternal: async () => {} }, url: 'https://evil.example/wa', logger }),
+      /يُسمح فقط بروابط WhatsApp/
+    );
+    await assert.rejects(
+      () => openAllowedWhatsAppUrl({ shell: { openExternal: async () => {} }, url: 'https://wa.me.attacker.example/967771112233', logger }),
+      /يُسمح فقط بروابط WhatsApp/
+    );
+    await assert.rejects(
+      () => openAllowedWhatsAppUrl({ shell: { openExternal: async () => {} }, url: 'https://wa.me@evil.example/967771112233', logger }),
       /يُسمح فقط بروابط WhatsApp/
     );
     const waOk = await openAllowedWhatsAppUrl({

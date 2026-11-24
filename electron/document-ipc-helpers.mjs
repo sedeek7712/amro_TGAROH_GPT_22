@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 
 export const SHARE_TEMP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -539,6 +539,63 @@ export function revealShareTempFileOnDisk({ tempDir, shareTempFiles, shell, temp
       revealed: false,
       exists: true,
       error: err instanceof Error ? err.message : 'تعذر فتح مستعرض الملفات لعرض المرفق المؤقت.',
+    };
+  }
+}
+
+/**
+ * Copy a prepared PNG invoice to the operating-system clipboard without opening a browser
+ * or exposing an arbitrary file path to the renderer. The text is written as a secondary
+ * clipboard format; WhatsApp Desktop can paste the image, while the protocol URL pre-fills
+ * the message text in the selected chat.
+ */
+export function copyShareTempPngToClipboardOnDisk({
+  tempDir,
+  shareTempFiles,
+  clipboard,
+  nativeImage,
+  tempToken,
+  messageText,
+}) {
+  const entry = shareTempFiles?.get?.(String(tempToken || ''));
+  if (!entry?.path || !tempDir) {
+    return { copied: false, error: 'ملف صورة الفاتورة المؤقت غير موجود أو انتهت صلاحيته.' };
+  }
+
+  const resolvedBase = path.resolve(tempDir);
+  const resolvedPath = path.resolve(entry.path);
+  if (!isPathInsideDirectory(resolvedBase, resolvedPath) || !existsSync(resolvedPath)) {
+    return { copied: false, error: 'مسار صورة الفاتورة المؤقت غير صالح.' };
+  }
+
+  try {
+    const stat = statSync(resolvedPath);
+    if (!stat.isFile() || stat.size <= 32 || stat.size > MAX_SHARE_TEMP_FILE_BYTES) {
+      return { copied: false, error: 'حجم صورة الفاتورة غير صالح.' };
+    }
+    if (path.extname(resolvedPath).toLowerCase() !== '.png') {
+      return { copied: false, error: 'اللصق المباشر يدعم صورة PNG فقط؛ استخدم الملف المؤقت لإرفاق PDF.' };
+    }
+
+    const bytes = readFileSync(resolvedPath);
+    if (!hasValidPngHeader(bytes)) {
+      return { copied: false, error: 'محتوى المرفق ليس صورة PNG صالحة.' };
+    }
+
+    const image = nativeImage?.createFromPath?.(resolvedPath);
+    if (!image || image.isEmpty?.()) {
+      return { copied: false, error: 'تعذر تحميل صورة الفاتورة إلى حافظة Windows.' };
+    }
+
+    clipboard.write({
+      text: String(messageText || ''),
+      image,
+    });
+    return { copied: true, imageCopied: true, sizeBytes: stat.size };
+  } catch (error) {
+    return {
+      copied: false,
+      error: error instanceof Error ? error.message : 'تعذر نسخ صورة الفاتورة إلى الحافظة.',
     };
   }
 }

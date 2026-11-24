@@ -287,6 +287,14 @@ export class ProductMediaService {
       });
       return;
     }
+    const actor = authService.getCurrentActorSync();
+    assertPermission(actor, 'inventory:view', 'تنزيل صورة الصنف');
+    if (record.tenantId !== actor?.tenantId) throw new Error('حظر عزل المؤسسات: الصورة البعيدة لا تطابق المؤسسة.');
+    assertActivityAccess(actor, record.activityId, 'تنزيل صورة الصنف');
+    const product = await db.products.get(record.productId);
+    if (!product || product.activityId !== record.activityId || !filterRecordsByActivityScope([product], actor)[0]) {
+      throw new Error('الصنف المرتبط بالصورة غير موجود أو خارج النطاق المصرح.');
+    }
     const originalBlob = dataUrlToBlob(originalDataUrl, record.mimeType, MAX_ORIGINAL_BYTES);
     const thumbnailBlob = dataUrlToBlob(thumbnailDataUrl, record.mimeType, 1024 * 1024);
     const local = { ...record, syncStatus: 'SYNCED' as const, originalBlob, thumbnailBlob };
@@ -310,9 +318,12 @@ export class ProductMediaService {
     assertPermission(actor, 'inventory:view', 'مزامنة حذف صورة صنف');
     if (record.tenantId !== actor?.tenantId) throw new Error('حظر عزل المؤسسات: حذف الصورة لا يطابق المؤسسة.');
     assertActivityAccess(actor, record.activityId, 'مزامنة حذف صورة صنف');
+    const product = await db.products.get(record.productId);
+    if (!product || product.activityId !== record.activityId) throw new Error('الصنف المرتبط بالصورة غير موجود أو لا يطابق النشاط.');
     await db.transaction('rw', db.productImages, async () => {
       const existing = await db.productImages.get(record.id);
       if (existing && existing.tenantId !== record.tenantId) throw new Error('حظر عزل المؤسسات: الصورة لا تطابق المؤسسة.');
+      const wasPrimary = Boolean(existing?.isPrimary || record.isPrimary);
       await db.productImages.put({
         ...(existing || record),
         ...record,
@@ -322,6 +333,18 @@ export class ProductMediaService {
         originalBlob: undefined,
         thumbnailBlob: undefined,
       } as ProductImageLocalAsset);
+      if (wasPrimary) {
+        const siblings = (await db.productImages
+          .where('[tenantId+productId]')
+          .equals([record.tenantId, record.productId])
+          .filter((item) => !item.isDeleted)
+          .toArray())
+          .sort((a, b) => a.sortOrder - b.sortOrder);
+        const nextPrimary = siblings[0];
+        if (nextPrimary) {
+          await db.productImages.put({ ...nextPrimary, isPrimary: true, syncStatus: 'SYNCED' });
+        }
+      }
     });
   }
 

@@ -9,7 +9,7 @@ const DEFAULT_MIGRATIONS_DIR = path.join(MODULE_DIR, 'migrations');
 const MIGRATION_FILE_PATTERN = /^(\d{3,})_([a-z0-9_]+)\.sql$/i;
 const CORE_TABLES = [
   'tenants', 'branches', 'activities', 'accounts', 'products',
-  'product_batches', 'product_images', 'parties', 'invoices', 'invoice_items',
+  'product_batches', 'parties', 'invoices', 'invoice_items',
   'invoice_stock_deductions', 'journal_entries', 'journal_entry_lines',
   'cash_boxes', 'vouchers', 'amanat_records', 'users', 'audit_logs',
   'outbox_queue', 'sync_conflicts', 'document_sequences', 'legacy_imports',
@@ -128,6 +128,15 @@ export function verifySqliteFile(filePath, migrationsDirectory = DEFAULT_MIGRATI
       for (const tableName of V2_TABLES) {
         if (!hasTableStmt.get(tableName)) {
           throw new Error('النسخة الاحتياطية تفتقر إلى جدول مطور (v2): ' + tableName);
+        }
+      }
+    }
+
+    const hasV3ProductMediaMigration = migrationFiles.some((m) => m.filename === '003_product_images.sql');
+    if (schemaVersion >= 3 && hasV3ProductMediaMigration) {
+      for (const tableName of V3_TABLES) {
+        if (!hasTableStmt.get(tableName)) {
+          throw new Error('النسخة الاحتياطية تفتقر إلى جدول صور الأصناف (v3): ' + tableName);
         }
       }
     }
@@ -367,7 +376,12 @@ export async function openErpDatabase(options) {
       "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
     );
     const hasV2PaymentMigration = migrationFiles.some((m) => m.filename === '002_payment_allocations_advances.sql');
-    const tablesToRequire = hasV2PaymentMigration ? [...CORE_TABLES, ...V2_TABLES] : CORE_TABLES;
+    const hasV3ProductMediaMigration = migrationFiles.some((m) => m.filename === '003_product_images.sql');
+    const tablesToRequire = [
+      ...CORE_TABLES,
+      ...(hasV2PaymentMigration ? V2_TABLES : []),
+      ...(hasV3ProductMediaMigration ? V3_TABLES : []),
+    ];
     for (const tableName of tablesToRequire) {
       if (!required.get(tableName)) {
         throw new Error('Required ERP table is missing after migration: ' + tableName);

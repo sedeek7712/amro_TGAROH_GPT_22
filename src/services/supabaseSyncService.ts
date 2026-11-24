@@ -19,6 +19,7 @@ import { networkMonitor } from './networkMonitor';
 import { authService } from './authService';
 import { desktopSession } from './desktopSession';
 import { getActiveCurrencyConfig } from '../config/currency';
+import { productMediaService } from './productMediaService';
 import {
   SupabaseSyncConfig,
   CloudSyncResult,
@@ -35,6 +36,7 @@ import {
   PaymentAllocation,
   PartyAdvanceTransaction,
   AllocationAudit,
+  ProductImage,
 } from '../types/erp';
 
 const SUPABASE_CONFIG_KEY = 'multi_activity_erp_supabase_sync_config';
@@ -605,6 +607,101 @@ export class SupabaseSyncService {
     }
   }
 
+  private dataUrlToBlob(dataUrl: string, expectedMime: string): Blob {
+    const match = /^data:(image\\/(?:webp|jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || '');
+    if (!match || match[1] !== expectedMime) throw new Error('بيانات صورة الصنف المحلية غير صالحة.');
+    const raw = atob(match[2]);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return new Blob([bytes], { type: expectedMime });
+  }
+
+  private async uploadProductImageObject(
+    cleanUrl: string,
+    config: SupabaseSyncConfig,
+    accessToken: string,
+    storageKey: string,
+    dataUrl: string,
+    mimeType: string
+  ): Promise<void> {
+    const blob = this.dataUrlToBlob(dataUrl, mimeType);
+    const encodedKey = storageKey.split('/').map((part) => encodeURIComponent(part)).join('/');
+    const response = await fetch(`${cleanUrl}/storage/v1/object/erp-product-media/${encodedKey}`, {
+      method: 'POST',
+      headers: {
+        apikey: config.supabaseAnonKey,
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': mimeType,
+        'x-upsert': 'true',
+        'Cache-Control': '31536000',
+        'x-tenant-id': config.tenantId,
+        'x-device-id': config.deviceId,
+      },
+      body: blob,
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`فشل رفع ملف صورة الصنف إلى التخزين الخاص (${response.status}): ${detail.slice(0, 160)}`);
+    }
+  }
+
+  private async deleteProductImageObjects(
+    cleanUrl: string,
+    config: SupabaseSyncConfig,
+    accessToken: string,
+    keys: string[]
+  ): Promise<void> {
+    const prefixes = keys.filter(Boolean);
+    if (prefixes.length === 0) return;
+    const response = await fetch(`${cleanUrl}/storage/v1/object/erp-product-media`, {
+      method: 'DELETE',
+      headers: {
+        apikey: config.supabaseAnonKey,
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'x-tenant-id': config.tenantId,
+      },
+      body: JSON.stringify({ prefixes }),
+    });
+    if (!response.ok && response.status !== 404) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`تعذر حذف ملفات صورة الصنف من التخزين الخاص (${response.status}): ${detail.slice(0, 160)}`);
+    }
+  }
+
+  private async downloadProductImageObject(
+    cleanUrl: string,
+    config: SupabaseSyncConfig,
+    accessToken: string,
+    storageKey: string,
+    mimeType: string,
+    maxBytes: number
+  ): Promise<string> {
+    const encodedKey = storageKey.split('/').map((part) => encodeURIComponent(part)).join('/');
+    const response = await fetch(`${cleanUrl}/storage/v1/object/erp-product-media/${encodedKey}`, {
+      method: 'GET',
+      headers: {
+        apikey: config.supabaseAnonKey,
+        Authorization: `Bearer ${accessToken}`,
+        'x-tenant-id': config.tenantId,
+      },
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`تعذر تنزيل صورة الصنف (${response.status}): ${detail.slice(0, 120)}`);
+    }
+    const blob = await response.blob();
+    if (blob.size <= 0 || blob.size > maxBytes || blob.type && blob.type !== mimeType) {
+      throw new Error('ملف الصورة السحابي لا يطابق النوع أو الحجم المسجل.');
+    }
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('تعذر تحويل الصورة السحابية.'));
+      reader.onerror = () => reject(reader.error || new Error('تعذر قراءة الصورة السحابية.'));
+      reader.readAsDataURL(new Blob([blob], { type: mimeType }));
+    });
+  }
+
   /**
    * رفع حركات طابور Outbox إلى Supabase مع حجز ذري وإقرار صريح وتفريق CREATE/UPDATE/DELETE
    */
@@ -639,6 +736,7 @@ export class SupabaseSyncService {
     const tableMap: Record<OutboxQueueItem['entityType'], string> = {
       BRANCH: 'erp_branches',
       PRODUCT: 'erp_products',
+      PRODUCT_IMAGE: 'erp_product_images',
       PARTY: 'erp_parties',
       INVOICE: 'erp_invoices',
       JOURNAL_ENTRY: 'erp_journal_entries',

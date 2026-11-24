@@ -928,7 +928,11 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
     });
     assert.equal(onlineOutcome.status, 'WHATSAPP_LAUNCHED');
     assert.ok(launchedUrls[0].startsWith('whatsapp://send?phone='));
-    assert.equal(new URL(launchedUrls[0]).searchParams.get('text'), 'سند رقم RCT-4001');
+    const protocolText = launchedUrls[0]
+      .split('&')
+      .find((part) => part.startsWith('text='))
+      ?.slice('text='.length);
+    assert.equal(decodeURIComponent(protocolText || ''), 'سند رقم RCT-4001');
     assert.equal(onlineOutcome.imageCopiedToClipboard, true);
     assert.deepEqual(clipboardImagePayloads[0], {
       tempToken: 'tmp-tok-1',

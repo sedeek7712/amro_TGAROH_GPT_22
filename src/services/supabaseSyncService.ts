@@ -1242,6 +1242,8 @@ export class SupabaseSyncService {
       return { pulled: 0, conflicts: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
+    const accessToken = accessToken;
+    if (!accessToken) return { pulled: 0, conflicts: 0, errors: ['رمز JWT للمستخدم غير متاح لتنزيل صور الأصناف.'] };
     const branchResolution = this.resolveEffectiveBranch(config);
     if (!branchResolution.ok) return { pulled: 0, conflicts: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };
 
@@ -1317,7 +1319,7 @@ export class SupabaseSyncService {
             method: 'GET',
             headers: {
               apikey: config.supabaseAnonKey,
-              Authorization: `Bearer ${tenantResolution.accessToken}`,
+              Authorization: `Bearer ${accessToken}`,
               'Content-Type': 'application/json',
               'x-tenant-id': effectiveTenantId,
               'x-device-id': config.deviceId,
@@ -1366,7 +1368,7 @@ export class SupabaseSyncService {
                 id: String(rec.id),
                 tenantId: String(rec.tenant_id || effectiveTenantId),
                 productId: String(rec.product_id || ''),
-                activityId: String(rec.activity_id || ''),
+                activityId: String(rec.activity_id || '') as ProductImage['activityId'],
                 storageKey: String(rec.storage_key || ''),
                 thumbnailStorageKey: String(rec.thumbnail_storage_key || ''),
                 mimeType: String(rec.mime_type || 'image/webp') as ProductImage['mimeType'],
@@ -1390,10 +1392,10 @@ export class SupabaseSyncService {
                 await productMediaService.applyRemoteTombstone(media);
               } else {
                 const originalDataUrl = await this.downloadProductImageObject(
-                  cleanUrl, config, tenantResolution.accessToken, media.storageKey, media.mimeType, 10 * 1024 * 1024
+                  cleanUrl, config, accessToken, media.storageKey, media.mimeType, 10 * 1024 * 1024
                 );
                 const thumbnailDataUrl = await this.downloadProductImageObject(
-                  cleanUrl, config, tenantResolution.accessToken, media.thumbnailStorageKey, media.mimeType, 1024 * 1024
+                  cleanUrl, config, accessToken, media.thumbnailStorageKey, media.mimeType, 1024 * 1024
                 );
                 const originalBlob = this.dataUrlToBlob(originalDataUrl, media.mimeType);
                 const digest = await crypto.subtle.digest('SHA-256', await originalBlob.arrayBuffer());

@@ -294,6 +294,7 @@ export function createProductMediaService(database, mediaStorage) {
       if (!record || record.tenantId !== actor.tenantId) throw new Error('حظر عزل المؤسسات: بيانات الصورة البعيدة غير مطابقة.');
       const product = loadProduct(actor, record.productId, 'مزامنة صورة صنف');
       if (product.activity_id !== record.activityId) throw new Error('النشاط التجاري للصورة لا يطابق الصنف.');
+
       const stored = mediaStorage.store({
         tenantId: actor.tenantId,
         activityId: record.activityId,
@@ -305,31 +306,73 @@ export function createProductMediaService(database, mediaStorage) {
         originalDataUrl: input.originalDataUrl,
         thumbnailDataUrl: input.thumbnailDataUrl,
       });
-      const clean = { ...record, storageKey: stored.storageKey, thumbnailStorageKey: stored.thumbnailStorageKey,
-        sizeBytes: stored.sizeBytes, thumbnailSizeBytes: stored.thumbnailSizeBytes,
-        checksumSha256: stored.checksumSha256, syncStatus: 'SYNCED' };
-      if (clean.isPrimary) {
-        database.prepare(
-          "UPDATE product_images SET is_primary=0,data_json=json_set(data_json,'$.isPrimary',false) WHERE tenant_id=? AND product_id=? AND id<>? AND is_deleted=0"
-        ).run(actor.tenantId, clean.productId, clean.id);
+      if (
+        stored.storageKey !== record.storageKey ||
+        stored.thumbnailStorageKey !== record.thumbnailStorageKey ||
+        stored.sizeBytes !== Number(record.sizeBytes) ||
+        stored.thumbnailSizeBytes !== Number(record.thumbnailSizeBytes) ||
+        stored.checksumSha256 !== record.checksumSha256
+      ) {
+        mediaStorage.remove([stored.storageKey, stored.thumbnailStorageKey]);
+        throw new Error('ملفات صورة الصنف البعيدة لا تطابق مفاتيح التخزين أو الحجم أو بصمة SHA-256.');
       }
-      database.prepare(
-        `INSERT INTO product_images
-          (tenant_id,id,product_id,activity_id,storage_key,thumbnail_storage_key,mime_type,size_bytes,
-           thumbnail_size_bytes,width,height,checksum_sha256,is_primary,sort_order,created_by,created_at,
-           updated_at,sync_status,is_deleted,data_json)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-         ON CONFLICT(tenant_id,id) DO UPDATE SET
-          storage_key=excluded.storage_key,thumbnail_storage_key=excluded.thumbnail_storage_key,
-          size_bytes=excluded.size_bytes,thumbnail_size_bytes=excluded.thumbnail_size_bytes,
-          checksum_sha256=excluded.checksum_sha256,sync_status='SYNCED',is_deleted=excluded.is_deleted,
-          data_json=excluded.data_json`
-      ).run(
-        clean.tenantId, clean.id, clean.productId, clean.activityId, clean.storageKey, clean.thumbnailStorageKey,
-        clean.mimeType, clean.sizeBytes, clean.thumbnailSizeBytes, clean.width, clean.height, clean.checksumSha256,
-        clean.isPrimary ? 1 : 0, clean.sortOrder, clean.createdBy, clean.createdAt, clean.updatedAt,
-        clean.syncStatus, clean.isDeleted ? 1 : 0, JSON.stringify(clean)
-      );
+
+      const clean = { ...record, syncStatus: 'SYNCED', isDeleted: false };
+      database.exec('BEGIN IMMEDIATE');
+      try {
+        const existing = database.prepare(
+          'SELECT * FROM product_images WHERE tenant_id = ? AND id = ?'
+        ).get(actor.tenantId, clean.id);
+        if (existing && (
+          existing.product_id !== clean.productId ||
+          existing.activity_id !== clean.activityId ||
+          existing.storage_key !== clean.storageKey ||
+          existing.thumbnail_storage_key !== clean.thumbnailStorageKey
+        )) {
+          throw new Error('معرف صورة الصنف مستخدم مسبقاً مع بيانات صنف أو ملفات مختلفة.');
+        }
+        if (clean.isPrimary) {
+          database.prepare(
+            "UPDATE product_images SET is_primary=0,data_json=json_set(data_json,'$.isPrimary',false) WHERE tenant_id=? AND product_id=? AND id<>? AND is_deleted=0"
+          ).run(actor.tenantId, clean.productId, clean.id);
+        }
+        database.prepare(
+          `INSERT INTO product_images
+            (tenant_id,id,product_id,activity_id,storage_key,thumbnail_storage_key,mime_type,size_bytes,
+             thumbnail_size_bytes,width,height,checksum_sha256,is_primary,sort_order,created_by,created_at,
+             updated_at,sync_status,is_deleted,data_json)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(tenant_id,id) DO UPDATE SET
+            product_id=excluded.product_id,
+            activity_id=excluded.activity_id,
+            storage_key=excluded.storage_key,
+            thumbnail_storage_key=excluded.thumbnail_storage_key,
+            mime_type=excluded.mime_type,
+            size_bytes=excluded.size_bytes,
+            thumbnail_size_bytes=excluded.thumbnail_size_bytes,
+            width=excluded.width,
+            height=excluded.height,
+            checksum_sha256=excluded.checksum_sha256,
+            is_primary=excluded.is_primary,
+            sort_order=excluded.sort_order,
+            created_by=excluded.created_by,
+            created_at=excluded.created_at,
+            updated_at=excluded.updated_at,
+            sync_status='SYNCED',
+            is_deleted=0,
+            data_json=excluded.data_json`
+        ).run(
+          clean.tenantId, clean.id, clean.productId, clean.activityId, clean.storageKey, clean.thumbnailStorageKey,
+          clean.mimeType, clean.sizeBytes, clean.thumbnailSizeBytes, clean.width, clean.height, clean.checksumSha256,
+          clean.isPrimary ? 1 : 0, clean.sortOrder, clean.createdBy, clean.createdAt, clean.updatedAt,
+          'SYNCED', 0, JSON.stringify(clean)
+        );
+        database.exec('COMMIT');
+      } catch (error) {
+        try { database.exec('ROLLBACK'); } catch {}
+        mediaStorage.remove([stored.storageKey, stored.thumbnailStorageKey]);
+        throw error;
+      }
       return clean;
     },
 

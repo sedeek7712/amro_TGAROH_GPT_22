@@ -425,7 +425,7 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
   }
 });
 
-test('DOC-004-09: prepared PNG invoice can be copied to the OS clipboard with text metadata, while PDF is rejected', () => {
+test('DOC-004-09: prepared PNG invoice can be copied to the OS clipboard with text metadata, while PDF is rejected', async () => {
   const workDir = mkdtempSync(path.join(os.tmpdir(), 'amro-share-clipboard-'));
   const tempDir = path.join(workDir, 'AmroErpShareTemp');
   const shareTempFiles = new Map();
@@ -441,7 +441,7 @@ test('DOC-004-09: prepared PNG invoice can be copied to the OS clipboard with te
         mimeType: 'image/png',
       },
     });
-    const copied = copyShareTempPngToClipboardOnDisk({
+    const copied = await copyShareTempPngToClipboardOnDisk({
       tempDir,
       shareTempFiles,
       tempToken: png.tempToken,
@@ -480,7 +480,7 @@ test('DOC-004-09: prepared PNG invoice can be copied to the OS clipboard with te
         mimeType: 'application/pdf',
       },
     });
-    const rejectedPdf = copyShareTempPngToClipboardOnDisk({
+    const rejectedPdf = await copyShareTempPngToClipboardOnDisk({
       tempDir,
       shareTempFiles,
       tempToken: pdf.tempToken,

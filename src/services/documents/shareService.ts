@@ -498,7 +498,7 @@ export async function executeWhatsAppOrNativeShare(params: {
         tempToken: pkg.tempToken,
         whatsappUrl: pkg.whatsappUrl,
         whatsappProtocolUrl: pkg.whatsappProtocolUrl,
-        noticeMessage: noticeMessage.replace(/\\s+/g, ' ').trim(),
+        noticeMessage: noticeMessage.replace(/\s+/g, ' ').trim(),
       };
     }
 

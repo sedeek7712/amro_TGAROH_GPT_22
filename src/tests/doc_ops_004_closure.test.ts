@@ -755,3 +755,66 @@ test('DOC-004-09: Android Web Share API MIME probes, AbortError CANCELED, and No
     env.restore();
   }
 });
+
+test('DOC-004-05: RETURNED cash Amanat requires all documented return events to equal the original amount', () => {
+  const base: AmanatRecord = {
+    id: 'amn-full-return-005',
+    recordNumber: 'AMN-5005',
+    type: 'CASH',
+    depositorName: 'محمد علي',
+    depositorPhone: '771000555',
+    amount: 50000,
+    returnedAmount: 50000,
+    remainingAmount: 0,
+    receivedDate: '2026-11-20',
+    returnedDate: '2026-11-22',
+    receivedBy: 'أمين الصندوق',
+    status: 'RETURNED',
+    branchId: 'branch_main',
+    returnHistory: [
+      { id: 'ev-20', date: '2026-11-21', amount: 20000, createdByName: 'موظف' },
+      { id: 'ev-30', date: '2026-11-22', amount: 30000, createdByName: 'موظف' },
+    ],
+  };
+
+  // Exact complete return: accepted, including a selected earlier event.
+  assert.equal(validateAmanatDocumentState(base).valid, true);
+  assert.equal(
+    validateAmanatDocumentState(base, { returnEventId: 'ev-20' }).valid,
+    true
+  );
+
+  // Incomplete, excessive, and malformed return totals must not issue a full-discharge voucher.
+  const incomplete: AmanatRecord = {
+    ...base,
+    returnHistory: [base.returnHistory![0], { ...base.returnHistory![1], amount: 15000 }],
+  };
+  assert.equal(validateAmanatDocumentState(incomplete).valid, false);
+  assert.throws(() => buildAmanatDocumentSnapshot({ record: incomplete, meta: sampleMeta }));
+  assert.equal(buildAmanatNotificationPayload(incomplete).amount, undefined);
+  assert.ok(buildAmanatNotificationPayload(incomplete).error);
+  const incompleteHtml = renderToStaticMarkup(
+    React.createElement(AmanatDocument, {
+      record: incomplete,
+      meta: sampleMeta,
+      paperSize: 'A4',
+    })
+  );
+  assert.ok(incompleteHtml.includes('role="alert"'));
+  assert.ok(!incompleteHtml.includes('50000.00'));
+
+  const excessive: AmanatRecord = {
+    ...base,
+    returnHistory: [base.returnHistory![0], { ...base.returnHistory![1], amount: 30001 }],
+  };
+  assert.equal(validateAmanatDocumentState(excessive).valid, false);
+
+  const malformed: AmanatRecord = {
+    ...base,
+    returnHistory: [base.returnHistory![0], { ...base.returnHistory![1], amount: Number.NaN }],
+  };
+  assert.equal(validateAmanatDocumentState(malformed).valid, false);
+
+  // Explicit deposit view continues to show the original deposit and is not a return voucher.
+  assert.equal(validateAmanatDocumentState(incomplete, { mode: 'DEPOSIT' }).valid, true);
+});

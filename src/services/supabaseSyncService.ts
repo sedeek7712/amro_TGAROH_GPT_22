@@ -720,7 +720,7 @@ export class SupabaseSyncService {
       return { pushed: 0, failed: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
-    const accessToken = accessToken;
+    const accessToken: string | undefined = tenantResolution.accessToken;
     if (!accessToken) return { pushed: 0, failed: 0, errors: ['رمز JWT للمستخدم غير متاح لمزامنة الصور.'] };
     const branchResolution = this.resolveEffectiveBranch(config);
     if (!branchResolution.ok) return { pushed: 0, failed: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };
@@ -1242,7 +1242,7 @@ export class SupabaseSyncService {
       return { pulled: 0, conflicts: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
-    const accessToken = accessToken;
+    const accessToken: string | undefined = tenantResolution.accessToken;
     if (!accessToken) return { pulled: 0, conflicts: 0, errors: ['رمز JWT للمستخدم غير متاح لتنزيل صور الأصناف.'] };
     const branchResolution = this.resolveEffectiveBranch(config);
     if (!branchResolution.ok) return { pulled: 0, conflicts: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };

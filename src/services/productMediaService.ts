@@ -335,17 +335,10 @@ export class ProductMediaService {
     if (!product || product.activityId !== record.activityId) throw new Error('الصنف المرتبط بالصورة غير موجود أو لا يطابق النشاط.');
     await db.transaction('rw', db.productImages, async () => {
       const existing = await db.productImages.get(record.id);
-      if (existing && existing.tenantId !== record.tenantId) throw new Error('حظر عزل المؤسسات: الصورة لا تطابق المؤسسة.');
-      const wasPrimary = Boolean(existing?.isPrimary || record.isPrimary);
-      await db.productImages.put({
-        ...(existing || record),
-        ...record,
-        isDeleted: true,
-        isPrimary: false,
-        syncStatus: 'SYNCED',
-        originalBlob: undefined,
-        thumbnailBlob: undefined,
-      } as ProductImageLocalAsset);
+      if (!existing) return;
+      if (existing.tenantId !== record.tenantId) throw new Error('حظر عزل المؤسسات: الصورة لا تطابق المؤسسة.');
+      const wasPrimary = Boolean(existing.isPrimary || record.isPrimary);
+      await db.productImages.delete(record.id);
       if (wasPrimary) {
         const siblings = (await db.productImages
           .where('[tenantId+productId]')
@@ -369,6 +362,10 @@ export class ProductMediaService {
     }
     const record = await db.productImages.get(imageId);
     if (!record) return;
+    if (record.isDeleted) {
+      await db.productImages.delete(imageId);
+      return;
+    }
     await db.productImages.update(imageId, { syncStatus: 'SYNCED' });
   }
 

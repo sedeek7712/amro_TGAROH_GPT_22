@@ -406,6 +406,12 @@ export function createInventoryPartiesService(database, core = null) {
           return;
         }
         assertActivityAccess(actor, existing.activityId, 'حذف صنف');
+        const linkedImages = database.prepare(
+          'SELECT COUNT(*) AS count FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0'
+        ).get(actor.tenantId, id).count;
+        if (linkedImages > 0) {
+          throw new Error('لا يمكن حذف الصنف لأنه يحتوي على صور؛ احذف صور الصنف أولاً ثم أعد المحاولة.');
+        }
         const usedInInvoices = database.prepare(
           'SELECT 1 FROM invoice_items WHERE tenant_id = ? AND product_id = ? LIMIT 1'
         ).get(actor.tenantId, id);

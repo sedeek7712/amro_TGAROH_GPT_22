@@ -32,6 +32,7 @@ import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes, useLiveInvoices } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
+import { ProductPrimaryImage } from '../inventory/ProductPrimaryImage';
 import { formatLocalDate } from '../../utils/localDate';
 
 interface POSProps {
@@ -676,7 +677,12 @@ export const PointOfSale: React.FC<POSProps> = ({
                             {p.currentStock} {p.unit}
                           </span>
                         </div>
-                        <h4 className="font-bold text-xs text-slate-900 group-hover:text-emerald-700 transition-colors line-clamp-2">
+                        <ProductPrimaryImage
+                          productId={p.id}
+                          productName={p.nameAr}
+                          displaySize="pos"
+                        />
+                        <h4 className="mt-2 font-bold text-xs text-slate-900 group-hover:text-emerald-700 transition-colors line-clamp-2">
                           {p.nameAr}
                         </h4>
 

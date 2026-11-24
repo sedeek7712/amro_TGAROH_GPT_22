@@ -140,9 +140,17 @@ export function createProductMediaStorage({ rootDirectory }) {
     return destination;
   }
 
+  function clear() {
+    rmSync(root, { recursive: true, force: true });
+    mkdirSync(root, { recursive: true });
+  }
+
   function restoreFrom(sourceDirectory) {
     const source = path.resolve(sourceDirectory);
-    if (!existsSync(source)) return false;
+    if (!existsSync(source)) {
+      clear();
+      return false;
+    }
     const staging = root + '.restore-' + randomUUID();
     try {
       cpSync(source, staging, { recursive: true, errorOnExist: false, force: true });
@@ -156,5 +164,5 @@ export function createProductMediaStorage({ rootDirectory }) {
     }
   }
 
-  return Object.freeze({ store, read, remove, backupTo, restoreFrom, rootDirectory: root });
+  return Object.freeze({ store, read, remove, backupTo, restoreFrom, clear, rootDirectory: root });
 }

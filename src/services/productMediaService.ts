@@ -57,6 +57,7 @@ export class ProductMediaService {
   private requireProductAccess(productId: string, permission: 'inventory:view' | 'inventory:media:manage') {
     const actor = authService.getCurrentActorSync();
     assertPermission(actor, permission, 'إدارة صور الأصناف');
+    if (!actor?.tenantId?.trim()) throw new Error('جلسة المستخدم لا تحتوي على معرف مؤسسة صالح.');
     return actor!;
   }
 
@@ -106,6 +107,7 @@ export class ProductMediaService {
     }
 
     const actor = this.requireProductAccess(input.productId, 'inventory:media:manage');
+    const tenantId = actor.tenantId!.trim();
     const product = await db.products.get(input.productId);
     if (!product || !filterRecordsByActivityScope([product], actor)[0]) {
       throw new Error('الصنف غير موجود أو خارج الأنشطة المصرح بها.');
@@ -122,7 +124,7 @@ export class ProductMediaService {
     const now = new Date().toISOString();
     const current = await db.productImages
       .where('[tenantId+productId]')
-      .equals([actor.tenantId || '', product.id])
+      .equals([tenantId, product.id])
       .filter((item) => !item.isDeleted)
       .toArray();
     if (current.length >= MAX_IMAGES_PER_PRODUCT) {
@@ -131,11 +133,11 @@ export class ProductMediaService {
 
     const record: ProductImage = {
       id,
-      tenantId: actor.tenantId || 'tenant_main',
+      tenantId,
       productId: product.id,
       activityId: product.activityId,
-      storageKey: `${actor.tenantId}/${product.activityId}/${product.id}/${id}/original.webp`,
-      thumbnailStorageKey: `${actor.tenantId}/${product.activityId}/${product.id}/${id}/thumbnail.webp`,
+      storageKey: `${tenantId}/${product.activityId}/${product.id}/${id}/original.webp`,
+      thumbnailStorageKey: `${tenantId}/${product.activityId}/${product.id}/${id}/thumbnail.webp`,
       mimeType: input.mimeType,
       sizeBytes: originalBlob.size,
       thumbnailSizeBytes: thumbnailBlob.size,
@@ -308,12 +310,35 @@ export class ProductMediaService {
     if (!product || product.activityId !== record.activityId || !filterRecordsByActivityScope([product], actor)[0]) {
       throw new Error('الصنف المرتبط بالصورة غير موجود أو خارج النطاق المصرح.');
     }
+    assertDimensions(record.width, record.height);
     const originalBlob = dataUrlToBlob(originalDataUrl, record.mimeType, MAX_ORIGINAL_BYTES);
     const thumbnailBlob = dataUrlToBlob(thumbnailDataUrl, record.mimeType, 1024 * 1024);
+    if (
+      originalBlob.size !== record.sizeBytes ||
+      thumbnailBlob.size !== record.thumbnailSizeBytes ||
+      await sha256(originalBlob) !== record.checksumSha256
+    ) {
+      throw new Error('ملفات الصورة البعيدة لا تطابق الحجم أو بصمة SHA-256 المسجلة.');
+    }
     const local = { ...record, syncStatus: 'SYNCED' as const, originalBlob, thumbnailBlob };
     await db.transaction('rw', db.productImages, async () => {
       const existing = await db.productImages.get(record.id);
       if (existing && existing.tenantId !== record.tenantId) throw new Error('حظر عزل المؤسسات: الصورة البعيدة لا تطابق المؤسسة.');
+      if (existing && (
+        existing.productId !== record.productId ||
+        existing.activityId !== record.activityId ||
+        existing.storageKey !== record.storageKey
+      )) throw new Error('معرف الصورة البعيدة مرتبط بسجل مختلف محلياً.');
+      if (record.isPrimary) {
+        const siblings = await db.productImages
+          .where('[tenantId+productId]')
+          .equals([record.tenantId, record.productId])
+          .filter((item) => !item.isDeleted && item.id !== record.id)
+          .toArray();
+        for (const sibling of siblings) {
+          if (sibling.isPrimary) await db.productImages.update(sibling.id, { isPrimary: false });
+        }
+      }
       await db.productImages.put(local);
     });
   }

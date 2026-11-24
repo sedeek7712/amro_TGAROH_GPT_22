@@ -672,6 +672,26 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
             )}
           </div>
 
+          {isDesktop && snapshot && (
+            <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[11px] leading-relaxed text-emerald-950">
+              <strong className="block mb-1">طريقة الإرسال من تطبيق اللابتوب:</strong>
+              {shareFormat === 'PNG' && allowPngFormat ? (
+                <span>
+                  سيجهز النظام صورة الفاتورة والنص في حافظة Windows ويفتح تطبيق WhatsApp مباشرة.
+                  داخل محادثة العميل اضغط Ctrl+V لإدراج الصورة، ثم راجعها واضغط «إرسال».
+                </span>
+              ) : (
+                <span>
+                  سيجهز النظام ملف PDF ويفتح تطبيق WhatsApp مباشرة. أرفق ملف PDF من الملف المؤقت
+                  داخل المحادثة، ثم راجع الرسالة واضغط «إرسال».
+                </span>
+              )}
+              <span className="block mt-1 font-semibold">
+                تجهيز الصورة يعمل دون إنترنت؛ إرسالها للعميل يحتاج اتصالاً بالإنترنت.
+              </span>
+            </div>
+          )}
+
           {snapshot && (
             <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-slate-50 border border-slate-200 rounded-xl">
               <span className="font-semibold text-slate-700">صيغة المرفق عند المشاركة:</span>
@@ -797,7 +817,9 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
                   ? 'جاري تجهيز الملف...'
                   : canShareFilesNatively && !isDesktop
                   ? `مشاركة ${shareFormat} والنص عبر واتساب / النظام`
-                  : `تجهيز ${shareFormat} وفتح واتساب (نسخ + مرفق)`}
+                  : shareFormat === 'PNG' && allowPngFormat
+                  ? 'نسخ صورة الفاتورة وفتح تطبيق واتساب'
+                  : 'تجهيز PDF وفتح تطبيق واتساب'}
               </span>
             </button>
 

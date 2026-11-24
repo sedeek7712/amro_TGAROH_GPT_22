@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Camera, ImagePlus, Star, Trash2, X, Eye, Loader2, CheckCircle2 } from 'lucide-react';
+import { Camera, ImagePlus, Star, Trash2, X, Loader2, CheckCircle2 } from 'lucide-react';
 import { Product, ProductImage } from '../../types/erp';
 import { productMediaService } from '../../services/productMediaService';
 import { authService } from '../../services/authService';

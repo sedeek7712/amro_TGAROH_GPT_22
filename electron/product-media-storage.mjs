@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync, cpSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync, cpSync } from 'node:fs';
 import path from 'node:path';
 
 const MAX_ORIGINAL_BYTES = 10 * 1024 * 1024;
@@ -117,7 +117,7 @@ export function createProductMediaStorage({ rootDirectory }) {
       try { rmSync(target, { force: true }); } catch {}
       const parent = path.dirname(target);
       try {
-        const entries = existsSync(parent) ? require('node:fs').readdirSync(parent) : [];
+        const entries = existsSync(parent) ? readdirSync(parent) : [];
         if (entries.length === 0) rmSync(parent, { recursive: true, force: true });
       } catch {}
     }

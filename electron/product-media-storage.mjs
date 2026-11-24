@@ -44,7 +44,7 @@ export function createProductMediaStorage({ rootDirectory }) {
   function resolveKey(storageKey) {
     const clean = String(storageKey || '').replace(/\\/g, '/');
     const parts = clean.split('/');
-    if (parts.length !== 5 || parts.some((part) => !SAFE_PART.test(part)) ||
+    if (parts.length !== 5 || parts.slice(0, 4).some((part) => !SAFE_PART.test(part)) ||
         !['original.webp', 'thumbnail.webp', 'original.jpg', 'thumbnail.jpg', 'original.png', 'thumbnail.png'].includes(parts[4])) {
       throw new Error('مفتاح تخزين الصورة غير صالح.');
     }

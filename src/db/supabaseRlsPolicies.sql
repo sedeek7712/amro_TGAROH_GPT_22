@@ -394,7 +394,6 @@ CREATE TABLE IF NOT EXISTS erp_outbox_sync_log (
 );
 
 CREATE INDEX IF NOT EXISTS idx_products_tenant_updated ON erp_products(tenant_id, updated_at);
-CREATE INDEX IF NOT EXISTS idx_product_images_tenant_updated ON erp_product_images(tenant_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_parties_tenant_updated ON erp_parties(tenant_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_invoices_tenant_updated ON erp_invoices(tenant_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_journal_tenant_updated ON erp_journal_entries(tenant_id, updated_at);

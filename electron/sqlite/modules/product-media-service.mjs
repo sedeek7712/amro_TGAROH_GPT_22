@@ -182,7 +182,7 @@ export function createProductMediaService(database, mediaStorage) {
           'UPDATE product_images SET is_primary = 0, updated_at = ?, data_json = json_set(data_json, \'$.isPrimary\', false, \'$.updatedAt\', ?) WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0'
         ).run(nowIso, nowIso, actor.tenantId, row.product_id);
         database.prepare(
-          'UPDATE product_images SET is_primary = 1, updated_at = ?, sync_status = \'PENDING_UPLOAD\', data_json = json_set(data_json, \'$.isPrimary\', true, \'$.updatedAt\', ?, \'$.syncStatus\', \'PENDING_UPLOAD\') WHERE tenant_id = ? AND id = ?'
+          'UPDATE product_images SET is_primary = 1, updated_at = ?, data_json = json_set(data_json, \'$.isPrimary\', true, \'$.updatedAt\', ?) WHERE tenant_id = ? AND id = ?'
         ).run(nowIso, nowIso, actor.tenantId, imageId);
         const rows = database.prepare(
           'SELECT * FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0'
@@ -229,12 +229,11 @@ export function createProductMediaService(database, mediaStorage) {
             const promoted = {
               ...mapRow(nextRow),
               isPrimary: true,
-              syncStatus: 'PENDING_UPLOAD',
               updatedAt: nowIso,
             };
             database.prepare(
               `UPDATE product_images
-               SET is_primary=1,sync_status='PENDING_UPLOAD',updated_at=?,data_json=?
+               SET is_primary=1,updated_at=?,data_json=?
                WHERE tenant_id=? AND id=?`
             ).run(nowIso, JSON.stringify(promoted), actor.tenantId, promoted.id);
             enqueue(actor, promoted, 'UPDATE', nowIso);
@@ -383,6 +382,7 @@ export function createProductMediaService(database, mediaStorage) {
       loadProduct(actor, row.product_id, 'تأكيد مزامنة صورة الصنف');
       const updated = { ...mapRow(row), syncStatus: 'SYNCED' };
       if (row.is_deleted === 1) {
+        mediaStorage.remove([row.storage_key, row.thumbnail_storage_key]);
         database.prepare('DELETE FROM product_images WHERE tenant_id = ? AND id = ?')
           .run(actor.tenantId, imageId);
         return updated;

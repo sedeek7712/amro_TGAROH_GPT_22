@@ -259,22 +259,33 @@ export function createProductMediaService(database, mediaStorage) {
       const existing = database.prepare(
         'SELECT * FROM product_images WHERE tenant_id = ? AND id = ?'
       ).get(actor.tenantId, record.id);
-      if (existing) {
+      if (!existing) return;
+
+      database.exec('BEGIN IMMEDIATE');
+      try {
         database.prepare('DELETE FROM product_images WHERE tenant_id = ? AND id = ?')
           .run(actor.tenantId, record.id);
-        mediaStorage.remove([existing.storage_key, existing.thumbnail_storage_key]);
         if (existing.is_primary === 1) {
           const nextRow = database.prepare(
             'SELECT * FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0 ORDER BY sort_order ASC, created_at ASC LIMIT 1'
           ).get(actor.tenantId, existing.product_id);
           if (nextRow) {
-            const promoted = { ...mapRow(nextRow), isPrimary: true, syncStatus: 'SYNCED' };
+            const promoted = {
+              ...mapRow(nextRow),
+              isPrimary: true,
+              syncStatus: 'SYNCED',
+            };
             database.prepare(
               "UPDATE product_images SET is_primary=1,sync_status='SYNCED',data_json=? WHERE tenant_id=? AND id=?"
             ).run(JSON.stringify(promoted), actor.tenantId, promoted.id);
           }
         }
+        database.exec('COMMIT');
+      } catch (error) {
+        try { database.exec('ROLLBACK'); } catch {}
+        throw error;
       }
+      mediaStorage.remove([existing.storage_key, existing.thumbnail_storage_key]);
     },
 
     cacheRemoteProductImage(actor, input) {

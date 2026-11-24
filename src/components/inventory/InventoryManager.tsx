@@ -25,6 +25,7 @@ import {
   ArrowUpDown,
   Archive,
   RotateCcw,
+  Images,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
@@ -35,6 +36,7 @@ import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId } from '../../types/erp';
 import { formatLocalDate } from '../../utils/localDate';
+import { ProductMediaManager } from './ProductMediaManager';
 
 interface InventoryManagerProps {
   selectedActivity: ActivityId | 'all';
@@ -76,6 +78,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [filterType, setFilterType] = useState<'all' | 'low_stock' | 'expiring'>('all');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [managingImagesProduct, setManagingImagesProduct] = useState<Product | null>(null);
 
   // حقول نموذج الإضافة والتعديل
   const [formNameAr, setFormNameAr] = useState('');
@@ -596,6 +599,13 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                             <Edit2 className="w-3.5 h-3.5" />
                           </button>
                           <button
+                            onClick={() => setManagingImagesProduct(p)}
+                            className="p-1.5 text-slate-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-colors"
+                            title="إدارة صور الصنف"
+                          >
+                            <Images className="w-3.5 h-3.5" />
+                          </button>
+                          <button
                             onClick={() => handleToggleArchiveProduct(p)}
                             disabled={isSubmitting}
                             className={`p-1.5 rounded-md transition-colors ${
@@ -1065,6 +1075,13 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
             </form>
           </div>
         </div>
+      )}
+
+      {managingImagesProduct && (
+        <ProductMediaManager
+          product={managingImagesProduct}
+          onClose={() => setManagingImagesProduct(null)}
+        />
       )}
     </div>
   );

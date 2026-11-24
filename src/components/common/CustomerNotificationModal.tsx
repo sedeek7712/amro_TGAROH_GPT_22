@@ -37,6 +37,7 @@ import {
   cleanupShareTempFileIfAny,
   copyTextToClipboard,
   executeWhatsAppOrNativeShare,
+  maskWhatsAppPhone,
   prepareSharePackage,
   supportsNativeFileShare,
 } from '../../services/documents/shareService';
@@ -124,6 +125,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   } | null>(null);
   const [shareOpenedOnce, setShareOpenedOnce] = useState(false);
   const [confirmedSend, setConfirmedSend] = useState(false);
+  const [activeDispatchId, setActiveDispatchId] = useState<string | null>(null);
   const [isBusy, setIsBusy] = useState(false);
   const [activeTempFile, setActiveTempFile] = useState<{
     tempToken: string;
@@ -223,6 +225,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     setStatusFeedback(null);
     setShareOpenedOnce(false);
     setConfirmedSend(false);
+    setActiveDispatchId(null);
     setActiveTempFile(null);
 
     if (snapshot) {
@@ -299,6 +302,10 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
       userId: actor?.id,
       userName: actor?.fullName,
       recipientName,
+      dispatchId: activeDispatchId || undefined,
+      recipientPhoneMasked: maskWhatsAppPhone(phone),
+      branchId: actor?.branchId || 'branch_main',
+      branchName,
       channel: 'CLIPBOARD',
     });
     setStatusFeedback({
@@ -408,6 +415,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
         recipientName,
         actor,
       });
+      setActiveDispatchId(pkg.dispatchId);
       if (pkg.tempToken) {
         setActiveTempFile({
           tempToken: pkg.tempToken,
@@ -423,11 +431,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
         recipientName,
       });
 
-      setShareOpenedOnce(
-        outcome.status === 'SHARE_OPENED' ||
-          outcome.status === 'WHATSAPP_LAUNCHED' ||
-          outcome.status === 'FALLBACK_DOWNLOAD_AND_WA'
-      );
+      setShareOpenedOnce(outcome.whatsappLaunched === true);
       if (outcome.usedFallbackCopyFlow && outcome.clipboardCopied === false) {
         messageTextareaRef.current?.focus();
         messageTextareaRef.current?.select();
@@ -466,6 +470,8 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     if (!res.revealed) {
       if (res.exists === false) {
         setActiveTempFile(null);
+        setActiveDispatchId(null);
+        setShareOpenedOnce(false);
       }
       setStatusFeedback({
         tone: 'warning',
@@ -478,6 +484,9 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     if (!activeTempFile) return;
     await cleanupShareTempFileIfAny(activeTempFile.tempToken);
     setActiveTempFile(null);
+    setActiveDispatchId(null);
+    setShareOpenedOnce(false);
+    setConfirmedSend(false);
     setStatusFeedback({
       tone: 'info',
       text: 'تم حذف الملف المؤقت يدوياً بناءً على طلبك.',
@@ -485,21 +494,30 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   };
 
   const handleConfirmUserSent = async () => {
+    if (confirmedSend || !activeDispatchId || !actor?.active) return;
     await recordDocumentOperation({
       operationType: 'SHARE',
       status: 'USER_CONFIRMED_SEND',
       documentId: snapshot?.documentId || documentNumber,
       documentNumber,
       documentType,
-      userId: actor?.id,
-      userName: actor?.fullName,
+      dispatchId: activeDispatchId,
+      recipientPhoneMasked: maskWhatsAppPhone(phone),
+      branchId: actor.branchId || 'branch_main',
+      branchName,
+      userId: actor.id,
+      userName: actor.fullName,
       recipientName,
       channel: 'WHATSAPP',
     });
+    if (activeTempFile?.tempToken) {
+      await cleanupShareTempFileIfAny(activeTempFile.tempToken);
+      setActiveTempFile(null);
+    }
     setConfirmedSend(true);
     setStatusFeedback({
       tone: 'success',
-      text: 'تم توثيق تأكيد المستخدم للإرسال في سجل العمليات (USER_CONFIRMED_SEND).',
+      text: 'تم تسجيل تأكيد الموظف بأنه ضغط زر الإرسال داخل واتساب (USER_CONFIRMED_SEND).',
     });
   };
 

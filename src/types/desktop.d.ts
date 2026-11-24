@@ -489,6 +489,7 @@ declare global {
       }>;
       prepareShareTempFile(input: {
         token: string;
+        documentKind: string;
         fileName: string;
         bytesBase64: string;
         mimeType?: string;

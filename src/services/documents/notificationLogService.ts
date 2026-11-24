@@ -22,6 +22,7 @@ export type DocumentOperationStatus =
   | 'PRINT_STATUS_UNKNOWN'
   | 'PRINT_SENT'
   | 'SHARE_OPENED'
+  | 'FALLBACK_DOWNLOAD_AND_WA'
   | 'WHATSAPP_LAUNCHED'
   | 'USER_COPIED_TEXT'
   | 'USER_CONFIRMED_SEND';
@@ -44,6 +45,8 @@ export interface DocumentOperationLogEntry {
   fileName?: string;
   failureReason?: string;
   recipientName?: string;
+  recipientPhoneMasked?: string;
+  dispatchId?: string;
   channel?:
     | 'WHATSAPP'
     | 'WEB_SHARE'
@@ -125,6 +128,7 @@ const STATUS_LABELS: Record<DocumentOperationStatus, string> = {
   PRINT_STATUS_UNKNOWN: 'حالة الطباعة غير مؤكدة من النظام',
   PRINT_SENT: 'أُرسلت مهمة الطباعة',
   SHARE_OPENED: 'فُتحت نافذة المشاركة',
+  FALLBACK_DOWNLOAD_AND_WA: 'تم تجهيز المرفق والنص للتنزيل دون فتح واتساب',
   WHATSAPP_LAUNCHED: 'تم فتح واتساب',
   USER_COPIED_TEXT: 'نسخ المستخدم النص',
   USER_CONFIRMED_SEND: 'أكّد المستخدم الإرسال',
@@ -145,6 +149,8 @@ export async function recordDocumentOperation(params: {
   fileName?: string;
   failureReason?: string;
   recipientName?: string;
+  recipientPhoneMasked?: string;
+  dispatchId?: string;
   channel?: DocumentOperationLogEntry['channel'];
   syncAudit?: boolean;
 }): Promise<DocumentOperationLogEntry> {
@@ -175,6 +181,8 @@ export async function recordDocumentOperation(params: {
     fileName: safeFile,
     failureReason: params.failureReason ? String(params.failureReason).slice(0, 240) : undefined,
     recipientName: params.recipientName ? String(params.recipientName).slice(0, 120) : undefined,
+    recipientPhoneMasked: params.recipientPhoneMasked ? String(params.recipientPhoneMasked).slice(0, 32) : undefined,
+    dispatchId: params.dispatchId ? String(params.dispatchId).slice(0, 80) : params.operationType === 'SHARE' ? createEventId() : undefined,
     channel: params.channel,
   };
 
@@ -191,7 +199,14 @@ export async function recordDocumentOperation(params: {
     if (entry.failureReason) parts.push(`السبب: ${entry.failureReason}`);
 
     try {
-      await dataService.logAction(ACTION_LABELS[entry.operationType], parts.join(' | '));
+      if (entry.operationType === 'SHARE') {
+        await dataService.logAction(
+          'WHATSAPP_DISPATCH_EVENT',
+          JSON.stringify({ schemaVersion: 1, event: entry })
+        );
+      } else {
+        await dataService.logAction(ACTION_LABELS[entry.operationType], parts.join(' | '));
+      }
     } catch {
       // قد يكون الاستدعاء قبل اكتمال الجلسة أو من اختبار وحدة؛ لا نعطل عملية العرض/الحفظ
     }
@@ -203,13 +218,37 @@ export async function recordDocumentOperation(params: {
 export function getDocumentOperationLogs(filter?: {
   documentNumber?: string;
   operationType?: DocumentOperationType;
+  dispatchId?: string;
 }): DocumentOperationLogEntry[] {
   const all = readPersistedLogs();
   return all.filter((item) => {
     if (filter?.documentNumber && item.documentNumber !== filter.documentNumber) return false;
     if (filter?.operationType && item.operationType !== filter.operationType) return false;
+    if (filter?.dispatchId && item.dispatchId !== filter.dispatchId) return false;
     return true;
   });
+}
+
+export async function getWhatsAppDispatchAuditTrail(filter?: {
+  documentNumber?: string;
+  dispatchId?: string;
+}): Promise<DocumentOperationLogEntry[]> {
+  const auditRows = await dataService.getAuditLogs();
+  const events = auditRows.flatMap((row) => {
+    if (row.action !== 'WHATSAPP_DISPATCH_EVENT') return [];
+    try {
+      const payload = JSON.parse(row.details) as { schemaVersion?: number; event?: DocumentOperationLogEntry };
+      const event = payload.event;
+      if (payload.schemaVersion !== 1 || !event || event.operationType !== 'SHARE' || !event.dispatchId) return [];
+      return [event];
+    } catch {
+      return [];
+    }
+  });
+  return events
+    .filter((event) => !filter?.documentNumber || event.documentNumber === filter.documentNumber)
+    .filter((event) => !filter?.dispatchId || event.dispatchId === filter.dispatchId)
+    .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
 }
 
 export function clearDocumentOperationLogs(): void {

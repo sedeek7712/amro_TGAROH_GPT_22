@@ -36,6 +36,7 @@ let desktopBackend = null;
 let shuttingDown = false;
 let exitBackupCompleted = false;
 let scheduledBackupTimer = null;
+let shareTempCleanupTimer = null;
 let autoBackupInFlight = false;
 const shareTempFiles = new Map();
 
@@ -52,6 +53,10 @@ function purgeStaleShareTempFiles() {
     retentionMs: SHARE_TEMP_RETENTION_MS,
   });
 }
+
+// Recheck temporary attachments during long-running sessions; they still expire after 7 days.
+shareTempCleanupTimer = setInterval(purgeStaleShareTempFiles, 60 * 60 * 1000);
+shareTempCleanupTimer.unref?.();
 
 // The data directory is intentionally independent from the EXE installation directory
 // and remains stable even if the application display name changes.
@@ -951,7 +956,25 @@ if (!hasSingleInstance) {
     });
 
     handleTrustedIpc('erp:share:prepare-temp-file', async (_event, input) => {
-      desktopBackend.requireActor(input?.token);
+      const actor = desktopBackend.requireActor(input?.token);
+      const permissionByDocumentKind = {
+        SALE: 'invoices:view',
+        RETURN_SALE: 'invoices:view',
+        PURCHASE: 'invoices:view',
+        RETURN_PURCHASE: 'invoices:view',
+        RECEIPT_VOUCHER: 'voucher:receipt',
+        PAYMENT_VOUCHER: 'voucher:payment',
+        AMANAT_RECEIPT: 'amanat:view',
+        AMANAT_RETURN: 'amanat:view',
+        STATEMENT: 'party:view',
+        JOURNAL: 'view:accounting',
+        REPORT: 'view:reports',
+      };
+      const requiredPermission = permissionByDocumentKind[String(input?.documentKind || '')];
+      if (!requiredPermission) {
+        throw new Error('نوع المستند غير مدعوم للمشاركة عبر واتساب.');
+      }
+      assertPermission(actor, requiredPermission, 'مشاركة مستند عبر واتساب');
       purgeStaleShareTempFiles();
       return prepareShareTempFileOnDisk({
         tempDir: getShareTempDirectory(),
@@ -1058,6 +1081,7 @@ if (!hasSingleInstance) {
     try {
       const opened = await openErpDatabase({ userDataPath: app.getPath('userData') });
       bindDatabaseRuntime(opened);
+      purgeStaleShareTempFiles();
       registerSafeIpcHandlers();
       syncScheduledBackupTimer();
       diagnosticLogger.log('INFO', 'startup', 'Desktop application started and SQLite verified', {
@@ -1079,6 +1103,10 @@ if (!hasSingleInstance) {
 
   app.on('before-quit', async (event) => {
     clearScheduledBackupTimer();
+    if (shareTempCleanupTimer) {
+      clearInterval(shareTempCleanupTimer);
+      shareTempCleanupTimer = null;
+    }
     purgeStaleShareTempFiles();
     if (exitBackupCompleted) return;
     if (shuttingDown) {

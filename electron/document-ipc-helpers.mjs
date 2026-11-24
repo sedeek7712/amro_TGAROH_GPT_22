@@ -3,6 +3,18 @@ import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } f
 import path from 'node:path';
 
 export const SHARE_TEMP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+export const MAX_SHARE_TEMP_FILE_BYTES = 32 * 1024 * 1024;
+
+function isPathInsideDirectory(basePath, targetPath) {
+  if (!basePath || !targetPath) return false;
+  const relative = path.relative(path.resolve(basePath), path.resolve(targetPath));
+  return Boolean(
+    relative &&
+    relative !== '..' &&
+    !relative.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relative)
+  );
+}
 
 export function classifyFsErrorStatus(error) {
   const code = error && typeof error === 'object' ? String(error.code || '') : '';
@@ -367,11 +379,11 @@ export function purgeStaleShareTempFiles({
     }
     const resolvedBase = path.resolve(tempDir);
     const cutoff = nowMs - retentionMs;
-    const activePaths = new Set();
+    const activePaths = new Map();
     if (shareTempFiles instanceof Map) {
       for (const info of shareTempFiles.values()) {
         if (info?.active === true && info.path) {
-          activePaths.add(path.resolve(info.path));
+          activePaths.set(path.resolve(info.path), Number(info.createdAt) || 0);
         }
       }
     }
@@ -389,11 +401,12 @@ export function purgeStaleShareTempFiles({
         if (!st.isFile()) continue;
         // Files prepared in this running session remain pinned until explicit
         // cleanup or process restart; orphaned files still obey 7-day retention.
-        if (activePaths.has(fullPath)) {
+        const activeCreatedAt = activePaths.get(fullPath);
+        if (activeCreatedAt && activeCreatedAt >= cutoff) {
           keptFiles += 1;
           continue;
         }
-        if (st.mtimeMs < cutoff) {
+        if (st.mtimeMs < cutoff || (activePaths.has(fullPath) && activeCreatedAt < cutoff)) {
           rmSync(fullPath, { force: true });
           removedFiles += 1;
         } else {
@@ -407,13 +420,11 @@ export function purgeStaleShareTempFiles({
     if (shareTempFiles instanceof Map) {
       for (const [token, info] of shareTempFiles.entries()) {
         const resolvedInfoPath = info?.path ? path.resolve(info.path) : '';
-        const insideDir = Boolean(
-          resolvedInfoPath && resolvedInfoPath.startsWith(resolvedBase + path.sep)
-        );
+        const insideDir = isPathInsideDirectory(resolvedBase, resolvedInfoPath);
         if (
           !insideDir ||
           !existsSync(resolvedInfoPath) ||
-          (info?.createdAt && info.createdAt < cutoff && info?.active !== true)
+          (Number(info?.createdAt) > 0 && Number(info.createdAt) < cutoff)
         ) {
           shareTempFiles.delete(token);
         }
@@ -429,20 +440,41 @@ export function prepareShareTempFileOnDisk({ tempDir, shareTempFiles, input }) {
   const rawName = path.basename(String(input?.fileName || 'document.pdf').trim());
   const safeName = rawName.replace(/[\\/:*?"<>|]+/g, '-').slice(0, 96) || 'document.pdf';
   const bytesBase64 = typeof input?.bytesBase64 === 'string' ? input.bytesBase64 : '';
-  if (!bytesBase64) {
-    throw new Error('بيانات الملف المؤقت فارغة.');
+  if (!bytesBase64 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(bytesBase64)) {
+    throw new Error('بيانات الملف المؤقت ليست Base64 صالحة.');
+  }
+  if (bytesBase64.length > Math.ceil(MAX_SHARE_TEMP_FILE_BYTES / 3) * 4) {
+    throw new Error('حجم ملف المشاركة يتجاوز الحد المسموح به.');
   }
   const buffer = Buffer.from(bytesBase64, 'base64');
-  if (buffer.length <= 0) {
-    throw new Error('الملف المؤقت فارغ.');
+  if (buffer.length <= 0 || buffer.toString('base64') !== bytesBase64) {
+    throw new Error('الملف المؤقت فارغ أو بياناته غير صالحة.');
+  }
+  if (buffer.length > MAX_SHARE_TEMP_FILE_BYTES) {
+    throw new Error('حجم ملف المشاركة يتجاوز الحد المسموح به.');
+  }
+
+  const extension = path.extname(safeName).toLowerCase();
+  const mimeType = String(input?.mimeType || (extension === '.png' ? 'image/png' : 'application/pdf')).toLowerCase();
+  if (mimeType === 'application/pdf') {
+    if (extension !== '.pdf' || !hasValidPdfStructure(buffer)) {
+      throw new Error('محتوى ملف المشاركة لا يطابق مستند PDF صالحاً.');
+    }
+  } else if (mimeType === 'image/png') {
+    if (extension !== '.png' || !hasValidPngHeader(buffer)) {
+      throw new Error('محتوى ملف المشاركة لا يطابق صورة PNG صالحة.');
+    }
+  } else {
+    throw new Error('نوع ملف المشاركة غير مسموح؛ يُقبل PDF أو PNG فقط.');
   }
 
   mkdirSync(tempDir, { recursive: true });
   const uniqueToken = randomUUID();
-  const tempFilePath = path.join(tempDir, `${uniqueToken.slice(0, 8)}-${safeName}`);
-  writeFileSync(tempFilePath, buffer);
+  const tempFilePath = path.join(tempDir, uniqueToken.slice(0, 8) + '-' + safeName);
+  writeFileSync(tempFilePath, buffer, { flag: 'wx', mode: 0o600 });
   const stat = statSync(tempFilePath);
-  if (!stat || !stat.isFile() || stat.size <= 0) {
+  if (!stat || !stat.isFile() || stat.size <= 0 || stat.size !== buffer.length) {
+    rmSync(tempFilePath, { force: true });
     throw new Error('تعذر التحقق من كتابة الملف المؤقت.');
   }
 
@@ -459,7 +491,6 @@ export function prepareShareTempFileOnDisk({ tempDir, shareTempFiles, input }) {
     sizeBytes: stat.size,
   };
 }
-
 export function revealShareTempFileOnDisk({ tempDir, shareTempFiles, shell, tempToken }) {
   const tokenKey = String(tempToken || '');
   const entry = shareTempFiles?.get?.(tokenKey);
@@ -473,7 +504,7 @@ export function revealShareTempFileOnDisk({ tempDir, shareTempFiles, shell, temp
 
   const resolvedBase = path.resolve(tempDir);
   const resolvedPath = path.resolve(entry.path);
-  if (!resolvedPath.startsWith(resolvedBase + path.sep) || !existsSync(resolvedPath)) {
+  if (!isPathInsideDirectory(resolvedBase, resolvedPath) || !existsSync(resolvedPath)) {
     return {
       revealed: false,
       exists: false,
@@ -519,7 +550,7 @@ export function executeCleanupShareTempFileIpc({ tempDir, shareTempFiles, tempTo
     try {
       const resolvedBase = tempDir ? path.resolve(tempDir) : '';
       const resolvedPath = entry.path ? path.resolve(entry.path) : '';
-      const isContained = !resolvedBase || resolvedPath.startsWith(resolvedBase + path.sep);
+      const isContained = isPathInsideDirectory(resolvedBase, resolvedPath);
       if (isContained && resolvedPath && existsSync(resolvedPath)) {
         rmSync(resolvedPath, { force: true });
       }
@@ -530,13 +561,36 @@ export function executeCleanupShareTempFileIpc({ tempDir, shareTempFiles, tempTo
   return { cleaned: true };
 }
 
+export function isAllowedWhatsAppUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || rawUrl.length === 0 || rawUrl.length > 12000) return false;
+  let parsed;
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (parsed.username || parsed.password || parsed.port || parsed.hash) return false;
+  const keys = [...parsed.searchParams.keys()];
+  if (keys.some((key) => !['phone', 'text'].includes(key))) return false;
+  if (parsed.searchParams.getAll('phone').length > 1 || parsed.searchParams.getAll('text').length > 1) return false;
+
+  const isValidPhone = (value) => /^[1-9]\d{7,14}$/.test(String(value || ''));
+  if (parsed.protocol === 'https:' && parsed.hostname === 'wa.me') {
+    const phone = parsed.pathname.match(/^\/([1-9]\d{7,14})$/)?.[1];
+    return Boolean(phone && keys.every((key) => key === 'text'));
+  }
+  if (parsed.protocol === 'https:' && parsed.hostname === 'api.whatsapp.com') {
+    return parsed.pathname === '/send' && isValidPhone(parsed.searchParams.get('phone'));
+  }
+  if (parsed.protocol === 'whatsapp:' && parsed.hostname === 'send' && ['', '/'].includes(parsed.pathname)) {
+    return isValidPhone(parsed.searchParams.get('phone'));
+  }
+  return false;
+}
+
 export async function openAllowedWhatsAppUrl({ shell, url, logger }) {
   const rawUrl = String(url || '').trim();
-  const isAllowed =
-    rawUrl.startsWith('https://wa.me/') ||
-    rawUrl.startsWith('https://api.whatsapp.com/') ||
-    rawUrl.startsWith('whatsapp://');
-  if (!isAllowed) {
+  if (!isAllowedWhatsAppUrl(rawUrl)) {
     throw new Error('تم حظر الرابط: يُسمح فقط بروابط WhatsApp الموثقة.');
   }
   try {

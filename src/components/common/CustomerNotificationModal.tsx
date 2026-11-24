@@ -6,7 +6,7 @@
  * - تسجل عمليات التحضير والطباعة والحفظ والمشاركة في NotificationLogService دون ادعاء التسليم (DELIVERED ممنوع).
  */
 
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
@@ -35,6 +35,7 @@ import { recordDocumentOperation } from '../../services/documents/notificationLo
 import { computeDocumentCanvasSpec } from '../../services/documents/pngDocumentService';
 import {
   cleanupShareTempFileIfAny,
+  copyTextToClipboard,
   executeWhatsAppOrNativeShare,
   prepareSharePackage,
   supportsNativeFileShare,
@@ -129,6 +130,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     fileName: string;
     sizeBytes: number;
   } | null>(null);
+  const messageTextareaRef = useRef<HTMLTextAreaElement | null>(null);
 
   const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const actor =
@@ -272,11 +274,20 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
 
   const handleCopy = async () => {
     if (isBlocked) return;
-    try {
-      await navigator.clipboard.writeText(customMessage);
-    } catch {
-      // ignore clipboard fallback error
+    const copyRes = await copyTextToClipboard(customMessage);
+    if (!copyRes.copied) {
+      setCopied(false);
+      messageTextareaRef.current?.focus();
+      messageTextareaRef.current?.select();
+      setStatusFeedback({
+        tone: 'error',
+        text:
+          copyRes.error ||
+          'تعذر النسخ التلقائي للحافظة؛ تم تحديد النص داخل المربع لنسخه يدوياً.',
+      });
+      return;
     }
+
     setCopied(true);
     setTimeout(() => setCopied(false), 3000);
     await recordDocumentOperation({
@@ -300,19 +311,20 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     if (isBlocked || isBusy) return;
     setIsBusy(true);
     try {
-      const res = await triggerNativePrint('A4', {
+      const res = await triggerNativePrint(snapshot?.paperSize || 'A4', {
         snapshot,
         userId: actor?.id,
         userName: actor?.fullName,
       });
       setStatusFeedback({
-        tone: res.canceled
-          ? 'warning'
-          : res.printed
-          ? 'success'
-          : res.dialogClosed
-          ? 'info'
-          : 'error',
+        tone:
+          res.canceled || res.outcome === 'unconfirmed' || res.outcome === 'browser-unknown'
+            ? 'warning'
+            : res.printed
+            ? 'success'
+            : res.dialogClosed
+            ? 'info'
+            : 'error',
         text: res.message,
       });
     } finally {
@@ -416,11 +428,18 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
           outcome.status === 'WHATSAPP_LAUNCHED' ||
           outcome.status === 'FALLBACK_DOWNLOAD_AND_WA'
       );
+      if (outcome.usedFallbackCopyFlow && outcome.clipboardCopied === false) {
+        messageTextareaRef.current?.focus();
+        messageTextareaRef.current?.select();
+      }
       setStatusFeedback({
         tone:
           outcome.status === 'FAILED'
             ? 'error'
-            : outcome.status === 'CANCELED' || outcome.isOffline
+            : outcome.status === 'CANCELED' ||
+              outcome.isOffline ||
+              outcome.clipboardCopied === false ||
+              outcome.tempFileRevealed === false
             ? 'warning'
             : outcome.whatsappLaunched || outcome.sharedWithAttachment
             ? 'success'
@@ -445,6 +464,9 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
       tempToken: activeTempFile.tempToken,
     });
     if (!res.revealed) {
+      if (res.exists === false) {
+        setActiveTempFile(null);
+      }
       setStatusFeedback({
         tone: 'warning',
         text: res.error || 'تعذر فتح مجلد الملف المؤقت.',
@@ -688,6 +710,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
               </button>
             </div>
             <textarea
+              ref={messageTextareaRef}
               rows={6}
               disabled={isBlocked}
               value={customMessage}

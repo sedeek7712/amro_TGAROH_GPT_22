@@ -15,6 +15,16 @@ import { assertPermission } from './sqlite/rbac.mjs';
 import { DesktopAuthenticationService } from './security/authentication.mjs';
 import { createDesktopBackend } from './sqlite/desktop-backend.mjs';
 import { createDiagnosticLogger } from './logging/diagnostic-logger.mjs';
+import {
+  executeCleanupShareTempFileIpc,
+  executeExportPdfIpc,
+  executeExportPngIpc,
+  executeRunNativePrintIpc,
+  openAllowedWhatsAppUrl,
+  prepareShareTempFileOnDisk,
+  purgeStaleShareTempFiles as purgeShareTempDirFiles,
+  revealShareTempFileOnDisk,
+} from './document-ipc-helpers.mjs';
 
 const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
 const STABLE_DATA_FOLDER = 'AmroAlnmaryERP';
@@ -33,40 +43,14 @@ function getShareTempDirectory() {
   return path.join(app.getPath('temp'), 'AmroErpShareTemp');
 }
 
-function classifyFsErrorStatus(error) {
-  const code = error && typeof error === 'object' ? String(error.code || '') : '';
-  if (['ENOENT', 'ENOTDIR', 'EACCES', 'EPERM', 'EROFS', 'EBUSY', 'ENODEV'].includes(code)) {
-    return 'PATH_UNREACHABLE';
-  }
-  return 'WRITE_FAILED';
-}
-
 const SHARE_TEMP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 
 function purgeStaleShareTempFiles() {
-  try {
-    const dir = getShareTempDirectory();
-    if (!existsSync(dir)) return;
-    const cutoff = Date.now() - SHARE_TEMP_RETENTION_MS;
-    for (const entry of readdirSync(dir)) {
-      const fullPath = path.join(dir, entry);
-      try {
-        const st = statSync(fullPath);
-        if (st.mtimeMs < cutoff) {
-          rmSync(fullPath, { force: true });
-        }
-      } catch {
-        // ignore per-file cleanup issues
-      }
-    }
-    for (const [token, info] of shareTempFiles.entries()) {
-      if (!info?.path || !existsSync(info.path) || (info.createdAt && info.createdAt < cutoff)) {
-        shareTempFiles.delete(token);
-      }
-    }
-  } catch {
-    // non-fatal
-  }
+  purgeShareTempDirFiles({
+    tempDir: getShareTempDirectory(),
+    shareTempFiles,
+    retentionMs: SHARE_TEMP_RETENTION_MS,
+  });
 }
 
 // The data directory is intentionally independent from the EXE installation directory
@@ -936,319 +920,72 @@ if (!hasSingleInstance) {
 
     handleTrustedIpc('erp:print:export-pdf', async (_event, input) => {
       const actor = desktopBackend.requireActor(input?.token);
-      const rawTitle = String(input?.title || 'document').trim() || 'document';
-      const safeTitle = rawTitle.replace(/[\\/:*?"<>|]+/g, '-').replace(/\.pdf$/i, '').slice(0, 96) || 'document';
-      const pageSizeMode =
-        input?.pageSize === '58mm' ? '58mm' : input?.pageSize === '80mm' ? '80mm' : 'A4';
-      const res = await dialog.showSaveDialog(mainWindow, {
-        title: 'حفظ المستند بصيغة PDF',
-        defaultPath: `${safeTitle}.pdf`,
-        filters: [{ name: 'PDF Documents', extensions: ['pdf'] }],
+      return await executeExportPdfIpc({
+        mainWindow,
+        dialog,
+        input,
+        actor,
+        logger: diagnosticLogger,
       });
-      if (res.canceled || !res.filePath) {
-        return { canceled: true, status: 'CANCELED' };
-      }
-
-      const isSnapshotSource = typeof input?.pdfBase64 === 'string' && input.pdfBase64.length > 0;
-      let pdfBuffer;
-      try {
-        if (isSnapshotSource) {
-          pdfBuffer = Buffer.from(input.pdfBase64, 'base64');
-        } else {
-          const printPageSize =
-            pageSizeMode === '58mm'
-              ? { width: 2.28, height: 11.69 }
-              : pageSizeMode === '80mm'
-              ? { width: 3.15, height: 11.69 }
-              : 'A4';
-          pdfBuffer = await mainWindow.webContents.printToPDF({
-            printBackground: true,
-            preferCSSPageSize: true,
-            pageSize: printPageSize,
-          });
-        }
-
-        const hasPdfHeader =
-          Buffer.isBuffer(pdfBuffer) &&
-          pdfBuffer.length > 32 &&
-          pdfBuffer.subarray(0, 5).toString('ascii') === '%PDF-';
-        if (!hasPdfHeader) {
-          return {
-            canceled: false,
-            status: 'CREATE_FAILED',
-            error: 'تعذر توليد ملف PDF صالح (%PDF- غير موجود أو الملف فارغ).',
-          };
-        }
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : 'فشل إنشاء PDF.';
-        diagnosticLogger.log('ERROR', 'print', 'PDF generation failed', { message: msg });
-        return { canceled: false, status: 'CREATE_FAILED', error: msg };
-      }
-
-      try {
-        const parentDir = path.dirname(res.filePath);
-        if (!existsSync(parentDir)) {
-          return {
-            canceled: false,
-            status: 'PATH_UNREACHABLE',
-            error: 'المجلد المحدد لحفظ الملف غير متاح.',
-          };
-        }
-        writeFileSync(res.filePath, pdfBuffer);
-        if (!existsSync(res.filePath)) {
-          return {
-            canceled: false,
-            status: 'WRITE_FAILED',
-            error: 'لم يتم العثور على الملف بعد محاولة الكتابة.',
-          };
-        }
-        const stat = statSync(res.filePath);
-        if (!stat || stat.size <= 0) {
-          return {
-            canceled: false,
-            status: 'WRITE_FAILED',
-            error: 'حجم ملف PDF المكتوب يساوي صفراً.',
-          };
-        }
-
-        diagnosticLogger.log('INFO', 'print', 'Document exported and verified as PDF', {
-          filename: path.basename(res.filePath),
-          pageSize: pageSizeMode,
-          sizeBytes: stat.size,
-          source: isSnapshotSource ? 'SNAPSHOT_PDF' : 'PRINT_TO_PDF',
-          exportedBy: actor.username,
-        });
-        return {
-          canceled: false,
-          status: 'SAVED',
-          path: res.filePath,
-          filename: path.basename(res.filePath),
-          sizeBytes: stat.size,
-          source: isSnapshotSource ? 'SNAPSHOT_PDF' : 'PRINT_TO_PDF',
-        };
-      } catch (err) {
-        const writeStatus = classifyFsErrorStatus(err);
-        const msg = err instanceof Error ? err.message : 'تعذر كتابة ملف PDF على القرص.';
-        diagnosticLogger.log('ERROR', 'print', 'PDF write failed', { writeStatus, message: msg });
-        return {
-          canceled: false,
-          status: writeStatus,
-          error: msg,
-        };
-      }
     });
 
     handleTrustedIpc('erp:print:export-png', async (_event, input) => {
       const actor = desktopBackend.requireActor(input?.token);
-      const rawTitle = String(input?.title || 'document').trim() || 'document';
-      const safeTitle = rawTitle.replace(/[\\/:*?"<>|]+/g, '-').replace(/\.png$/i, '').slice(0, 96) || 'document';
-      const bytesBase64 = typeof input?.bytesBase64 === 'string' ? input.bytesBase64 : '';
-      if (!bytesBase64) {
-        return {
-          canceled: false,
-          status: 'CREATE_FAILED',
-          error: 'بيانات صورة PNG فارغة.',
-        };
-      }
-
-      let pngBuffer;
-      try {
-        pngBuffer = Buffer.from(bytesBase64, 'base64');
-        const isPng =
-          pngBuffer.length > 32 &&
-          pngBuffer[0] === 0x89 &&
-          pngBuffer[1] === 0x50 &&
-          pngBuffer[2] === 0x4e &&
-          pngBuffer[3] === 0x47;
-        if (!isPng) {
-          return {
-            canceled: false,
-            status: 'CREATE_FAILED',
-            error: 'البيانات المرسلة ليست صورة PNG صالحة.',
-          };
-        }
-      } catch (err) {
-        return {
-          canceled: false,
-          status: 'CREATE_FAILED',
-          error: err instanceof Error ? err.message : 'تعذر فك ترميز صورة PNG.',
-        };
-      }
-
-      const res = await dialog.showSaveDialog(mainWindow, {
-        title: 'حفظ المستند كصورة PNG',
-        defaultPath: `${safeTitle}.png`,
-        filters: [{ name: 'PNG Images', extensions: ['png'] }],
+      return await executeExportPngIpc({
+        mainWindow,
+        dialog,
+        input,
+        actor,
+        logger: diagnosticLogger,
       });
-      if (res.canceled || !res.filePath) {
-        return { canceled: true, status: 'CANCELED' };
-      }
-
-      try {
-        const parentDir = path.dirname(res.filePath);
-        if (!existsSync(parentDir)) {
-          return {
-            canceled: false,
-            status: 'PATH_UNREACHABLE',
-            error: 'المسار المحدد لحفظ الصورة غير متاح.',
-          };
-        }
-        writeFileSync(res.filePath, pngBuffer);
-        const stat = existsSync(res.filePath) ? statSync(res.filePath) : null;
-        if (!stat || stat.size <= 0) {
-          return {
-            canceled: false,
-            status: 'WRITE_FAILED',
-            error: 'تعذر التحقق من حفظ ملف PNG على القرص.',
-          };
-        }
-        diagnosticLogger.log('INFO', 'print', 'Document exported and verified as PNG', {
-          filename: path.basename(res.filePath),
-          sizeBytes: stat.size,
-          exportedBy: actor.username,
-        });
-        return {
-          canceled: false,
-          status: 'SAVED',
-          path: res.filePath,
-          filename: path.basename(res.filePath),
-          sizeBytes: stat.size,
-        };
-      } catch (err) {
-        const writeStatus = classifyFsErrorStatus(err);
-        return {
-          canceled: false,
-          status: writeStatus,
-          error: err instanceof Error ? err.message : 'تعذر حفظ صورة PNG.',
-        };
-      }
     });
 
     handleTrustedIpc('erp:print:run-native', async (_event, input) => {
       const actor = desktopBackend.requireActor(input?.token);
-      if (!mainWindow || mainWindow.isDestroyed()) {
-        return {
-          printed: false,
-          canceled: false,
-          outcome: 'window-unavailable',
-          failureReason: 'النافذة غير متاحة للطباعة.',
-        };
-      }
-      return await new Promise((resolve) => {
-        mainWindow.webContents.print(
-          {
-            silent: false,
-            printBackground: true,
-          },
-          (success, failureReason) => {
-            const canceled = failureReason === 'cancelled' || failureReason === 'canceled';
-            const outcome = canceled ? 'canceled' : success ? 'sent' : 'failed';
-            diagnosticLogger.log('INFO', 'print', 'Native print command finished', {
-              outcome,
-              printed: Boolean(success),
-              canceled,
-              failureReason: failureReason || null,
-              actor: actor.username,
-            });
-            resolve({
-              printed: Boolean(success),
-              canceled,
-              outcome,
-              failureReason: failureReason || undefined,
-            });
-          }
-        );
+      return await executeRunNativePrintIpc({
+        mainWindow,
+        input,
+        actor,
+        logger: diagnosticLogger,
       });
     });
 
     handleTrustedIpc('erp:share:prepare-temp-file', async (_event, input) => {
       desktopBackend.requireActor(input?.token);
       purgeStaleShareTempFiles();
-      const rawName = path.basename(String(input?.fileName || 'document.pdf').trim());
-      const safeName = rawName.replace(/[\\/:*?"<>|]+/g, '-').slice(0, 96) || 'document.pdf';
-      const bytesBase64 = typeof input?.bytesBase64 === 'string' ? input.bytesBase64 : '';
-      if (!bytesBase64) {
-        throw new Error('بيانات الملف المؤقت فارغة.');
-      }
-      const buffer = Buffer.from(bytesBase64, 'base64');
-      if (buffer.length <= 0) {
-        throw new Error('الملف المؤقت فارغ.');
-      }
-
-      const tempDir = getShareTempDirectory();
-      mkdirSync(tempDir, { recursive: true });
-      const uniqueToken = randomUUID();
-      const tempFilePath = path.join(tempDir, `${uniqueToken.slice(0, 8)}-${safeName}`);
-      writeFileSync(tempFilePath, buffer);
-      const stat = statSync(tempFilePath);
-      if (!stat || stat.size <= 0) {
-        throw new Error('تعذر التحقق من كتابة الملف المؤقت.');
-      }
-
-      shareTempFiles.set(uniqueToken, {
-        path: tempFilePath,
-        fileName: safeName,
-        createdAt: Date.now(),
+      return prepareShareTempFileOnDisk({
+        tempDir: getShareTempDirectory(),
+        shareTempFiles,
+        input,
       });
-
-      return {
-        tempToken: uniqueToken,
-        fileName: safeName,
-        sizeBytes: stat.size,
-      };
     });
 
     handleTrustedIpc('erp:share:reveal-temp-file', async (_event, input) => {
       desktopBackend.requireActor(input?.token);
-      const tempToken = String(input?.tempToken || '');
-      const entry = shareTempFiles.get(tempToken);
-      if (!entry || !existsSync(entry.path)) {
-        return { revealed: false, error: 'الملف المؤقت غير موجود أو انتهت صلاحيته.' };
-      }
-      shell.showItemInFolder(entry.path);
-      return { revealed: true };
+      return revealShareTempFileOnDisk({
+        tempDir: getShareTempDirectory(),
+        shareTempFiles,
+        shell,
+        tempToken: input?.tempToken,
+      });
     });
 
     handleTrustedIpc('erp:share:cleanup-temp-file', async (_event, input) => {
       desktopBackend.requireActor(input?.token);
-      const tempToken = String(input?.tempToken || '');
-      const entry = shareTempFiles.get(tempToken);
-      if (entry) {
-        try {
-          if (existsSync(entry.path)) {
-            rmSync(entry.path, { force: true });
-          }
-        } finally {
-          shareTempFiles.delete(tempToken);
-        }
-      }
-      return { cleaned: true };
+      return executeCleanupShareTempFileIpc({
+        tempDir: getShareTempDirectory(),
+        shareTempFiles,
+        tempToken: input?.tempToken,
+      });
     });
 
     handleTrustedIpc('erp:share:open-whatsapp-url', async (_event, input) => {
       desktopBackend.requireActor(input?.token);
-      const rawUrl = String(input?.url || '').trim();
-      const isAllowed =
-        rawUrl.startsWith('https://wa.me/') ||
-        rawUrl.startsWith('https://api.whatsapp.com/') ||
-        rawUrl.startsWith('whatsapp://');
-      if (!isAllowed) {
-        throw new Error('تم حظر الرابط: يُسمح فقط بروابط WhatsApp الموثقة.');
-      }
-      try {
-        await shell.openExternal(rawUrl);
-        return { opened: true };
-      } catch (err) {
-        const msg =
-          err instanceof Error
-            ? err.message
-            : 'تعذر فتح تطبيق واتساب على هذا الجهاز.';
-        diagnosticLogger.log('WARN', 'share', 'WhatsApp launch failed', {
-          protocol: rawUrl.startsWith('whatsapp://') ? 'whatsapp://' : 'https://',
-          message: msg,
-        });
-        return { opened: false, error: msg };
-      }
+      return await openAllowedWhatsAppUrl({
+        shell,
+        url: input?.url,
+        logger: diagnosticLogger,
+      });
     });
   }
 

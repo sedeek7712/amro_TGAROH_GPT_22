@@ -36,6 +36,7 @@ interface DocumentPrintShellProps {
   allowThermal?: boolean;
   snapshot?: DocumentSnapshot;
   buildSnapshot?: (paperSize: DocumentPaperSize) => DocumentSnapshot;
+  blockedReason?: string;
   onClose: () => void;
   onNotify?: () => void;
   notifyLabel?: string;
@@ -51,6 +52,7 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
   allowThermal = true,
   snapshot,
   buildSnapshot,
+  blockedReason,
   onClose,
   onNotify,
   notifyLabel = 'مشاركة / إشعار واتساب',
@@ -106,14 +108,22 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
     return activeSnapshot ? computeDocumentCanvasSpec(activeSnapshot) : null;
   }, [activeSnapshot]);
 
+  const isBlocked = Boolean(blockedReason);
+
   const handlePrint = async () => {
-    if (isBusy) return;
+    if (isBusy || isBlocked) return;
     setIsBusy(true);
     try {
       const res = await triggerNativePrint(paperSize, { snapshot: activeSnapshot });
       setStatusMessage(res.message);
       setStatusTone(
-        res.canceled ? 'warning' : res.printed ? 'success' : res.dialogClosed ? 'info' : 'error'
+        res.canceled || res.outcome === 'unconfirmed' || res.outcome === 'browser-unknown'
+          ? 'warning'
+          : res.printed
+          ? 'success'
+          : res.dialogClosed
+          ? 'info'
+          : 'error'
       );
     } catch (err: unknown) {
       setStatusMessage(err instanceof Error ? err.message : 'تعذر تنفيذ أمر الطباعة.');
@@ -124,7 +134,7 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
   };
 
   const handleExportPdf = async () => {
-    if (isBusy) return;
+    if (isBusy || isBlocked) return;
     setStatusMessage(null);
     setSaveState('PREPARING');
     setStatusTone('info');
@@ -157,7 +167,7 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
   };
 
   const handleExportPng = async () => {
-    if (isBusy || !activeSnapshot) return;
+    if (isBusy || isBlocked || !activeSnapshot) return;
     if (pngSpec && !pngSpec.allowSinglePng) {
       setStatusMessage(
         pngSpec.rejectionReasonForPng ||
@@ -289,7 +299,8 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
               <button
                 type="button"
                 onClick={onNotify}
-                className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg transition-colors"
+                disabled={isBlocked}
+                className="flex items-center gap-1 px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
               >
                 <MessageSquare className="w-3.5 h-3.5" />
                 <span>{notifyLabel}</span>
@@ -300,7 +311,7 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
               <button
                 type="button"
                 onClick={handleExportPng}
-                disabled={isBusy || (pngSpec ? !pngSpec.allowSinglePng : false)}
+                disabled={isBusy || isBlocked || (pngSpec ? !pngSpec.allowSinglePng : false)}
                 className="flex items-center gap-1 px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-45 disabled:cursor-not-allowed"
                 title={
                   pngSpec && !pngSpec.allowSinglePng
@@ -316,8 +327,8 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
             <button
               type="button"
               onClick={handleExportPdf}
-              disabled={isBusy}
-              className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-50"
+              disabled={isBusy || isBlocked}
+              className="flex items-center gap-1 px-2.5 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-[11px] font-bold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
               title="حفظ المستند بصيغة PDF"
             >
               <FileDown className="w-3.5 h-3.5" />
@@ -331,8 +342,8 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
             <button
               type="button"
               onClick={handlePrint}
-              disabled={isBusy}
-              className="flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-900 text-[11px] font-extrabold rounded-lg transition-colors disabled:opacity-50"
+              disabled={isBusy || isBlocked}
+              className="flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-900 text-[11px] font-extrabold rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Printer className="w-3.5 h-3.5" />
               <span>طباعة ({paperSize})</span>
@@ -348,6 +359,15 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
             </button>
           </div>
         </div>
+
+        {blockedReason && (
+          <div
+            role="alert"
+            className="no-print px-4 py-2.5 border-b border-rose-300 bg-rose-50 text-rose-900 text-xs font-bold"
+          >
+            {blockedReason}
+          </div>
+        )}
 
         {(statusMessage || (saveState !== 'IDLE' && getSaveStatusLabel(saveState))) && (
           <div

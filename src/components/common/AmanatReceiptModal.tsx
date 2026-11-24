@@ -8,7 +8,10 @@ import { AmanatRecord } from '../../types/erp';
 import { CustomerNotificationModal } from './CustomerNotificationModal';
 import { useDocumentContext } from '../../hooks/useDocumentContext';
 import { useLiveCashBoxes } from '../../hooks/useLiveDexie';
-import { buildAmanatNotificationPayload } from '../../utils/documentNotifications';
+import {
+  buildAmanatNotificationPayload,
+  validateAmanatDocumentState,
+} from '../../utils/documentNotifications';
 import {
   buildAmanatDocumentSnapshot,
   buildStructuredBaseName,
@@ -56,14 +59,21 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
     ? cashBoxes.find((b) => b.id === record.cashBoxId)?.nameAr
     : undefined;
 
+  const docValidation = validateAmanatDocumentState(record, {
+    mode: notifyMode,
+    returnEventId: selectedReturnEventId,
+  });
+
   const notifyPayload = buildAmanatNotificationPayload(record, {
     mode: notifyMode,
     returnEventId: selectedReturnEventId,
   });
 
+  const blockedReason = !docValidation.valid ? docValidation.error : notifyPayload.error;
+
   const matchedReturnEvent =
+    !blockedReason &&
     notifyPayload.documentType === 'AMANAT_RETURN' &&
-    !notifyPayload.error &&
     notifyPayload.returnEventId
       ? record.returnHistory?.find((ev) => ev.id === notifyPayload.returnEventId)
       : undefined;
@@ -113,7 +123,7 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
     date: notifyPayload.date || record.receivedDate,
   });
 
-  const snapshotForNotification = notifyPayload.error
+  const snapshotForNotification = blockedReason
     ? undefined
     : buildAmanatDocumentSnapshot({
         record,
@@ -132,8 +142,9 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
         pdfTitle={baseFileName}
         defaultSize="A4"
         allowThermal={true}
+        blockedReason={blockedReason}
         buildSnapshot={
-          notifyPayload.error
+          blockedReason
             ? undefined
             : (paperSize) =>
                 buildAmanatDocumentSnapshot({
@@ -146,24 +157,21 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
                 })
         }
         onClose={onClose}
-        onNotify={() => setIsNotificationOpen(true)}
+        onNotify={() => {
+          if (!blockedReason) setIsNotificationOpen(true);
+        }}
         notifyLabel="إشعار ومشاركة"
       >
         {(paperSize) => (
-          <>
-            {notifyPayload.error && (
-              <div className="no-print mb-3 p-3 rounded-lg border border-rose-300 bg-rose-50 text-rose-900 text-xs font-semibold">
-                {notifyPayload.error}
-              </div>
-            )}
-            <AmanatDocument
-              record={record}
-              meta={meta}
-              paperSize={paperSize}
-              cashBoxName={cashBoxName}
-              returnEvent={matchedReturnEvent}
-            />
-          </>
+          <AmanatDocument
+            record={record}
+            meta={meta}
+            paperSize={paperSize}
+            cashBoxName={cashBoxName}
+            returnEvent={matchedReturnEvent}
+            returnEventId={selectedReturnEventId}
+            mode={notifyMode}
+          />
         )}
       </DocumentPrintShell>
 

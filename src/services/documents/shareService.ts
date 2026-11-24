@@ -49,10 +49,36 @@ export interface ShareExecutionOutcome {
   usedFallbackCopyFlow: boolean;
   whatsappLaunched?: boolean;
   clipboardCopied?: boolean;
+  clipboardError?: string;
+  tempFileRevealed?: boolean;
+  revealError?: string;
   tempToken?: string;
   noticeMessage: string;
   whatsappUrl: string;
   whatsappProtocolUrl: string;
+}
+
+export async function copyTextToClipboard(
+  text: string
+): Promise<{ copied: boolean; error?: string }> {
+  if (typeof navigator === 'undefined' || typeof navigator.clipboard?.writeText !== 'function') {
+    return {
+      copied: false,
+      error: 'واجهة الحافظة (Clipboard API) غير متاحة؛ يرجى النسخ يدوياً من مربع النص.',
+    };
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    return { copied: true };
+  } catch (err: unknown) {
+    return {
+      copied: false,
+      error:
+        err instanceof Error && err.message
+          ? `تعذر النسخ التلقائي للحافظة (${err.message})؛ يرجى النسخ يدوياً من مربع النص.`
+          : 'تعذر النسخ التلقائي للحافظة؛ يرجى النسخ يدوياً من مربع النص.',
+    };
+  }
 }
 
 export function formatWhatsAppPhone(rawPhone: string): string {
@@ -329,18 +355,22 @@ export async function executeWhatsAppOrNativeShare(params: {
 
   // 2. مسار Windows Electron أو المتصفحات التي لا تدعم navigator.canShare({ files })
   try {
-    let clipboardCopied = false;
-    if (typeof navigator !== 'undefined' && navigator.clipboard?.writeText) {
-      clipboardCopied = await navigator.clipboard
-        .writeText(pkg.messageText)
-        .then(() => true)
-        .catch(() => false);
-    }
+    const clipResult = await copyTextToClipboard(pkg.messageText);
+    const clipboardCopied = clipResult.copied;
 
     if (pkg.isDesktopElectron && window.amroDesktop) {
       const token = desktopSession.requireToken();
+      let tempFileRevealed: boolean | undefined;
+      let revealError: string | undefined;
       if (pkg.tempToken && window.amroDesktop.revealShareTempFile) {
-        await window.amroDesktop.revealShareTempFile({ token, tempToken: pkg.tempToken });
+        const revealRes = await window.amroDesktop.revealShareTempFile({
+          token,
+          tempToken: pkg.tempToken,
+        });
+        tempFileRevealed = Boolean(revealRes?.revealed);
+        if (!revealRes?.revealed) {
+          revealError = revealRes?.error || 'تعذر فتح مجلد الملف المؤقت.';
+        }
       }
 
       const targetUrl = pkg.isOffline ? pkg.whatsappProtocolUrl : pkg.whatsappUrl;
@@ -363,13 +393,23 @@ export async function executeWhatsAppOrNativeShare(params: {
         channel: waOpenResult.opened ? 'WHATSAPP' : 'ELECTRON_DIALOG',
       });
 
+      const copySegment = clipboardCopied
+        ? 'ونسخ النص'
+        : `وتعذر النسخ التلقائي للحافظة (${clipResult.error || 'انسخ النص يدوياً'})`;
+      const revealSegment =
+        tempFileRevealed === true
+          ? 'وإظهاره في المجلد'
+          : revealError
+          ? `(تعذر إظهار المجلد: ${revealError})`
+          : '';
+
       const noticeMessage = pkg.isOffline
         ? waOpenResult.opened
-          ? `وضع عدم الاتصال: تم حفظ المرفق المؤقت (${pkg.fileName}) ونسخ النص وفتح تطبيق واتساب عبر البروتوكول المحلي؛ أرفق الملف يدوياً داخل المحادثة (الإرسال الفعلي ينتظر عودة الإنترنت).`
-          : `وضع عدم الاتصال: تم حفظ المرفق المؤقت (${pkg.fileName}) ونسخ النص وإظهار المجلد، وتعذر فتح تطبيق واتساب تلقائياً (${waOpenResult.error || 'تطبيق WhatsApp Desktop غير متاح'}). يمكنك إرفاق الملف يدوياً عند عودة الإنترنت (يُحتفظ بالملف 7 أيام).`
+          ? `وضع عدم الاتصال: تم حفظ المرفق المؤقت (${pkg.fileName}) ${revealSegment} ${copySegment} وفتح تطبيق واتساب عبر البروتوكول المحلي؛ أرفق الملف يدوياً داخل المحادثة (الإرسال الفعلي ينتظر عودة الإنترنت).`
+          : `وضع عدم الاتصال: تم حفظ المرفق المؤقت (${pkg.fileName}) ${revealSegment} ${copySegment}، وتعذر فتح تطبيق واتساب تلقائياً (${waOpenResult.error || 'تطبيق WhatsApp Desktop غير متاح'}). يمكنك إرفاق الملف يدوياً عند عودة الإنترنت (يُحتفظ بالملف 7 أيام).`
         : waOpenResult.opened
-        ? `تم تجهيز المرفق (${pkg.fileName}) وإظهاره في المجلد ونسخ النص وفتح واتساب. لأن روابط واتساب لا ترفق الملفات تلقائياً، يرجى سحب/إرفاق الملف يدوياً داخل المحادثة ثم تأكيد الإرسال.`
-        : `تم تجهيز المرفق (${pkg.fileName}) وإظهاره في المجلد ونسخ النص، لكن تعذر فتح رابط واتساب تلقائياً (${waOpenResult.error || 'تحقق من المتصفح أو تطبيق واتساب'}).`;
+        ? `تم تجهيز المرفق (${pkg.fileName}) ${revealSegment} ${copySegment} وفتح واتساب. لأن روابط واتساب لا ترفق الملفات تلقائياً، يرجى سحب/إرفاق الملف يدوياً داخل المحادثة ثم تأكيد الإرسال.`
+        : `تم تجهيز المرفق (${pkg.fileName}) ${revealSegment} ${copySegment}، لكن تعذر فتح رابط واتساب تلقائياً (${waOpenResult.error || 'تحقق من المتصفح أو تطبيق واتساب'}).`;
 
       return {
         status: waOpenResult.opened ? 'WHATSAPP_LAUNCHED' : 'FALLBACK_DOWNLOAD_AND_WA',
@@ -380,14 +420,17 @@ export async function executeWhatsAppOrNativeShare(params: {
         usedFallbackCopyFlow: true,
         whatsappLaunched: waOpenResult.opened,
         clipboardCopied,
+        clipboardError: clipResult.error,
+        tempFileRevealed,
+        revealError,
         tempToken: pkg.tempToken,
         whatsappUrl: pkg.whatsappUrl,
         whatsappProtocolUrl: pkg.whatsappProtocolUrl,
-        noticeMessage,
+        noticeMessage: noticeMessage.replace(/\s+/g, ' ').trim(),
       };
     }
 
-    // مسار المتصفح العادي: تنزيل الملف محلياً مع نسخ النص
+    // مسار المتصفح العادي: تنزيل الملف محلياً مع النسخ الصادق للنص
     triggerBrowserFileDownload(pkg.file, pkg.fileName);
 
     await recordDocumentOperation({
@@ -400,9 +443,13 @@ export async function executeWhatsAppOrNativeShare(params: {
       userName: actor?.fullName,
       fileName: pkg.fileName,
       recipientName,
-      failureReason: nativeShareFailureNote,
+      failureReason: nativeShareFailureNote || clipResult.error,
       channel: 'WHATSAPP',
     });
+
+    const browserCopyNotice = clipboardCopied
+      ? 'وتم نسخ النص إلى الحافظة'
+      : 'وتعذر نسخ النص تلقائياً — يرجى نسخه يدوياً من مربع النص';
 
     return {
       status: 'FALLBACK_DOWNLOAD_AND_WA',
@@ -413,13 +460,14 @@ export async function executeWhatsAppOrNativeShare(params: {
       usedFallbackCopyFlow: true,
       whatsappLaunched: false,
       clipboardCopied,
+      clipboardError: clipResult.error,
       whatsappUrl: pkg.whatsappUrl,
       whatsappProtocolUrl: pkg.whatsappProtocolUrl,
       noticeMessage:
         nativeShareFailureNote ||
         (pkg.isOffline
-          ? `الجهاز غير متصل بالإنترنت: بدأ تنزيل المرفق (${pkg.fileName}) وتم نسخ نص الإشعار محلياً. عند عودة الإنترنت افتح واتساب وألصق النص وأرفق الملف.`
-          : `بدأ تنزيل المرفق (${pkg.fileName}) وتم نسخ النص إلى الحافظة لأن المنصة لا تدعم إرفاق الملف مباشرة داخل رابط واتساب؛ يرجى إرفاق الملف داخل محادثة واتساب ولصق النص.`),
+          ? `الجهاز غير متصل بالإنترنت: بدأ تنزيل المرفق (${pkg.fileName}) ${browserCopyNotice}. عند عودة الإنترنت افتح واتساب وألصق النص وأرفق الملف.`
+          : `بدأ تنزيل المرفق (${pkg.fileName}) ${browserCopyNotice} لأن المنصة لا تدعم إرفاق الملف مباشرة داخل رابط واتساب؛ يرجى إرفاق الملف داخل محادثة واتساب ولصق النص.`),
     };
   } catch (err: unknown) {
     const reason = err instanceof Error ? err.message : 'تعذر تجهيز المشاركة.';

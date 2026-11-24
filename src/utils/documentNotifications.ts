@@ -39,6 +39,113 @@ export interface NotificationPayload {
 export interface AmanatNotificationOptions {
   mode?: 'AUTO' | 'DEPOSIT' | 'RETURN';
   returnEventId?: string;
+  returnEvent?: import('../types/erp').AmanatReturnEvent;
+}
+
+export interface AmanatValidationResult {
+  valid: boolean;
+  isReturnDocument: boolean;
+  resolvedReturnEvent?: NonNullable<AmanatRecord['returnHistory']>[number];
+  resolvedReturnIndex: number;
+  error?: string;
+}
+
+export function validateAmanatDocumentState(
+  record: AmanatRecord,
+  options?: AmanatNotificationOptions
+): AmanatValidationResult {
+  const history = Array.isArray(record.returnHistory) ? record.returnHistory : [];
+  const mode = options?.mode || 'AUTO';
+  const hasReturnedActivity =
+    record.status === 'RETURNED' ||
+    Number(record.returnedAmount || 0) > 0 ||
+    history.length > 0;
+
+  // صريح: وضع الإيداع يُظهر أصل الإيداع ما لم يطلب حدث رد محدد
+  if (mode === 'DEPOSIT' && !options?.returnEvent && !options?.returnEventId) {
+    return {
+      valid: true,
+      isReturnDocument: false,
+      resolvedReturnEvent: undefined,
+      resolvedReturnIndex: -1,
+    };
+  }
+
+  const isReturnDocument =
+    Boolean(options?.returnEvent || options?.returnEventId) ||
+    mode === 'RETURN' ||
+    (record.status !== 'CANCELLED' && hasReturnedActivity);
+
+  if (record.type === 'CASH' && isReturnDocument) {
+    if (options?.returnEvent) {
+      const idx = history.findIndex((ev) => ev.id === options.returnEvent!.id);
+      const evAmt = roundMoney(Number(options.returnEvent.amount || 0));
+      if (idx < 0 || !Number.isFinite(evAmt) || evAmt <= 0) {
+        return {
+          valid: false,
+          isReturnDocument: true,
+          resolvedReturnEvent: undefined,
+          resolvedReturnIndex: -1,
+          error:
+            'تعذر التحقق من حدث رد الأمانة النقدية أو أن قيمته غير موجبة في سجل العمليات (returnHistory)؛ تم إيقاف عرض المستند منعاً لعرض أصل المبلغ بالخطأ.',
+        };
+      }
+      return {
+        valid: true,
+        isReturnDocument: true,
+        resolvedReturnEvent: history[idx],
+        resolvedReturnIndex: idx,
+      };
+    }
+
+    if (options?.returnEventId) {
+      const idx = history.findIndex((ev) => ev.id === options.returnEventId);
+      const found = idx >= 0 ? history[idx] : undefined;
+      const evAmt = found ? roundMoney(Number(found.amount || 0)) : 0;
+      if (!found || !Number.isFinite(evAmt) || evAmt <= 0) {
+        return {
+          valid: false,
+          isReturnDocument: true,
+          resolvedReturnEvent: undefined,
+          resolvedReturnIndex: -1,
+          error: `تعذر العثور على عملية الرد المحددة (${options.returnEventId}) أو أن قيمتها غير صالحة في سجل عمليات الأمانة (returnHistory).`,
+        };
+      }
+      return {
+        valid: true,
+        isReturnDocument: true,
+        resolvedReturnEvent: found,
+        resolvedReturnIndex: idx,
+      };
+    }
+
+    const latestIdx = history.length - 1;
+    const latest = latestIdx >= 0 ? history[latestIdx] : undefined;
+    const latestAmt = latest ? roundMoney(Number(latest.amount || 0)) : 0;
+    if (!latest || !Number.isFinite(latestAmt) || latestAmt <= 0) {
+      return {
+        valid: false,
+        isReturnDocument: true,
+        resolvedReturnEvent: undefined,
+        resolvedReturnIndex: -1,
+        error:
+          'تعذر تحديد مبلغ عملية رد الأمانة المحددة من سجل العمليات (returnHistory)؛ تم إيقاف إنشاء إشعار وسند الرد منعاً لعرض أصل المبلغ أو رقم غير دقيق.',
+      };
+    }
+    return {
+      valid: true,
+      isReturnDocument: true,
+      resolvedReturnEvent: latest,
+      resolvedReturnIndex: latestIdx,
+    };
+  }
+
+  return {
+    valid: true,
+    isReturnDocument,
+    resolvedReturnEvent: undefined,
+    resolvedReturnIndex: -1,
+  };
 }
 
 export function computeInvoiceOpenRemaining(invoice: Invoice): number {
@@ -100,39 +207,30 @@ export function buildAmanatNotificationPayload(
   options?: AmanatNotificationOptions
 ): NotificationPayload {
   const history = Array.isArray(record.returnHistory) ? record.returnHistory : [];
-  const hasReturned =
-    record.status === 'RETURNED' ||
-    Number(record.returnedAmount || 0) > 0 ||
-    history.length > 0;
+  const validation = validateAmanatDocumentState(record, options);
+
+  if (!validation.valid) {
+    return {
+      recipientName: record.depositorName,
+      recipientPhone: record.depositorPhone,
+      documentType: 'AMANAT_RETURN',
+      documentNumber: record.recordNumber,
+      documentId: record.id,
+      amount: undefined,
+      balanceRemaining: undefined,
+      date: record.returnedDate || record.receivedDate,
+      totalOriginalAmount: roundMoney(Number(record.amount || 0)),
+      error:
+        validation.error ||
+        'تعذر تحديد مبلغ عملية رد الأمانة المحددة من سجل العمليات (returnHistory)؛ تم إيقاف إنشاء إشعار المبلغ منعاً لعرض رقم غير دقيق.',
+    };
+  }
+
   const mode = options?.mode || 'AUTO';
-
-  const isReturnNotification =
-    mode === 'RETURN' ||
-    (mode !== 'DEPOSIT' && record.status !== 'CANCELLED' && hasReturned);
-
-  if (record.type === 'CASH' && isReturnNotification) {
-    const targetIndex = options?.returnEventId
-      ? history.findIndex((ev) => ev.id === options.returnEventId)
-      : history.length - 1;
-    const targetEvent = targetIndex >= 0 ? history[targetIndex] : undefined;
-    const eventAmount = targetEvent ? roundMoney(Number(targetEvent.amount || 0)) : 0;
-
-    // قاعدة 9.6 و 9.7: لا نخترع مبلغ العملية من المتبقي أو التراكمي عند غياب حدث واضح
-    if (!targetEvent || !Number.isFinite(eventAmount) || eventAmount <= 0) {
-      return {
-        recipientName: record.depositorName,
-        recipientPhone: record.depositorPhone,
-        documentType: 'AMANAT_RETURN',
-        documentNumber: record.recordNumber,
-        documentId: record.id,
-        amount: undefined,
-        balanceRemaining: undefined,
-        date: record.returnedDate || record.receivedDate,
-        totalOriginalAmount: roundMoney(Number(record.amount || 0)),
-        error:
-          'تعذر تحديد مبلغ عملية رد الأمانة المحددة من سجل العمليات (returnHistory)؛ تم إيقاف إنشاء إشعار المبلغ منعاً لعرض رقم غير دقيق.',
-      };
-    }
+  if (record.type === 'CASH' && validation.isReturnDocument && validation.resolvedReturnEvent) {
+    const targetEvent = validation.resolvedReturnEvent;
+    const targetIndex = validation.resolvedReturnIndex;
+    const eventAmount = roundMoney(Number(targetEvent.amount || 0));
 
     // حساب إجمالي المردود حتى هذا الحدث بدقة عند تعدد عمليات الرد
     const cumulativeUpToEvent = roundMoney(

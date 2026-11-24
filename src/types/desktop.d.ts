@@ -477,10 +477,14 @@ declare global {
         sizeBytes?: number;
         error?: string;
       }>;
-      runNativePrint(input: { token: string }): Promise<{
+      runNativePrint(input: {
+        token: string;
+        pageSize?: 'A4' | '80mm' | '58mm';
+        contentHeightMm?: number;
+      }): Promise<{
         printed: boolean;
         canceled: boolean;
-        outcome?: 'sent' | 'canceled' | 'failed' | 'window-unavailable';
+        outcome?: 'sent' | 'canceled' | 'failed' | 'unconfirmed' | 'window-unavailable';
         failureReason?: string;
       }>;
       prepareShareTempFile(input: {
@@ -496,7 +500,7 @@ declare global {
       revealShareTempFile(input: {
         token: string;
         tempToken: string;
-      }): Promise<{ revealed: boolean; error?: string }>;
+      }): Promise<{ revealed: boolean; exists?: boolean; error?: string }>;
       cleanupShareTempFile(input: { token: string; tempToken: string }): Promise<{ cleaned: boolean }>;
       openWhatsAppUrl(input: { token: string; url: string }): Promise<{ opened: boolean; error?: string }>;
 

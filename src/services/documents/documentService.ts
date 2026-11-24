@@ -20,7 +20,10 @@ import { numberToArabicWords } from '../../../electron/sqlite/payment-allocation
 import type { ResolvedDocumentHeader } from '../../utils/documentBranding';
 import { formatLocalDate, formatLocalDateTime } from '../../utils/localDate';
 import type { PartyStatementSummary } from '../../utils/partyStatement';
-import { computeInvoiceOpenRemaining } from '../../utils/documentNotifications';
+import {
+  computeInvoiceOpenRemaining,
+  validateAmanatDocumentState,
+} from '../../utils/documentNotifications';
 
 export type SupportedDocumentPaperSize = 'A4' | '80mm' | '58mm';
 
@@ -421,25 +424,19 @@ export function buildAmanatDocumentSnapshot(params: {
   const sym = meta.currency.symbol;
   const history = Array.isArray(record.returnHistory) ? record.returnHistory : [];
 
-  let resolvedReturnEvent = params.returnEvent;
-  if (!resolvedReturnEvent && params.returnEventId) {
-    resolvedReturnEvent = history.find((ev) => ev.id === params.returnEventId);
-    if (!resolvedReturnEvent) {
-      throw new Error(
-        `تعذر العثور على عملية الرد المحددة (${params.returnEventId}) داخل سجل عمليات الأمانة (returnHistory).`
-      );
-    }
+  const validation = validateAmanatDocumentState(record, {
+    mode: params.mode,
+    returnEventId: params.returnEventId,
+    returnEvent: params.returnEvent,
+  });
+  if (!validation.valid) {
+    throw new Error(
+      validation.error ||
+        'تعذر تحديد مبلغ عملية رد الأمانة من سجل العمليات (returnHistory).'
+    );
   }
-  if (!resolvedReturnEvent && params.mode !== 'DEPOSIT' && record.type === 'CASH') {
-    if (params.mode === 'RETURN' || record.status === 'RETURNED') {
-      resolvedReturnEvent = history[history.length - 1];
-      if (!resolvedReturnEvent) {
-        throw new Error(
-          'تعذر تحديد مبلغ عملية رد الأمانة من سجل العمليات (returnHistory)؛ لا يمكن إصدار إشعار رد بمبلغ غير موثق.'
-        );
-      }
-    }
-  }
+
+  const resolvedReturnEvent = validation.resolvedReturnEvent;
 
   let returnedTotal = roundMoney(Number(record.returnedAmount || 0));
   let remaining =
@@ -452,7 +449,7 @@ export function buildAmanatDocumentSnapshot(params: {
         );
 
   if (resolvedReturnEvent && record.type === 'CASH') {
-    const idx = history.findIndex((ev) => ev.id === resolvedReturnEvent!.id);
+    const idx = validation.resolvedReturnIndex;
     if (idx >= 0) {
       returnedTotal = roundMoney(
         history.slice(0, idx + 1).reduce((sum, ev) => sum + (Number(ev.amount) || 0), 0)
@@ -461,24 +458,8 @@ export function buildAmanatDocumentSnapshot(params: {
     }
   }
 
-  const isReturnDoc =
-    params.mode === 'DEPOSIT'
-      ? false
-      : Boolean(resolvedReturnEvent) ||
-        (params.mode === 'RETURN' && record.type === 'ITEM') ||
-        record.status === 'RETURNED';
+  const isReturnDoc = validation.isReturnDocument;
   const kind: DocumentKind = isReturnDoc ? 'AMANAT_RETURN' : 'AMANAT_RECEIPT';
-
-  if (
-    kind === 'AMANAT_RETURN' &&
-    record.type === 'CASH' &&
-    !resolvedReturnEvent &&
-    params.mode !== 'DEPOSIT'
-  ) {
-    throw new Error(
-      'تعذر تحديد حدث رد الأمانة النقدية في سجل العمليات (returnHistory)؛ لا يمكن عرض أصل الأمانة كمبلغ رد.'
-    );
-  }
 
   const displayAmount =
     record.type === 'CASH'

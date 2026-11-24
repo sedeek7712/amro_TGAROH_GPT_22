@@ -18,6 +18,8 @@ export type DocumentOperationStatus =
   | 'FAILED'
   | 'PRINT_OPENED'
   | 'PRINT_DIALOG_CLOSED'
+  | 'PRINT_DIALOG_CLOSE_UNCONFIRMED'
+  | 'PRINT_STATUS_UNKNOWN'
   | 'PRINT_SENT'
   | 'SHARE_OPENED'
   | 'WHATSAPP_LAUNCHED'
@@ -119,6 +121,8 @@ const STATUS_LABELS: Record<DocumentOperationStatus, string> = {
   FAILED: 'فشلت العملية',
   PRINT_OPENED: 'فتح معاينة الطباعة',
   PRINT_DIALOG_CLOSED: 'أُغلق حوار الطباعة في المتصفح',
+  PRINT_DIALOG_CLOSE_UNCONFIRMED: 'انتهت مهلة انتظار إغلاق حوار الطباعة بالمتصفح',
+  PRINT_STATUS_UNKNOWN: 'حالة الطباعة غير مؤكدة من النظام',
   PRINT_SENT: 'أُرسلت مهمة الطباعة',
   SHARE_OPENED: 'فُتحت نافذة المشاركة',
   WHATSAPP_LAUNCHED: 'تم فتح واتساب',

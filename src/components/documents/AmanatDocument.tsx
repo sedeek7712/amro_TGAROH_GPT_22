@@ -1,6 +1,7 @@
 import React from 'react';
 import type { AmanatRecord, AmanatReturnEvent } from '../../types/erp';
 import type { ResolvedDocumentHeader } from '../../utils/documentBranding';
+import { validateAmanatDocumentState } from '../../utils/documentNotifications';
 import type { DocumentPaperSize } from '../../utils/printDocument';
 import {
   DocumentAmountBanner,
@@ -16,6 +17,8 @@ interface AmanatDocumentProps {
   paperSize: DocumentPaperSize;
   cashBoxName?: string;
   returnEvent?: AmanatReturnEvent;
+  returnEventId?: string;
+  mode?: 'AUTO' | 'DEPOSIT' | 'RETURN';
 }
 
 export const AmanatDocument: React.FC<AmanatDocumentProps> = ({
@@ -24,51 +27,112 @@ export const AmanatDocument: React.FC<AmanatDocumentProps> = ({
   paperSize,
   cashBoxName,
   returnEvent,
+  returnEventId,
+  mode = 'AUTO',
 }) => {
   const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const dec = meta.currency.decimalPlaces ?? 2;
   const sym = meta.currency.symbol;
   const history = Array.isArray(record.returnHistory) ? record.returnHistory : [];
-  const matchedIdx = returnEvent ? history.findIndex((ev) => ev.id === returnEvent.id) : -1;
+
+  const validation = validateAmanatDocumentState(record, {
+    mode,
+    returnEventId,
+    returnEvent,
+  });
+
+  if (!validation.valid) {
+    return (
+      <div dir="rtl" className="text-slate-900">
+        <DocumentHeader
+          meta={meta}
+          paperSize={paperSize}
+          documentTitle="سند رد أمانة غير مكتمل البيانات"
+          documentSubtitle="وحدة الأمانات وحفظ أموال ومقتنيات الغير (2102)"
+          documentNumber={record.recordNumber}
+          documentDate={record.receivedDate}
+          statusLabel="بيانات رد غير مكتملة"
+          statusTone="danger"
+        />
+
+        <DocumentMetaGrid
+          paperSize={paperSize}
+          columns={3}
+          fields={[
+            { label: 'اسم المودع', value: record.depositorName },
+            { label: 'رقم الهاتف', value: record.depositorPhone, mono: true },
+            { label: 'رقم الهوية', value: record.depositorNationalId, mono: true },
+            {
+              label: 'طبيعة الأمانة',
+              value: record.type === 'CASH' ? 'أمانة نقدية' : 'أمانة عينية',
+            },
+            { label: 'الصندوق / موقع الحفظ', value: cashBoxName || record.storageLocation },
+            { label: 'تاريخ الاستلام', value: record.receivedDate, mono: true },
+          ]}
+        />
+
+        <div
+          role="alert"
+          className="my-4 rounded-lg border-2 border-rose-300 bg-rose-50 p-4 text-xs sm:text-sm font-bold text-rose-900 leading-relaxed"
+        >
+          {validation.error ||
+            'تعذر التحقق من بيانات عملية رد الأمانة في سجل العمليات (returnHistory)؛ تم إيقاف عرض المبلغ والتوقيعات.'}
+        </div>
+
+        <DocumentFooter
+          meta={meta}
+          paperSize={paperSize}
+          referenceText={`REF: ${record.recordNumber}`}
+        />
+      </div>
+    );
+  }
+
+  const effectiveReturnEvent = validation.resolvedReturnEvent;
+  const matchedIdx = validation.resolvedReturnIndex;
   const returnedAmt =
-    returnEvent && matchedIdx >= 0
+    effectiveReturnEvent && matchedIdx >= 0
       ? history.slice(0, matchedIdx + 1).reduce((s, ev) => s + Number(ev.amount || 0), 0)
       : Number(record.returnedAmount || 0);
   const remainingAmt =
     record.status === 'CANCELLED'
       ? 0
-      : returnEvent && matchedIdx >= 0
+      : effectiveReturnEvent && matchedIdx >= 0
       ? Math.max(0, Number(record.amount || 0) - returnedAmt)
       : Number(
           record.remainingAmount ?? Math.max(0, Number(record.amount || 0) - returnedAmt)
         );
 
-  const docTitle =
-    record.status === 'RETURNED'
-      ? 'سند تسليم وإبراء ذمة أمانة'
-      : record.status === 'CANCELLED'
-      ? 'سند أمانة ملغاة'
-      : returnedAmt > 0
-      ? 'سند أمانة (رد جزئي والباقي محفوظ)'
-      : 'سند استلام وإيداع أمانة';
+  const isDepositView = mode === 'DEPOSIT' && !effectiveReturnEvent;
+  const docTitle = isDepositView
+    ? 'سند استلام وإيداع أمانة'
+    : record.status === 'RETURNED'
+    ? 'سند تسليم وإبراء ذمة أمانة'
+    : record.status === 'CANCELLED'
+    ? 'سند أمانة ملغاة'
+    : returnedAmt > 0
+    ? 'سند أمانة (رد جزئي والباقي محفوظ)'
+    : 'سند استلام وإيداع أمانة';
 
-  const statusTone =
-    record.status === 'RETURNED'
-      ? 'success'
-      : record.status === 'CANCELLED'
-      ? 'danger'
-      : returnedAmt > 0
-      ? 'warning'
-      : 'neutral';
+  const statusTone = isDepositView
+    ? 'neutral'
+    : record.status === 'RETURNED'
+    ? 'success'
+    : record.status === 'CANCELLED'
+    ? 'danger'
+    : returnedAmt > 0
+    ? 'warning'
+    : 'neutral';
 
-  const statusLabel =
-    record.status === 'RETURNED'
-      ? 'تم الرد والإبراء'
-      : record.status === 'CANCELLED'
-      ? 'ملغاة'
-      : returnedAmt > 0
-      ? 'رد جزئي'
-      : 'محفوظة في الأمانات';
+  const statusLabel = isDepositView
+    ? 'سند الإيداع الأصلي'
+    : record.status === 'RETURNED'
+    ? 'تم الرد والإبراء'
+    : record.status === 'CANCELLED'
+    ? 'ملغاة'
+    : returnedAmt > 0
+    ? 'رد جزئي'
+    : 'محفوظة في الأمانات';
 
   return (
     <div dir="rtl" className="text-slate-900">
@@ -120,18 +184,22 @@ export const AmanatDocument: React.FC<AmanatDocumentProps> = ({
         <>
           <DocumentAmountBanner
             label={
-              returnEvent
+              effectiveReturnEvent && !isDepositView
                 ? 'مبلغ عملية الرد الحالية'
-                : record.status === 'RETURNED'
+                : record.status === 'RETURNED' && !isDepositView
                 ? 'إجمالي مبلغ الأمانة المسلم والمبرأ'
                 : 'المبلغ الأصلي المودع بأمانة'
             }
-            amount={returnEvent ? Number(returnEvent.amount || 0) : Number(record.amount || 0)}
+            amount={
+              effectiveReturnEvent && !isDepositView
+                ? Number(effectiveReturnEvent.amount || 0)
+                : Number(record.amount || 0)
+            }
             currencySymbol={sym}
             currencyNameAr={meta.currency.nameAr}
             paperSize={paperSize}
           />
-          {returnEvent && (
+          {effectiveReturnEvent && !isDepositView && (
             <div
               className={`rounded-lg border border-slate-200 bg-slate-50 mb-2 flex justify-between items-center ${
                 isThermal ? 'px-2 py-1 text-[10px]' : 'px-3 py-1.5 text-xs'

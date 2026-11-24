@@ -1253,6 +1253,7 @@ export class SupabaseSyncService {
       { name: 'erp_accounts', entityType: 'ACCOUNT', pkField: 'code' },
       { name: 'erp_cash_boxes', entityType: 'CASHBOX', pkField: 'id' },
       { name: 'erp_products', entityType: 'PRODUCT', pkField: 'id' },
+      { name: 'erp_product_images', entityType: 'PRODUCT_IMAGE', pkField: 'id' },
       { name: 'erp_parties', entityType: 'PARTY', pkField: 'id' },
       { name: 'erp_invoices', entityType: 'INVOICE', pkField: 'id' },
       { name: 'erp_journal_entries', entityType: 'JOURNAL_ENTRY', pkField: 'id' },
@@ -1358,7 +1359,49 @@ export class SupabaseSyncService {
               continue;
             }
 
-            if (bridge) {
+            if (table.entityType === 'PRODUCT_IMAGE') {
+              const media: ProductImage = {
+                id: String(rec.id),
+                tenantId: String(rec.tenant_id || effectiveTenantId),
+                productId: String(rec.product_id || ''),
+                activityId: String(rec.activity_id || ''),
+                storageKey: String(rec.storage_key || ''),
+                thumbnailStorageKey: String(rec.thumbnail_storage_key || ''),
+                mimeType: String(rec.mime_type || 'image/webp') as ProductImage['mimeType'],
+                sizeBytes: Number(rec.size_bytes || 0),
+                thumbnailSizeBytes: Number(rec.thumbnail_size_bytes || 0),
+                width: Number(rec.width || 0),
+                height: Number(rec.height || 0),
+                checksumSha256: String(rec.checksum_sha256 || ''),
+                isPrimary: rec.is_primary === true,
+                sortOrder: Number(rec.sort_order || 0),
+                createdBy: String(rec.created_by || 'remote'),
+                createdAt: String(rec.created_at || new Date().toISOString()),
+                updatedAt: String(rec.updated_at || new Date().toISOString()),
+                syncStatus: 'SYNCED',
+                isDeleted: rec.is_deleted === true,
+              };
+              if (media.tenantId !== effectiveTenantId || !media.productId || !media.storageKey || !media.thumbnailStorageKey) {
+                throw new Error('بيانات صورة الصنف البعيدة لا تطابق المؤسسة أو تفتقد مفاتيح التخزين.');
+              }
+              if (media.isDeleted) {
+                await productMediaService.applyRemoteTombstone(media);
+              } else {
+                const originalDataUrl = await this.downloadProductImageObject(
+                  cleanUrl, config, tenantResolution.accessToken, media.storageKey, media.mimeType, 10 * 1024 * 1024
+                );
+                const thumbnailDataUrl = await this.downloadProductImageObject(
+                  cleanUrl, config, tenantResolution.accessToken, media.thumbnailStorageKey, media.mimeType, 1024 * 1024
+                );
+                const originalBlob = this.dataUrlToBlob(originalDataUrl, media.mimeType);
+                const digest = await crypto.subtle.digest('SHA-256', await originalBlob.arrayBuffer());
+                const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+                if (checksum !== media.checksumSha256 || originalBlob.size !== media.sizeBytes) {
+                  throw new Error('فشل التحقق من سلامة صورة الصنف بعد تنزيلها (SHA-256/size mismatch).');
+                }
+                await productMediaService.cacheRemoteImage(media, originalDataUrl, thumbnailDataUrl);
+              }
+            } else if (bridge) {
               await bridge.applyRemoteSyncEntity({
                 token: desktopSession.requireToken(),
                 entityType: table.entityType,

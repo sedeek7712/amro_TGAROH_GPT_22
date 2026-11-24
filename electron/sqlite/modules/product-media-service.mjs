@@ -212,6 +212,7 @@ export function createProductMediaService(database, mediaStorage) {
         syncStatus: 'PENDING_UPLOAD',
         updatedAt: nowIso,
       };
+
       database.exec('BEGIN IMMEDIATE');
       try {
         database.prepare(
@@ -219,6 +220,27 @@ export function createProductMediaService(database, mediaStorage) {
            WHERE tenant_id=? AND id=?`
         ).run(nowIso, JSON.stringify(deleted), actor.tenantId, imageId);
         enqueue(actor, deleted, 'DELETE', nowIso);
+
+        if (current.isPrimary) {
+          const nextRow = database.prepare(
+            'SELECT * FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0 ORDER BY sort_order ASC, created_at ASC LIMIT 1'
+          ).get(actor.tenantId, row.product_id);
+          if (nextRow) {
+            const promoted = {
+              ...mapRow(nextRow),
+              isPrimary: true,
+              syncStatus: 'PENDING_UPLOAD',
+              updatedAt: nowIso,
+            };
+            database.prepare(
+              `UPDATE product_images
+               SET is_primary=1,sync_status='PENDING_UPLOAD',updated_at=?,data_json=?
+               WHERE tenant_id=? AND id=?`
+            ).run(nowIso, JSON.stringify(promoted), actor.tenantId, promoted.id);
+            enqueue(actor, promoted, 'UPDATE', nowIso);
+          }
+        }
+
         writeAuditLogTx(database, actor, 'حذف صورة صنف', `حذف صورة من الصنف ${row.product_id}`, nowIso, {
           entityType: 'PRODUCT_IMAGE', entityId: imageId, result: 'SUCCESS',
         });
@@ -226,18 +248,6 @@ export function createProductMediaService(database, mediaStorage) {
       } catch (error) {
         try { database.exec('ROLLBACK'); } catch {}
         throw error;
-      }
-      if (current.isPrimary) {
-        const nextRow = database.prepare(
-          'SELECT * FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0 ORDER BY sort_order ASC, created_at ASC LIMIT 1'
-        ).get(actor.tenantId, row.product_id);
-        if (nextRow) {
-          const promoted = { ...mapRow(nextRow), isPrimary: true, updatedAt: nowIso };
-          database.prepare(
-            "UPDATE product_images SET is_primary=1,updated_at=?,sync_status='PENDING_UPLOAD',data_json=? WHERE tenant_id=? AND id=?"
-          ).run(nowIso, JSON.stringify({ ...promoted, syncStatus: 'PENDING_UPLOAD' }), actor.tenantId, promoted.id);
-          enqueue(actor, { ...promoted, syncStatus: 'PENDING_UPLOAD' }, 'UPDATE', nowIso);
-        }
       }
       mediaStorage.remove([row.storage_key, row.thumbnail_storage_key]);
     },

@@ -123,6 +123,7 @@ if (!hasSingleInstance) {
     desktopBackend = createDesktopBackend({
       database: databaseRuntime.database,
       backupDirectory: databaseRuntime.backupDirectory,
+      mediaDirectory: path.join(app.getPath('userData'), 'ProductMedia'),
       authenticationService,
       onDataChanged: emitDataChanged,
     });
@@ -482,6 +483,39 @@ if (!hasSingleInstance) {
     ipcMain.handle('erp:inventory:get-product', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.getProductById({ token: input?.token, id: input?.id });
+    });
+
+    ipcMain.handle('erp:inventory:get-product-images', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductImages({ token: input?.token, productId: input?.productId });
+    });
+    ipcMain.handle('erp:inventory:get-product-image-record', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductImageRecord({ token: input?.token, imageId: input?.imageId });
+    });
+    ipcMain.handle('erp:inventory:get-product-image-data', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductImageData({ token: input?.token, imageId: input?.imageId, variant: input?.variant });
+    });
+    ipcMain.handle('erp:inventory:add-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.addProductImage({ token: input?.token, input: input?.input });
+    });
+    ipcMain.handle('erp:inventory:set-primary-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.setPrimaryProductImage({ token: input?.token, imageId: input?.imageId });
+    });
+    ipcMain.handle('erp:inventory:delete-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.deleteProductImage({ token: input?.token, imageId: input?.imageId });
+    });
+    ipcMain.handle('erp:inventory:cache-remote-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.cacheRemoteProductImage({ token: input?.token, input: input?.input });
+    });
+    ipcMain.handle('erp:inventory:mark-product-image-synced', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.markProductImageSynced({ token: input?.token, imageId: input?.imageId });
     });
 
     ipcMain.handle('erp:inventory:save-product', (event, input) => {

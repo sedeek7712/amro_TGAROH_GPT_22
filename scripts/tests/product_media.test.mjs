@@ -91,6 +91,10 @@ test('Product media: private files, primary lifecycle, RBAC, audit, finance isol
     assert.ok(existsSync(mediaBackup.path));
     assert.ok(existsSync(mediaBackup.path + '.media'));
     assert.ok(existsSync(path.join(mediaBackup.path + '.media', ...first.storageKey.split('/'))));
+    rmSync(firstFile, { force: true });
+    assert.equal(existsSync(firstFile), false);
+    assert.equal(backend.productMediaStorage.restoreFrom(mediaBackup.path + '.media'), true);
+    assert.ok(existsSync(firstFile));
 
     // Switching the main image must leave exactly one active primary image.
     const selectedPrimary = backend.setPrimaryProductImage({ token: adminToken, imageId: second.id });
@@ -141,6 +145,8 @@ test('Product media: private files, primary lifecycle, RBAC, audit, finance isol
       },
     }), /RBAC/);
 
+    const productAfterImages = backend.getProductById({ token: adminToken, id: product.id });
+
     // Reject MIME spoofing before creating a DB row or file.
     assert.throws(() => backend.addProductImage({
       token: adminToken,
@@ -176,7 +182,6 @@ test('Product media: private files, primary lifecycle, RBAC, audit, finance isol
     backend.deleteProductAtomic({ token: adminToken, productId: product.id });
     assert.equal(backend.getProductById({ token: adminToken, id: product.id }), undefined);
 
-    const productAfterImages = productBeforeImages;
     assert.equal(productAfterImages.currentStock, productBeforeImages.currentStock);
     assert.equal(productAfterImages.purchasePrice, productBeforeImages.purchasePrice);
     assert.equal(productAfterImages.sellPrice, productBeforeImages.sellPrice);

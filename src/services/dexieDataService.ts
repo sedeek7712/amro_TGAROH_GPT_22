@@ -1236,10 +1236,9 @@ export class DexieDataService implements IDataService {
         const linkedImages = await db.productImages
           .where('[tenantId+productId]')
           .equals([tenantId, productId])
-          .filter((image) => !image.isDeleted)
           .count();
         if (linkedImages > 0) {
-          throw new FinancialValidationError('لا يمكن حذف الصنف لأنه يحتوي على صور؛ احذف صور الصنف أولاً ثم أعد المحاولة.');
+          throw new FinancialValidationError('لا يمكن حذف الصنف حتى تكتمل مزامنة حذف جميع صوره؛ تحقق من اتصال الإنترنت وحالة المزامنة.');
         }
 
         const invoices = await db.invoices.toArray();

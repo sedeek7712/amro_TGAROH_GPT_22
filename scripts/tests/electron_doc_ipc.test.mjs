@@ -449,18 +449,27 @@ test('DOC-004-09: prepared PNG invoice can be copied to the OS clipboard with te
       nativeImage: {
         createFromPath(filePath) {
           assert.ok(existsSync(filePath));
-          return { filePath, isEmpty: () => false };
+          return {
+            filePath,
+            isEmpty: () => false,
+            toPNG: () => makeValidPngBuffer(),
+          };
         },
       },
+      ClipboardItemCtor: class FakeClipboardItem {
+        constructor(data) { this.data = data; }
+      },
+      BlobCtor: Blob,
       clipboard: {
-        write(payload) { clipboardPayload = payload; },
+        write(items) { clipboardPayload = items[0]; },
       },
     });
 
     assert.equal(copied.copied, true);
     assert.equal(copied.imageCopied, true);
-    assert.equal(clipboardPayload.text, 'فاتورة رقم INV-CLIPBOARD');
-    assert.ok(clipboardPayload.image.filePath.endsWith('INVOICE-CLIPBOARD.png'));
+    assert.equal(clipboardPayload.data['text/plain'], 'فاتورة رقم INV-CLIPBOARD');
+    assert.ok(clipboardPayload.data['image/png'] instanceof Blob);
+    assert.ok(clipboardPayload.data['image/png'].size > 32);
 
     const pdf = prepareShareTempFileOnDisk({
       tempDir,

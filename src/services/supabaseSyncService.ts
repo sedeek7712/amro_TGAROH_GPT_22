@@ -778,6 +778,22 @@ export class SupabaseSyncService {
         if (!session || (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(itemBranchId))) {
           throw new Error('حظر عزل الفروع: عنصر المزامنة تابع لفرع غير مصرح به.');
         }
+        if (item.entityType === 'PRODUCT_IMAGE') {
+          const media = item.payload as unknown as ProductImage;
+          if (media.tenantId !== effectiveTenantId) {
+            throw new Error('حظر عزل المؤسسات: بيانات صورة الصنف لا تطابق مؤسسة الجلسة.');
+          }
+          if (item.action !== 'DELETE' && media.syncStatus !== 'SYNCED') {
+            const originalDataUrl = await productMediaService.getImageDataUrl(item.entityId, 'original');
+            const thumbnailDataUrl = await productMediaService.getImageDataUrl(item.entityId, 'thumbnail');
+            if (!originalDataUrl || !thumbnailDataUrl) {
+              throw new Error('ملفات الصورة المحلية غير متاحة؛ ستبقى العملية في Outbox لإعادة المحاولة.');
+            }
+            await this.uploadProductImageObject(cleanUrl, config, tenantResolution.accessToken, media.storageKey, originalDataUrl, media.mimeType);
+            await this.uploadProductImageObject(cleanUrl, config, tenantResolution.accessToken, media.thumbnailStorageKey, thumbnailDataUrl, media.mimeType);
+          }
+        }
+
         const pkColumn = item.entityType === 'ACCOUNT' ? 'code' : 'id';
         let method: 'POST' | 'PATCH' = 'POST';
         let endpoint = `${cleanUrl}/rest/v1/${targetTable}`;
@@ -801,8 +817,9 @@ export class SupabaseSyncService {
             item.entityId
           )}&tenant_id=eq.${encodeURIComponent(effectiveTenantId)}`;
           preferHeader = 'return=representation';
-          requestBody =
-            item.entityType === 'PARTY' || item.entityType === 'ACCOUNT'
+          requestBody = item.entityType === 'PRODUCT_IMAGE'
+            ? { is_deleted: true, is_primary: false }
+            : item.entityType === 'PARTY' || item.entityType === 'ACCOUNT'
               ? { is_deleted: true }
               : { is_deleted: true, is_active: false };
         } else if (item.action === 'UPDATE') {
@@ -880,6 +897,16 @@ export class SupabaseSyncService {
           // عدم تعطيل التأكيد الأساسي إذا كان سجل Idempotency موجوداً مسبقاً
         }
 
+        if (item.entityType === 'PRODUCT_IMAGE') {
+          const media = item.payload as unknown as ProductImage;
+          if (item.action === 'DELETE') {
+            await this.deleteProductImageObjects(cleanUrl, config, tenantResolution.accessToken, [
+              media.storageKey,
+              media.thumbnailStorageKey,
+            ]);
+          }
+          await productMediaService.markSynced(item.entityId);
+        }
         await syncQueueService.markSynced(item.id, ackCheck.serverTimestamp);
         pushed++;
       } catch (err: unknown) {
@@ -946,6 +973,30 @@ export class SupabaseSyncService {
           is_default: Boolean(box.isDefault),
           is_active: true,
           is_deleted: false,
+        };
+      }
+
+      case 'PRODUCT_IMAGE': {
+        const image = raw as unknown as ProductImage;
+        return {
+          id: image.id,
+          tenant_id: tenantId,
+          product_id: image.productId,
+          activity_id: image.activityId,
+          storage_key: image.storageKey,
+          thumbnail_storage_key: image.thumbnailStorageKey,
+          mime_type: image.mimeType,
+          size_bytes: image.sizeBytes,
+          thumbnail_size_bytes: image.thumbnailSizeBytes,
+          width: image.width,
+          height: image.height,
+          checksum_sha256: image.checksumSha256,
+          is_primary: Boolean(image.isPrimary),
+          sort_order: Number(image.sortOrder || 0),
+          created_by: image.createdBy,
+          created_at: image.createdAt,
+          updated_at: image.updatedAt,
+          is_deleted: Boolean(image.isDeleted),
         };
       }
 

@@ -136,6 +136,14 @@ export function createProductMediaService(database, mediaStorage) {
 
       database.exec('BEGIN IMMEDIATE');
       try {
+        const lockedCount = database.prepare(
+          'SELECT COUNT(*) AS count FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0'
+        ).get(actor.tenantId, input.productId).count;
+        if (lockedCount >= MAX_IMAGES_PER_PRODUCT) {
+          throw new Error('الحد الأقصى ست صور للصنف الواحد، تشمل الصورة الرئيسية.');
+        }
+        record.isPrimary = lockedCount === 0;
+        record.sortOrder = lockedCount;
         database.prepare(
           `INSERT INTO product_images
             (tenant_id,id,product_id,activity_id,storage_key,thumbnail_storage_key,mime_type,size_bytes,
@@ -309,6 +317,7 @@ export function createProductMediaService(database, mediaStorage) {
       assertPermission(actor, 'inventory:view', 'تأكيد مزامنة صورة الصنف');
       const row = database.prepare('SELECT * FROM product_images WHERE tenant_id = ? AND id = ?').get(actor.tenantId, imageId);
       if (!row) return;
+      loadProduct(actor, row.product_id, 'تأكيد مزامنة صورة الصنف');
       const updated = { ...mapRow(row), syncStatus: 'SYNCED' };
       database.prepare(
         "UPDATE product_images SET sync_status='SYNCED',data_json=json_set(data_json,'$.syncStatus','SYNCED') WHERE tenant_id=? AND id=?"

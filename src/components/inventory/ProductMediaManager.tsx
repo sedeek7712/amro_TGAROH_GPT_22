@@ -112,11 +112,22 @@ export const ProductMediaManager: React.FC<ProductMediaManagerProps> = ({ produc
       }
       await reload();
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'تعذر إرفاق الصورة.');
+      const message = err instanceof Error ? err.message : 'تعذر إرفاق الصورة.';
+      await reload();
+      setError(message);
     } finally {
       setBusy(false);
       if (galleryInput.current) galleryInput.current.value = '';
       if (cameraInput.current) cameraInput.current.value = '';
+    }
+  };
+
+  const openPreview = async (image: ProductImageView) => {
+    try {
+      const original = await productMediaService.getImageDataUrl(image.id, 'original');
+      setPreview(original || image.thumbnailDataUrl || null);
+    } catch {
+      setPreview(image.thumbnailDataUrl || null);
     }
   };
 
@@ -196,7 +207,7 @@ export const ProductMediaManager: React.FC<ProductMediaManagerProps> = ({ produc
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
               {images.map((image) => (
                 <div key={image.id} className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-                  <button type="button" onClick={() => image.thumbnailDataUrl && setPreview(image.thumbnailDataUrl)} className="relative block aspect-square w-full bg-slate-50">
+                  <button type="button" onClick={() => void openPreview(image)} className="relative block aspect-square w-full bg-slate-50">
                     {image.thumbnailDataUrl ? <img src={image.thumbnailDataUrl} alt={product.nameAr} className="h-full w-full object-contain" loading="lazy" /> : <div className="flex h-full items-center justify-center text-xs text-slate-400">الصورة غير متاحة محلياً</div>}
                     {image.isPrimary && <span className="absolute right-2 top-2 rounded-full bg-emerald-700 px-2 py-1 text-[10px] font-bold text-white">الرئيسية</span>}
                   </button>

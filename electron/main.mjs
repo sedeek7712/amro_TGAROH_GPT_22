@@ -228,6 +228,7 @@ if (!hasSingleInstance) {
     assertPermission(actor, 'backup:restore', 'استعادة نسخة احتياطية SQLite');
     const reopenOptions = { userDataPath: app.getPath('userData') };
     const safetyMediaPath = path.join(app.getPath('temp'), `amro-media-pre-restore-${randomUUID()}`);
+    let preserveSafetyMedia = false;
     desktopBackend.productMediaStorage.backupTo(safetyMediaPath);
     try {
       const restored = await restoreSqliteBackupFile({
@@ -238,16 +239,57 @@ if (!hasSingleInstance) {
         reopenOptions,
       });
       bindDatabaseRuntime(restored.databaseRuntime);
-      const restoredMediaFound = desktopBackend.productMediaStorage.restoreFrom(sourceBackupPath + '.media');
-      if (!restoredMediaFound) {
-        desktopBackend.productMediaStorage.clear();
-        diagnosticLogger.log('WARN', 'backup', 'Restored SQLite backup has no product media sidecar; local product images were cleared safely.', {
-          restoredFrom: path.basename(sourceBackupPath),
-        });
+
+      try {
+        const restoredMediaFound = desktopBackend.productMediaStorage.restoreFrom(sourceBackupPath + '.media');
+        const productImageCount = databaseRuntime.database.prepare(
+          'SELECT COUNT(*) AS count FROM product_images'
+        ).get().count;
+        if (!restoredMediaFound && productImageCount > 0) {
+          throw new Error('النسخة الاحتياطية تحتوي على سجلات صور، لكن مجلد الصور المرفق (.media) غير موجود.');
+        }
+        if (!restoredMediaFound) {
+          desktopBackend.productMediaStorage.clear();
+          diagnosticLogger.log('WARN', 'backup', 'Legacy SQLite backup has no product image records or media sidecar; media folder was cleared.', {
+            restoredFrom: path.basename(sourceBackupPath),
+          });
+        }
+      } catch (mediaRestoreError) {
+        try {
+          const rollback = await restoreSqliteBackupFile({
+            databasePath: databaseRuntime.databasePath,
+            backupDirectory: databaseRuntime.backupDirectory,
+            sourceBackupPath: restored.safetyBackupPath,
+            currentDatabase: databaseRuntime.database,
+            reopenOptions,
+          });
+          bindDatabaseRuntime(rollback.databaseRuntime);
+          const mediaRollbackSucceeded = desktopBackend.productMediaStorage.restoreFrom(safetyMediaPath);
+          if (!mediaRollbackSucceeded) {
+            throw new Error('تعذر استعادة مجلد الصور من نسخة الأمان.');
+          }
+          rmSync(safetyMediaPath, { recursive: true, force: true });
+          syncScheduledBackupTimer();
+          emitAuthInvalidated('تعذرت استعادة صور النسخة؛ تم التراجع إلى قاعدة البيانات والملفات السابقة. يرجى تسجيل الدخول مجدداً.');
+          emitDataChanged(['all', 'session']);
+        } catch (rollbackError) {
+          preserveSafetyMedia = true;
+          diagnosticLogger.log('CRITICAL', 'backup', 'Database/media restore rollback failed; safety media copy retained.', {
+            mediaRestoreError,
+            rollbackError,
+            safetyMediaPath,
+          });
+          throw new Error('فشلت استعادة الصور وتعذر إكمال التراجع الآلي. تم الإبقاء على نسخة أمان الصور داخل مجلد الملفات المؤقتة؛ لا تحذفها.');
+        }
+        throw new Error(
+          'تم رفض استعادة النسخة لأن ملفات صور الأصناف غير مكتملة؛ أعيد النظام إلى حالته السابقة. السبب: ' +
+          (mediaRestoreError instanceof Error ? mediaRestoreError.message : String(mediaRestoreError))
+        );
       }
+
       rmSync(safetyMediaPath, { recursive: true, force: true });
       syncScheduledBackupTimer();
-      diagnosticLogger.log('INFO', 'backup', 'SQLite database restored from backup', {
+      diagnosticLogger.log('INFO', 'backup', 'SQLite database and product media restored', {
         restoredFrom: path.basename(restored.restoredFrom),
         safetyBackupPath: path.basename(restored.safetyBackupPath),
       });
@@ -263,12 +305,13 @@ if (!hasSingleInstance) {
       if (error && error.rolledBackRuntime) {
         bindDatabaseRuntime(error.rolledBackRuntime);
         desktopBackend.productMediaStorage.restoreFrom(safetyMediaPath);
-        rmSync(safetyMediaPath, { recursive: true, force: true });
         syncScheduledBackupTimer();
         emitAuthInvalidated('تعذرت استعادة النسخة وتم التراجع للوضع الآمن؛ يرجى تسجيل الدخول مجدداً.');
         emitDataChanged(['all', 'session']);
       }
-      rmSync(safetyMediaPath, { recursive: true, force: true });
+      if (!preserveSafetyMedia) {
+        rmSync(safetyMediaPath, { recursive: true, force: true });
+      }
       throw error;
     }
   }

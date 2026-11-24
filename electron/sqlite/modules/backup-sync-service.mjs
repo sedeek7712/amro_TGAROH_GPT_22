@@ -69,6 +69,7 @@ function getDefaultPriority(entityType) {
       return 1;
     case 'PARTY':
     case 'PRODUCT':
+    case 'PRODUCT_IMAGE':
       return 2;
     case 'INVOICE':
     case 'VOUCHER':

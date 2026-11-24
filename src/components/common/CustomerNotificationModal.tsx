@@ -808,7 +808,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
                 className="w-full py-2 px-4 bg-emerald-50 hover:bg-emerald-100 border border-emerald-300 text-emerald-900 font-bold rounded-xl flex items-center justify-center gap-2 text-xs"
               >
                 <CheckCircle2 className="w-4 h-4 text-emerald-700" />
-                <span>تأكيد: تم إرسال الرسالة والمرفق عبر واتساب</span>
+                <span>تأكيد: أرفقت المستند وضغطت «إرسال» في واتساب</span>
               </button>
             )}
 

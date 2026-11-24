@@ -131,7 +131,7 @@ const STATUS_LABELS: Record<DocumentOperationStatus, string> = {
   FALLBACK_DOWNLOAD_AND_WA: 'تم تجهيز المرفق والنص للتنزيل دون فتح واتساب',
   WHATSAPP_LAUNCHED: 'تم فتح واتساب',
   USER_COPIED_TEXT: 'نسخ المستخدم النص',
-  USER_CONFIRMED_SEND: 'أكّد المستخدم الإرسال',
+  USER_CONFIRMED_SEND: 'أكّد الموظف أنه ضغط زر الإرسال',
 };
 
 export async function recordDocumentOperation(params: {

@@ -326,7 +326,8 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
     const twoDaysAgoSec = (nowMs - 2 * 24 * 60 * 60 * 1000) / 1000;
     utimesSync(stalePath, eightDaysAgoSec, eightDaysAgoSec);
     utimesSync(freshPath, twoDaysAgoSec, twoDaysAgoSec);
-    utimesSync(prepared.tempToken ? shareTempFiles.get(prepared.tempToken).path : freshPath, twoDaysAgoSec, twoDaysAgoSec);
+    const activePath = shareTempFiles.get(prepared.tempToken).path;
+    utimesSync(activePath, eightDaysAgoSec, eightDaysAgoSec);
 
     const purged = purgeStaleShareTempFiles({
       tempDir,
@@ -337,6 +338,8 @@ test('DOC-004-06 & DOC-004-03 & DOC-004-08: 7-day temp retention cleanup, reveal
     assert.equal(purged.removedFiles, 1);
     assert.equal(existsSync(stalePath), false);
     assert.equal(existsSync(freshPath), true);
+    assert.equal(existsSync(activePath), true);
+    assert.equal(shareTempFiles.has(prepared.tempToken), true);
     assert.equal(existsSync(subDir), true);
     assert.equal(existsSync(outsideFile), true);
 

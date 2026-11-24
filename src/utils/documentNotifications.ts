@@ -77,6 +77,35 @@ export function validateAmanatDocumentState(
     (record.status !== 'CANCELLED' && hasReturnedActivity);
 
   if (record.type === 'CASH' && isReturnDocument) {
+    // A RETURNED cash custody is a full discharge: its documented return events
+    // must add up to the original deposit before any return voucher is issued.
+    if (record.status === 'RETURNED') {
+      const originalAmount = roundMoney(Number(record.amount));
+      const eventAmounts = history.map((event) => Number(event?.amount));
+      const allEventsValid =
+        history.length > 0 &&
+        eventAmounts.every((amount) => Number.isFinite(amount) && amount > 0);
+      const totalReturned = allEventsValid
+        ? roundMoney(eventAmounts.reduce((sum, amount) => sum + amount, 0))
+        : 0;
+
+      if (
+        !Number.isFinite(originalAmount) ||
+        originalAmount <= 0 ||
+        !allEventsValid ||
+        Math.abs(totalReturned - originalAmount) > 0.005
+      ) {
+        return {
+          valid: false,
+          isReturnDocument: true,
+          resolvedReturnEvent: undefined,
+          resolvedReturnIndex: -1,
+          error:
+            'تعذر إصدار سند إبراء الأمانة: إجمالي أحداث الرد الموثقة لا يطابق أصل الأمانة. يرجى مراجعة سجل الردود قبل إصدار المستند.',
+        };
+      }
+    }
+
     if (options?.returnEvent) {
       const idx = history.findIndex((ev) => ev.id === options.returnEvent!.id);
       const evAmt = roundMoney(Number(options.returnEvent.amount || 0));

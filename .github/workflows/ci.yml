@@ -24,6 +24,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - name: Install Ghostscript for independent PDF validation
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ghostscript
+          gs --version
+
       - name: Verify SQLite schema, transactions, persistence and backup
         run: python scripts/verify_sqlite_schema.py
 

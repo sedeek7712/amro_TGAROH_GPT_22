@@ -367,6 +367,14 @@ export function purgeStaleShareTempFiles({
     }
     const resolvedBase = path.resolve(tempDir);
     const cutoff = nowMs - retentionMs;
+    const activePaths = new Set();
+    if (shareTempFiles instanceof Map) {
+      for (const info of shareTempFiles.values()) {
+        if (info?.active === true && info.path) {
+          activePaths.add(path.resolve(info.path));
+        }
+      }
+    }
 
     for (const entry of readdirSync(resolvedBase, { withFileTypes: true })) {
       if (entry.isSymbolicLink() || entry.isDirectory() || !entry.isFile()) {
@@ -379,6 +387,12 @@ export function purgeStaleShareTempFiles({
       try {
         const st = statSync(fullPath);
         if (!st.isFile()) continue;
+        // Files prepared in this running session remain pinned until explicit
+        // cleanup or process restart; orphaned files still obey 7-day retention.
+        if (activePaths.has(fullPath)) {
+          keptFiles += 1;
+          continue;
+        }
         if (st.mtimeMs < cutoff) {
           rmSync(fullPath, { force: true });
           removedFiles += 1;
@@ -399,7 +413,7 @@ export function purgeStaleShareTempFiles({
         if (
           !insideDir ||
           !existsSync(resolvedInfoPath) ||
-          (info?.createdAt && info.createdAt < cutoff)
+          (info?.createdAt && info.createdAt < cutoff && info?.active !== true)
         ) {
           shareTempFiles.delete(token);
         }
@@ -436,6 +450,7 @@ export function prepareShareTempFileOnDisk({ tempDir, shareTempFiles, input }) {
     path: tempFilePath,
     fileName: safeName,
     createdAt: Date.now(),
+    active: true,
   });
 
   return {

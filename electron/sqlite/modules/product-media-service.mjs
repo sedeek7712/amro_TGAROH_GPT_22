@@ -219,7 +219,34 @@ export function createProductMediaService(database, mediaStorage) {
         try { database.exec('ROLLBACK'); } catch {}
         throw error;
       }
+      if (current.isPrimary) {
+        const nextRow = database.prepare(
+          'SELECT * FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0 ORDER BY sort_order ASC, created_at ASC LIMIT 1'
+        ).get(actor.tenantId, row.product_id);
+        if (nextRow) {
+          const promoted = { ...mapRow(nextRow), isPrimary: true, updatedAt: nowIso };
+          database.prepare(
+            "UPDATE product_images SET is_primary=1,updated_at=?,sync_status='PENDING_UPLOAD',data_json=? WHERE tenant_id=? AND id=?"
+          ).run(nowIso, JSON.stringify({ ...promoted, syncStatus: 'PENDING_UPLOAD' }), actor.tenantId, promoted.id);
+          enqueue(actor, { ...promoted, syncStatus: 'PENDING_UPLOAD' }, 'UPDATE', nowIso);
+        }
+      }
       mediaStorage.remove([row.storage_key, row.thumbnail_storage_key]);
+    },
+
+    applyRemoteProductImageTombstone(actor, record) {
+      assertPermission(actor, 'inventory:view', 'مزامنة حذف صورة صنف');
+      if (!record || record.tenantId !== actor.tenantId) throw new Error('حظر عزل المؤسسات: حذف الصورة لا يطابق المؤسسة.');
+      loadProduct(actor, record.productId, 'مزامنة حذف صورة صنف');
+      const existing = database.prepare(
+        'SELECT * FROM product_images WHERE tenant_id = ? AND id = ?'
+      ).get(actor.tenantId, record.id);
+      if (existing) {
+        database.prepare(
+          "UPDATE product_images SET is_primary=0,is_deleted=1,sync_status='SYNCED',updated_at=?,data_json=? WHERE tenant_id=? AND id=?"
+        ).run(record.updatedAt || new Date().toISOString(), JSON.stringify({ ...mapRow(existing), ...record, isDeleted: true, isPrimary: false, syncStatus: 'SYNCED' }), actor.tenantId, record.id);
+        mediaStorage.remove([existing.storage_key, existing.thumbnail_storage_key]);
+      }
     },
 
     cacheRemoteProductImage(actor, input) {
@@ -242,6 +269,11 @@ export function createProductMediaService(database, mediaStorage) {
       const clean = { ...record, storageKey: stored.storageKey, thumbnailStorageKey: stored.thumbnailStorageKey,
         sizeBytes: stored.sizeBytes, thumbnailSizeBytes: stored.thumbnailSizeBytes,
         checksumSha256: stored.checksumSha256, syncStatus: 'SYNCED' };
+      if (clean.isPrimary) {
+        database.prepare(
+          "UPDATE product_images SET is_primary=0,data_json=json_set(data_json,'$.isPrimary',false) WHERE tenant_id=? AND product_id=? AND id<>? AND is_deleted=0"
+        ).run(actor.tenantId, clean.productId, clean.id);
+      }
       database.prepare(
         `INSERT INTO product_images
           (tenant_id,id,product_id,activity_id,storage_key,thumbnail_storage_key,mime_type,size_bytes,

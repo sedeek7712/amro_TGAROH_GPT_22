@@ -166,6 +166,7 @@ export function pruneAutoBackups(directory, maxRetained, prefixes = ['auto-exit-
   for (let i = limit; i < files.length; i += 1) {
     try {
       rmSync(files[i].path, { force: true });
+      rmSync(files[i].path + '.media', { recursive: true, force: true });
       removed += 1;
     } catch {}
   }

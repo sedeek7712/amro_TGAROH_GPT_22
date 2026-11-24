@@ -463,7 +463,8 @@ export interface OutboxQueueItem {
     | 'BRANCH'
     | 'PAYMENT_ALLOCATION'
     | 'PARTY_ADVANCE'
-    | 'ALLOCATION_AUDIT';
+    | 'ALLOCATION_AUDIT'
+    | 'PRODUCT_IMAGE';
   entityId: string;
   action: 'CREATE' | 'UPDATE' | 'DELETE';
   payload: Record<string, unknown>;

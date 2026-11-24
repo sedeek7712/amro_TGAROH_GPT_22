@@ -66,11 +66,12 @@ export class ProductMediaService {
     const actor = this.requireProductAccess(productId, 'inventory:view');
     const product = await db.products.get(productId);
     if (!product || !filterRecordsByActivityScope([product], actor)[0]) return [];
-    return await db.productImages
+    const records = await db.productImages
       .where('[tenantId+productId]')
       .equals([actor.tenantId || '', productId])
       .filter((item) => !item.isDeleted)
-      .sortBy('sortOrder');
+      .toArray();
+    return records.sort((a, b) => Number(b.isPrimary) - Number(a.isPrimary) || a.sortOrder - b.sortOrder);
   }
 
   public async getImageDataUrl(imageId: string, variant: 'original' | 'thumbnail' = 'thumbnail'): Promise<string | null> {
@@ -112,6 +113,7 @@ export class ProductMediaService {
     assertActivityAccess(actor, product.activityId, 'إرفاق صورة للصنف');
     assertDimensions(input.width, input.height);
 
+    if (input.mimeType !== 'image/webp') throw new Error('يجب ضغط صور الأصناف إلى WebP قبل حفظها.');
     const originalBlob = dataUrlToBlob(input.originalDataUrl, input.mimeType, MAX_ORIGINAL_BYTES);
     const thumbnailBlob = dataUrlToBlob(input.thumbnailDataUrl, input.mimeType, 1024 * 1024);
     if (originalBlob.size > MAX_ORIGINAL_BYTES) throw new Error('حجم الصورة الأصلية يتجاوز 10 ميجابايت.');
@@ -229,6 +231,29 @@ export class ProductMediaService {
     const next = { ...current, isDeleted: true, isPrimary: false, syncStatus: 'PENDING_UPLOAD' as const, updatedAt: now };
     await db.transaction('rw', [db.productImages, db.outbox, db.auditLogs], async () => {
       await db.productImages.put({ ...next, originalBlob: undefined, thumbnailBlob: undefined } as ProductImageLocalAsset);
+      if (current.isPrimary) {
+        const remaining = (await db.productImages
+          .where('[tenantId+productId]')
+          .equals([current.tenantId, current.productId])
+          .filter((item) => !item.isDeleted)
+          .toArray())
+          .sort((a, b) => a.sortOrder - b.sortOrder);
+        const nextPrimary = remaining[0];
+        if (nextPrimary) {
+          const promoted = { ...nextPrimary, isPrimary: true, updatedAt: now };
+          await db.productImages.put(promoted);
+          await syncQueueService.enqueue({
+            tenantId: promoted.tenantId,
+            branchId: actor.branchId,
+            entityType: 'PRODUCT_IMAGE',
+            entityId: promoted.id,
+            action: 'UPDATE',
+            payload: this.toMetadata(promoted) as unknown as Record<string, unknown>,
+            priority: 2,
+            dependsOn: [promoted.productId],
+          });
+        }
+      }
       await syncQueueService.enqueue({
         tenantId: current.tenantId,
         branchId: actor.branchId,
@@ -269,6 +294,34 @@ export class ProductMediaService {
       const existing = await db.productImages.get(record.id);
       if (existing && existing.tenantId !== record.tenantId) throw new Error('حظر عزل المؤسسات: الصورة البعيدة لا تطابق المؤسسة.');
       await db.productImages.put(local);
+    });
+  }
+
+  public async applyRemoteTombstone(record: ProductImage): Promise<void> {
+    const bridge = desktopBridge();
+    if (bridge) {
+      await bridge.applyRemoteProductImageTombstone({
+        token: desktopSession.requireToken(),
+        record,
+      });
+      return;
+    }
+    const actor = authService.getCurrentActorSync();
+    assertPermission(actor, 'inventory:view', 'مزامنة حذف صورة صنف');
+    if (record.tenantId !== actor?.tenantId) throw new Error('حظر عزل المؤسسات: حذف الصورة لا يطابق المؤسسة.');
+    assertActivityAccess(actor, record.activityId, 'مزامنة حذف صورة صنف');
+    await db.transaction('rw', db.productImages, async () => {
+      const existing = await db.productImages.get(record.id);
+      if (existing && existing.tenantId !== record.tenantId) throw new Error('حظر عزل المؤسسات: الصورة لا تطابق المؤسسة.');
+      await db.productImages.put({
+        ...(existing || record),
+        ...record,
+        isDeleted: true,
+        isPrimary: false,
+        syncStatus: 'SYNCED',
+        originalBlob: undefined,
+        thumbnailBlob: undefined,
+      } as ProductImageLocalAsset);
     });
   }
 

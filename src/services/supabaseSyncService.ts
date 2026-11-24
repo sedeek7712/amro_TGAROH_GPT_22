@@ -720,6 +720,8 @@ export class SupabaseSyncService {
       return { pushed: 0, failed: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
+    const accessToken = accessToken;
+    if (!accessToken) return { pushed: 0, failed: 0, errors: ['رمز JWT للمستخدم غير متاح لمزامنة الصور.'] };
     const branchResolution = this.resolveEffectiveBranch(config);
     if (!branchResolution.ok) return { pushed: 0, failed: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };
 
@@ -789,8 +791,8 @@ export class SupabaseSyncService {
             if (!originalDataUrl || !thumbnailDataUrl) {
               throw new Error('ملفات الصورة المحلية غير متاحة؛ ستبقى العملية في Outbox لإعادة المحاولة.');
             }
-            await this.uploadProductImageObject(cleanUrl, config, tenantResolution.accessToken, media.storageKey, originalDataUrl, media.mimeType);
-            await this.uploadProductImageObject(cleanUrl, config, tenantResolution.accessToken, media.thumbnailStorageKey, thumbnailDataUrl, media.mimeType);
+            await this.uploadProductImageObject(cleanUrl, config, accessToken, media.storageKey, originalDataUrl, media.mimeType);
+            await this.uploadProductImageObject(cleanUrl, config, accessToken, media.thumbnailStorageKey, thumbnailDataUrl, media.mimeType);
           }
         }
 
@@ -838,7 +840,7 @@ export class SupabaseSyncService {
           method,
           headers: {
             apikey: config.supabaseAnonKey,
-            Authorization: `Bearer ${tenantResolution.accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
             Prefer: preferHeader,
             'x-tenant-id': effectiveTenantId,
@@ -877,7 +879,7 @@ export class SupabaseSyncService {
             method: 'POST',
             headers: {
               apikey: config.supabaseAnonKey,
-              Authorization: `Bearer ${tenantResolution.accessToken}`,
+              Authorization: `Bearer ${accessToken}`,
               'Content-Type': 'application/json',
               Prefer: 'resolution=ignore-duplicates',
               'x-tenant-id': effectiveTenantId,
@@ -900,7 +902,7 @@ export class SupabaseSyncService {
         if (item.entityType === 'PRODUCT_IMAGE') {
           const media = item.payload as unknown as ProductImage;
           if (item.action === 'DELETE') {
-            await this.deleteProductImageObjects(cleanUrl, config, tenantResolution.accessToken, [
+            await this.deleteProductImageObjects(cleanUrl, config, accessToken, [
               media.storageKey,
               media.thumbnailStorageKey,
             ]);

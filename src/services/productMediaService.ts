@@ -217,6 +217,7 @@ export class ProductMediaService {
           payload: this.toMetadata(next) as unknown as Record<string, unknown>,
           priority: 2,
           dependsOn: [item.productId],
+          idempotencyKey: `${item.tenantId}_PRODUCT_IMAGE_${item.id}_UPDATE_${now}`,
         });
         if (item.id === imageId) saved = this.toMetadata(next);
       }
@@ -261,6 +262,7 @@ export class ProductMediaService {
             payload: this.toMetadata(promoted) as unknown as Record<string, unknown>,
             priority: 2,
             dependsOn: [promoted.productId],
+            idempotencyKey: `${promoted.tenantId}_PRODUCT_IMAGE_${promoted.id}_UPDATE_${now}`,
           });
         }
       }
@@ -273,6 +275,7 @@ export class ProductMediaService {
         payload: this.toMetadata(next) as unknown as Record<string, unknown>,
         priority: 2,
         dependsOn: [current.productId],
+        idempotencyKey: `${current.tenantId}_PRODUCT_IMAGE_${imageId}_DELETE_${now}`,
       });
       await db.auditLogs.add({
         id: storage.generateUUID(), tenantId: actor.tenantId, branchId: actor.branchId,

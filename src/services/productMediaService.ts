@@ -152,6 +152,16 @@ export class ProductMediaService {
     };
 
     await db.transaction('rw', [db.productImages, db.outbox, db.auditLogs], async () => {
+      const lockedImages = await db.productImages
+        .where('[tenantId+productId]')
+        .equals([record.tenantId, record.productId])
+        .filter((item) => !item.isDeleted)
+        .toArray();
+      if (lockedImages.length >= MAX_IMAGES_PER_PRODUCT) {
+        throw new Error('الحد الأقصى ست صور للصنف الواحد، تشمل الصورة الرئيسية.');
+      }
+      record.isPrimary = lockedImages.length === 0;
+      record.sortOrder = lockedImages.length;
       await db.productImages.add({ ...record, originalBlob, thumbnailBlob });
       await syncQueueService.enqueue({
         tenantId: record.tenantId,

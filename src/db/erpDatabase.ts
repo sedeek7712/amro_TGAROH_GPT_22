@@ -26,6 +26,7 @@ import {
   PaymentAllocation,
   PartyAdvanceTransaction,
   AllocationAudit,
+  ProductImageLocalAsset,
 } from '../types/erp';
 
 const CANONICAL_V6_ACCOUNTS: Account[] = [
@@ -58,6 +59,7 @@ export class MultiActivityErpDatabase extends Dexie {
   paymentAllocations!: Table<PaymentAllocation, string>;
   partyAdvanceTransactions!: Table<PartyAdvanceTransaction, string>;
   allocationAudits!: Table<AllocationAudit, string>;
+  productImages!: Table<ProductImageLocalAsset, string>;
 
   constructor() {
     super('MultiActivityErpDB');
@@ -185,6 +187,11 @@ export class MultiActivityErpDatabase extends Dexie {
             }
           });
       });
+
+    // Schema v7: separate local product-image metadata and IndexedDB Blob cache.
+    this.version(7).stores({
+      productImages: 'id, tenantId, productId, activityId, isPrimary, syncStatus, updatedAt, [tenantId+productId], [tenantId+activityId]',
+    });
   }
 }
 

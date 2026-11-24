@@ -80,6 +80,36 @@ export interface Product {
   updatedAt?: string;          // تاريخ آخر تحديث ISO
 }
 
+export type ProductImageSyncStatus = 'LOCAL_ONLY' | 'PENDING_UPLOAD' | 'UPLOADING' | 'SYNCED' | 'FAILED';
+
+export interface ProductImage {
+  id: string;
+  tenantId: string;
+  productId: string;
+  activityId: CommercialActivityId;
+  storageKey: string;
+  thumbnailStorageKey: string;
+  mimeType: 'image/webp' | 'image/jpeg' | 'image/png';
+  sizeBytes: number;
+  thumbnailSizeBytes: number;
+  width: number;
+  height: number;
+  checksumSha256: string;
+  isPrimary: boolean;
+  sortOrder: number;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+  syncStatus: ProductImageSyncStatus;
+  isDeleted?: boolean;
+}
+
+/** Local-only binary cache. These fields must never enter Outbox or cloud metadata. */
+export interface ProductImageLocalAsset extends ProductImage {
+  originalBlob?: Blob;
+  thumbnailBlob?: Blob;
+}
+
 export type AmanatType = 'CASH' | 'ITEM';
 export type AmanatStatus = 'HELD' | 'RETURNED' | 'CANCELLED';
 

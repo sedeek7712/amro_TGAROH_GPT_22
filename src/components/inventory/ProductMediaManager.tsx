@@ -25,7 +25,15 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 
 function canvasToBlob(canvas: HTMLCanvasElement, quality: number): Promise<Blob> {
   return new Promise((resolve, reject) => {
-    canvas.toBlob((blob) => blob ? resolve(blob) : reject(new Error('متصفحك لم يتمكن من ضغط الصورة.')), 'image/webp', quality);
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error('متصفحك لم يتمكن من ضغط الصورة.'));
+      } else if (blob.type !== 'image/webp') {
+        reject(new Error('هذا المتصفح لا يدعم حفظ صور الأصناف بصيغة WebP.'));
+      } else {
+        resolve(blob);
+      }
+    }, 'image/webp', quality);
   });
 }
 

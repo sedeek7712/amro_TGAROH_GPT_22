@@ -1,5 +1,5 @@
 import React from 'react';
-import type { AmanatRecord } from '../../types/erp';
+import type { AmanatRecord, AmanatReturnEvent } from '../../types/erp';
 import type { ResolvedDocumentHeader } from '../../utils/documentBranding';
 import type { DocumentPaperSize } from '../../utils/printDocument';
 import {
@@ -15,6 +15,7 @@ interface AmanatDocumentProps {
   meta: ResolvedDocumentHeader;
   paperSize: DocumentPaperSize;
   cashBoxName?: string;
+  returnEvent?: AmanatReturnEvent;
 }
 
 export const AmanatDocument: React.FC<AmanatDocumentProps> = ({
@@ -22,14 +23,22 @@ export const AmanatDocument: React.FC<AmanatDocumentProps> = ({
   meta,
   paperSize,
   cashBoxName,
+  returnEvent,
 }) => {
   const isThermal = paperSize === '80mm' || paperSize === '58mm';
   const dec = meta.currency.decimalPlaces ?? 2;
   const sym = meta.currency.symbol;
-  const returnedAmt = Number(record.returnedAmount || 0);
+  const history = Array.isArray(record.returnHistory) ? record.returnHistory : [];
+  const matchedIdx = returnEvent ? history.findIndex((ev) => ev.id === returnEvent.id) : -1;
+  const returnedAmt =
+    returnEvent && matchedIdx >= 0
+      ? history.slice(0, matchedIdx + 1).reduce((s, ev) => s + Number(ev.amount || 0), 0)
+      : Number(record.returnedAmount || 0);
   const remainingAmt =
     record.status === 'CANCELLED'
       ? 0
+      : returnEvent && matchedIdx >= 0
+      ? Math.max(0, Number(record.amount || 0) - returnedAmt)
       : Number(
           record.remainingAmount ?? Math.max(0, Number(record.amount || 0) - returnedAmt)
         );
@@ -111,15 +120,29 @@ export const AmanatDocument: React.FC<AmanatDocumentProps> = ({
         <>
           <DocumentAmountBanner
             label={
-              record.status === 'RETURNED'
+              returnEvent
+                ? 'مبلغ عملية الرد الحالية'
+                : record.status === 'RETURNED'
                 ? 'إجمالي مبلغ الأمانة المسلم والمبرأ'
                 : 'المبلغ الأصلي المودع بأمانة'
             }
-            amount={Number(record.amount || 0)}
+            amount={returnEvent ? Number(returnEvent.amount || 0) : Number(record.amount || 0)}
             currencySymbol={sym}
             currencyNameAr={meta.currency.nameAr}
             paperSize={paperSize}
           />
+          {returnEvent && (
+            <div
+              className={`rounded-lg border border-slate-200 bg-slate-50 mb-2 flex justify-between items-center ${
+                isThermal ? 'px-2 py-1 text-[10px]' : 'px-3 py-1.5 text-xs'
+              }`}
+            >
+              <span className="text-slate-600">المبلغ الأصلي المودع بأمانة:</span>
+              <span className="font-mono tabular-nums font-bold text-slate-900">
+                {Number(record.amount || 0).toFixed(dec)} {sym}
+              </span>
+            </div>
+          )}
 
           {(returnedAmt > 0 || record.remainingAmount !== undefined) && (
             <div

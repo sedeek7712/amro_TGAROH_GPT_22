@@ -25,6 +25,7 @@ export type SaveDocumentStatus =
   | 'PREPARING'
   | 'SAVING'
   | 'SAVED'
+  | 'DOWNLOAD_INITIATED'
   | 'CANCELED'
   | 'CREATE_FAILED'
   | 'WRITE_FAILED'
@@ -43,6 +44,7 @@ export interface SaveDocumentResult {
 export interface PrintExecutionResult {
   printed: boolean;
   canceled: boolean;
+  dialogClosed?: boolean;
   message: string;
   failureReason?: string;
 }
@@ -88,6 +90,8 @@ export function getSaveStatusLabel(status: SaveDocumentStatus): string {
       return 'جاري الحفظ والتحقق...';
     case 'SAVED':
       return 'تم الحفظ بنجاح';
+    case 'DOWNLOAD_INITIATED':
+      return 'بدأ تنزيل الملف من المتصفح';
     case 'CANCELED':
       return 'ألغى المستخدم الحفظ';
     case 'CREATE_FAILED':
@@ -111,12 +115,21 @@ function uint8ToBase64(bytes: Uint8Array): string {
   return btoa(binary);
 }
 
+function schedulePrintFrame(cb: () => void): void {
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(cb);
+  } else {
+    setTimeout(cb, 0);
+  }
+}
+
 export async function triggerNativePrint(
   pageSize: DocumentPaperSize,
   options?: {
     snapshot?: DocumentSnapshot;
     userId?: string;
     userName?: string;
+    afterPrintTimeoutMs?: number;
   }
 ): Promise<PrintExecutionResult> {
   applyPrintPageStyle(pageSize);
@@ -144,7 +157,7 @@ export async function triggerNativePrint(
   if (window.amroDesktop?.runNativePrint) {
     try {
       const token = desktopSession.requireToken();
-      await new Promise((r) => requestAnimationFrame(() => setTimeout(r, 60)));
+      await new Promise((r) => schedulePrintFrame(() => setTimeout(r, 40)));
       const res = await window.amroDesktop.runNativePrint({ token });
       if (snap) {
         await recordDocumentOperation({
@@ -170,7 +183,7 @@ export async function triggerNativePrint(
         return {
           printed: true,
           canceled: false,
-          message: 'تم إرسال أمر الطباعة إلى الطابعة المحددة (حالة خروج الورق تعتمد على الطابعة).',
+          message: 'تم إرسال مهمة الطباعة إلى الطابعة المحددة.',
         };
       }
       return {
@@ -198,16 +211,54 @@ export async function triggerNativePrint(
     }
   }
 
-  requestAnimationFrame(() => {
-    setTimeout(() => {
-      window.print();
-    }, 60);
+  const afterPrintTimeoutMs = options?.afterPrintTimeoutMs ?? 300;
+  let beforePrintFired = false;
+  let afterPrintFired = false;
+  let settled = false;
+
+  await new Promise<void>((resolve) => {
+    let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+    const onBeforePrint = () => {
+      beforePrintFired = true;
+    };
+    const onAfterPrint = () => {
+      afterPrintFired = true;
+      finish();
+    };
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      window.removeEventListener?.('beforeprint', onBeforePrint);
+      window.removeEventListener?.('afterprint', onAfterPrint);
+      resolve();
+    };
+
+    window.addEventListener?.('beforeprint', onBeforePrint);
+    window.addEventListener?.('afterprint', onAfterPrint);
+
+    schedulePrintFrame(() => {
+      setTimeout(() => {
+        try {
+          window.print();
+        } finally {
+          if (afterPrintFired) {
+            finish();
+          } else {
+            const waitMs = beforePrintFired
+              ? Math.max(afterPrintTimeoutMs, 1200)
+              : afterPrintTimeoutMs;
+            fallbackTimer = setTimeout(finish, waitMs);
+          }
+        }
+      }, 40);
+    });
   });
 
   if (snap) {
     await recordDocumentOperation({
       operationType: 'PRINT',
-      status: 'PRINT_SENT',
+      status: 'PRINT_DIALOG_CLOSED',
       documentId: snap.documentId,
       documentNumber: snap.documentNumber,
       documentType: snap.documentKind,
@@ -218,9 +269,10 @@ export async function triggerNativePrint(
   }
 
   return {
-    printed: true,
+    printed: false,
     canceled: false,
-    message: 'تم فتح نافذة الطباعة في المتصفح (تحقق من اختيار الطابعة).',
+    dialogClosed: true,
+    message: 'انتهت نافذة الطباعة. لا يمكن تأكيد خروج الورق من خلال المتصفح.',
   };
 }
 
@@ -274,13 +326,42 @@ export async function exportDocumentPdf(options: {
   }
 
   if (typeof window !== 'undefined' && window.amroDesktop?.exportDocumentPdf) {
-    onStatusChange?.('SAVING');
     try {
+      let pdfBase64: string | undefined;
+      if (snapshot && !fallbackToPrintDialog) {
+        const rendered = await renderDocumentToPdfBlob(snapshot);
+        if (!isValidPdfBytes(rendered.bytes) || rendered.blob.size <= 0) {
+          onStatusChange?.('CREATE_FAILED');
+          await recordDocumentOperation({
+            operationType: 'PDF_EXPORT',
+            status: 'FAILED',
+            documentId: snapshot.documentId,
+            documentNumber: snapshot.documentNumber,
+            documentType: snapshot.documentKind,
+            userId,
+            userName: userName || snapshot.meta.issuerName,
+            fileName: rendered.fileName,
+            failureReason: 'فشل توليد ملف PDF صالح (%PDF-) من Snapshot.',
+            channel: 'ELECTRON_DIALOG',
+          });
+          return {
+            status: 'CREATE_FAILED',
+            mode: 'ELECTRON_PDF',
+            canceled: false,
+            fileName: rendered.fileName,
+            message: 'فشل إنشاء ملف PDF صالح (%PDF-).',
+          };
+        }
+        pdfBase64 = uint8ToBase64(rendered.bytes);
+      }
+
+      onStatusChange?.('SAVING');
       const token = desktopSession.requireToken();
       const res = await window.amroDesktop.exportDocumentPdf({
         token,
         title: safeBaseName,
         pageSize,
+        ...(pdfBase64 ? { pdfBase64 } : {}),
       });
 
       const resolvedStatus: SaveDocumentStatus = res.canceled
@@ -335,7 +416,7 @@ export async function exportDocumentPdf(options: {
         fileName: res.filename || targetFileName,
         path: res.path,
         sizeBytes: res.sizeBytes,
-        message: `تم حفظ ملف PDF والتحقق منه (${res.filename || targetFileName}).`,
+        message: `تم حفظ ملف PDF والتحقق منه على القرص (${res.filename || targetFileName}).`,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'فشل إنشاء ملف PDF.';
@@ -381,11 +462,11 @@ export async function exportDocumentPdf(options: {
 
       onStatusChange?.('SAVING');
       triggerBrowserFileDownload(rendered.blob, rendered.fileName);
-      onStatusChange?.('SAVED');
+      onStatusChange?.('DOWNLOAD_INITIATED');
 
       await recordDocumentOperation({
         operationType: 'PDF_EXPORT',
-        status: 'SAVED',
+        status: 'DOWNLOAD_INITIATED',
         documentId: snapshot.documentId,
         documentNumber: snapshot.documentNumber,
         documentType: snapshot.documentKind,
@@ -396,12 +477,12 @@ export async function exportDocumentPdf(options: {
       });
 
       return {
-        status: 'SAVED',
+        status: 'DOWNLOAD_INITIATED',
         mode: 'WEB_PDF_DOWNLOAD',
         canceled: false,
         fileName: rendered.fileName,
         sizeBytes: rendered.blob.size,
-        message: `تم إنشاء وتنزيل ملف PDF (${rendered.fileName}) بعدد ${rendered.pageCount} صفحة.`,
+        message: `بدأ تنزيل الملف من المتصفح (${rendered.fileName}) بعدد ${rendered.pageCount} صفحة.`,
       };
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'تعذر توليد ملف PDF في المتصفح.';
@@ -429,14 +510,15 @@ export async function exportDocumentPdf(options: {
   }
 
   // التراجع إلى نافذة الطباعة فقط إذا لم يتوفر Snapshot أو طُلب ذلك صراحةً
-  await triggerNativePrint(pageSize, { snapshot, userId, userName });
-  onStatusChange?.('SAVED');
+  const printRes = await triggerNativePrint(pageSize, { snapshot, userId, userName });
+  const fallbackStatus: SaveDocumentStatus = printRes.canceled ? 'CANCELED' : 'DOWNLOAD_INITIATED';
+  onStatusChange?.(fallbackStatus);
   return {
-    status: 'SAVED',
+    status: fallbackStatus,
     mode: 'WEB_PRINT',
-    canceled: false,
+    canceled: printRes.canceled,
     fileName: targetFileName,
-    message: 'تم فتح حوار الطباعة بالمتصفح (اختر Save as PDF للحفظ).',
+    message: 'تم فتح حوار الطباعة بالمتصفح (اختر Save as PDF للحفظ). لا يمكن تأكيد الحفظ الفعلي من المتصفح.',
   };
 }
 
@@ -531,11 +613,11 @@ export async function exportDocumentPng(options: {
     }
 
     triggerBrowserFileDownload(rendered.blob, rendered.fileName);
-    onStatusChange?.('SAVED');
+    onStatusChange?.('DOWNLOAD_INITIATED');
 
     await recordDocumentOperation({
       operationType: 'PNG_EXPORT',
-      status: 'SAVED',
+      status: 'DOWNLOAD_INITIATED',
       documentId: snapshot.documentId,
       documentNumber: snapshot.documentNumber,
       documentType: snapshot.documentKind,
@@ -546,12 +628,12 @@ export async function exportDocumentPng(options: {
     });
 
     return {
-      status: 'SAVED',
+      status: 'DOWNLOAD_INITIATED',
       mode: 'WEB_PNG_DOWNLOAD',
       canceled: false,
       fileName: rendered.fileName,
       sizeBytes: rendered.blob.size,
-      message: `تم إنشاء وتنزيل صورة PNG النظيفة (${rendered.fileName}).`,
+      message: `بدأ تنزيل صورة PNG النظيفة من المتصفح (${rendered.fileName}).`,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'تعذر تصدير صورة PNG.';

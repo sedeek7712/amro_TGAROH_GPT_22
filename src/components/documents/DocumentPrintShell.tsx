@@ -112,7 +112,9 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
     try {
       const res = await triggerNativePrint(paperSize, { snapshot: activeSnapshot });
       setStatusMessage(res.message);
-      setStatusTone(res.canceled ? 'warning' : res.printed ? 'success' : 'error');
+      setStatusTone(
+        res.canceled ? 'warning' : res.printed ? 'success' : res.dialogClosed ? 'info' : 'error'
+      );
     } catch (err: unknown) {
       setStatusMessage(err instanceof Error ? err.message : 'تعذر تنفيذ أمر الطباعة.');
       setStatusTone('error');
@@ -138,6 +140,8 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
       setStatusMessage(res.message);
       if (res.status === 'SAVED') {
         setStatusTone('success');
+      } else if (res.status === 'DOWNLOAD_INITIATED') {
+        setStatusTone('info');
       } else if (res.status === 'CANCELED') {
         setStatusTone('warning');
       } else {
@@ -176,6 +180,8 @@ export const DocumentPrintShell: React.FC<DocumentPrintShellProps> = ({
       setStatusMessage(res.message);
       if (res.status === 'SAVED') {
         setStatusTone('success');
+      } else if (res.status === 'DOWNLOAD_INITIATED') {
+        setStatusTone('info');
       } else if (res.status === 'CANCELED') {
         setStatusTone('warning');
       } else {

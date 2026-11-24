@@ -41,11 +41,13 @@ function classifyFsErrorStatus(error) {
   return 'WRITE_FAILED';
 }
 
+const SHARE_TEMP_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+
 function purgeStaleShareTempFiles() {
   try {
     const dir = getShareTempDirectory();
     if (!existsSync(dir)) return;
-    const cutoff = Date.now() - 2 * 60 * 60 * 1000;
+    const cutoff = Date.now() - SHARE_TEMP_RETENTION_MS;
     for (const entry of readdirSync(dir)) {
       const fullPath = path.join(dir, entry);
       try {
@@ -57,22 +59,13 @@ function purgeStaleShareTempFiles() {
         // ignore per-file cleanup issues
       }
     }
+    for (const [token, info] of shareTempFiles.entries()) {
+      if (!info?.path || !existsSync(info.path) || (info.createdAt && info.createdAt < cutoff)) {
+        shareTempFiles.delete(token);
+      }
+    }
   } catch {
     // non-fatal
-  }
-}
-
-function cleanupAllShareTempFiles() {
-  for (const [token, info] of shareTempFiles.entries()) {
-    try {
-      if (info?.path && existsSync(info.path)) {
-        rmSync(info.path, { force: true });
-      }
-    } catch {
-      // ignore cleanup error
-    } finally {
-      shareTempFiles.delete(token);
-    }
   }
 }
 
@@ -956,9 +949,10 @@ if (!hasSingleInstance) {
         return { canceled: true, status: 'CANCELED' };
       }
 
+      const isSnapshotSource = typeof input?.pdfBase64 === 'string' && input.pdfBase64.length > 0;
       let pdfBuffer;
       try {
-        if (typeof input?.pdfBase64 === 'string' && input.pdfBase64.length > 0) {
+        if (isSnapshotSource) {
           pdfBuffer = Buffer.from(input.pdfBase64, 'base64');
         } else {
           const printPageSize =
@@ -1021,6 +1015,7 @@ if (!hasSingleInstance) {
           filename: path.basename(res.filePath),
           pageSize: pageSizeMode,
           sizeBytes: stat.size,
+          source: isSnapshotSource ? 'SNAPSHOT_PDF' : 'PRINT_TO_PDF',
           exportedBy: actor.username,
         });
         return {
@@ -1029,6 +1024,7 @@ if (!hasSingleInstance) {
           path: res.filePath,
           filename: path.basename(res.filePath),
           sizeBytes: stat.size,
+          source: isSnapshotSource ? 'SNAPSHOT_PDF' : 'PRINT_TO_PDF',
         };
       } catch (err) {
         const writeStatus = classifyFsErrorStatus(err);
@@ -1131,7 +1127,12 @@ if (!hasSingleInstance) {
     handleTrustedIpc('erp:print:run-native', async (_event, input) => {
       const actor = desktopBackend.requireActor(input?.token);
       if (!mainWindow || mainWindow.isDestroyed()) {
-        return { printed: false, canceled: false, failureReason: 'النافذة غير متاحة للطباعة.' };
+        return {
+          printed: false,
+          canceled: false,
+          outcome: 'window-unavailable',
+          failureReason: 'النافذة غير متاحة للطباعة.',
+        };
       }
       return await new Promise((resolve) => {
         mainWindow.webContents.print(
@@ -1141,7 +1142,9 @@ if (!hasSingleInstance) {
           },
           (success, failureReason) => {
             const canceled = failureReason === 'cancelled' || failureReason === 'canceled';
+            const outcome = canceled ? 'canceled' : success ? 'sent' : 'failed';
             diagnosticLogger.log('INFO', 'print', 'Native print command finished', {
+              outcome,
               printed: Boolean(success),
               canceled,
               failureReason: failureReason || null,
@@ -1150,6 +1153,7 @@ if (!hasSingleInstance) {
             resolve({
               printed: Boolean(success),
               canceled,
+              outcome,
               failureReason: failureReason || undefined,
             });
           }
@@ -1231,8 +1235,20 @@ if (!hasSingleInstance) {
       if (!isAllowed) {
         throw new Error('تم حظر الرابط: يُسمح فقط بروابط WhatsApp الموثقة.');
       }
-      await shell.openExternal(rawUrl);
-      return { opened: true };
+      try {
+        await shell.openExternal(rawUrl);
+        return { opened: true };
+      } catch (err) {
+        const msg =
+          err instanceof Error
+            ? err.message
+            : 'تعذر فتح تطبيق واتساب على هذا الجهاز.';
+        diagnosticLogger.log('WARN', 'share', 'WhatsApp launch failed', {
+          protocol: rawUrl.startsWith('whatsapp://') ? 'whatsapp://' : 'https://',
+          message: msg,
+        });
+        return { opened: false, error: msg };
+      }
     });
   }
 
@@ -1326,7 +1342,7 @@ if (!hasSingleInstance) {
 
   app.on('before-quit', async (event) => {
     clearScheduledBackupTimer();
-    cleanupAllShareTempFiles();
+    purgeStaleShareTempFiles();
     if (exitBackupCompleted) return;
     if (shuttingDown) {
       event.preventDefault();

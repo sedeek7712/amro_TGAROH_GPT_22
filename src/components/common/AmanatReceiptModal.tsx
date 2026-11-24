@@ -62,10 +62,10 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
   });
 
   const matchedReturnEvent =
-    notifyPayload.documentType === 'AMANAT_RETURN'
-      ? record.returnHistory?.find(
-          (ev) => ev.id === (notifyPayload.returnEventId || selectedReturnEventId)
-        ) || record.returnHistory?.[record.returnHistory.length - 1]
+    notifyPayload.documentType === 'AMANAT_RETURN' &&
+    !notifyPayload.error &&
+    notifyPayload.returnEventId
+      ? record.returnHistory?.find((ev) => ev.id === notifyPayload.returnEventId)
       : undefined;
 
   const dec = meta.currency.decimalPlaces ?? 2;
@@ -78,7 +78,11 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
           العملية المراد إشعار المودع بها:
         </label>
         <select
-          value={notifyPayload.documentType === 'AMANAT_RECEIPT' ? '__DEPOSIT__' : notifyPayload.returnEventId || '__LATEST__'}
+          value={
+            notifyPayload.documentType === 'AMANAT_RECEIPT'
+              ? '__DEPOSIT__'
+              : notifyPayload.returnEventId || selectedReturnEventId || '__LATEST__'
+          }
           onChange={(e) => {
             const val = e.target.value;
             if (val === '__DEPOSIT__') {
@@ -109,13 +113,16 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
     date: notifyPayload.date || record.receivedDate,
   });
 
-  const snapshotForNotification = buildAmanatDocumentSnapshot({
-    record,
-    meta,
-    paperSize: 'A4',
-    cashBoxName,
-    returnEvent: matchedReturnEvent,
-  });
+  const snapshotForNotification = notifyPayload.error
+    ? undefined
+    : buildAmanatDocumentSnapshot({
+        record,
+        meta,
+        paperSize: 'A4',
+        cashBoxName,
+        returnEvent: matchedReturnEvent,
+        mode: notifyMode === 'DEPOSIT' ? 'DEPOSIT' : undefined,
+      });
 
   return (
     <>
@@ -125,26 +132,38 @@ export const AmanatReceiptModal: React.FC<AmanatReceiptModalProps> = ({
         pdfTitle={baseFileName}
         defaultSize="A4"
         allowThermal={true}
-        buildSnapshot={(paperSize) =>
-          buildAmanatDocumentSnapshot({
-            record,
-            meta,
-            paperSize,
-            cashBoxName,
-            returnEvent: matchedReturnEvent,
-          })
+        buildSnapshot={
+          notifyPayload.error
+            ? undefined
+            : (paperSize) =>
+                buildAmanatDocumentSnapshot({
+                  record,
+                  meta,
+                  paperSize,
+                  cashBoxName,
+                  returnEvent: matchedReturnEvent,
+                  mode: notifyMode === 'DEPOSIT' ? 'DEPOSIT' : undefined,
+                })
         }
         onClose={onClose}
         onNotify={() => setIsNotificationOpen(true)}
         notifyLabel="إشعار ومشاركة"
       >
         {(paperSize) => (
-          <AmanatDocument
-            record={record}
-            meta={meta}
-            paperSize={paperSize}
-            cashBoxName={cashBoxName}
-          />
+          <>
+            {notifyPayload.error && (
+              <div className="no-print mb-3 p-3 rounded-lg border border-rose-300 bg-rose-50 text-rose-900 text-xs font-semibold">
+                {notifyPayload.error}
+              </div>
+            )}
+            <AmanatDocument
+              record={record}
+              meta={meta}
+              paperSize={paperSize}
+              cashBoxName={cashBoxName}
+              returnEvent={matchedReturnEvent}
+            />
+          </>
         )}
       </DocumentPrintShell>
 

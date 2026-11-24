@@ -462,6 +462,7 @@ declare global {
         path?: string;
         filename?: string;
         sizeBytes?: number;
+        source?: 'SNAPSHOT_PDF' | 'PRINT_TO_PDF';
         error?: string;
       }>;
       exportDocumentPng(input: {
@@ -479,6 +480,7 @@ declare global {
       runNativePrint(input: { token: string }): Promise<{
         printed: boolean;
         canceled: boolean;
+        outcome?: 'sent' | 'canceled' | 'failed' | 'window-unavailable';
         failureReason?: string;
       }>;
       prepareShareTempFile(input: {
@@ -496,7 +498,7 @@ declare global {
         tempToken: string;
       }): Promise<{ revealed: boolean; error?: string }>;
       cleanupShareTempFile(input: { token: string; tempToken: string }): Promise<{ cleaned: boolean }>;
-      openWhatsAppUrl(input: { token: string; url: string }): Promise<{ opened: boolean }>;
+      openWhatsAppUrl(input: { token: string; url: string }): Promise<{ opened: boolean; error?: string }>;
 
       onDataChanged(callback: (domains: string[]) => void): () => void;
       onAuthInvalidated(callback: (reason: string) => void): () => void;

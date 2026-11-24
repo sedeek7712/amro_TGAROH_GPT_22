@@ -402,6 +402,7 @@ export const ReportsManager: React.FC = () => {
 
   const handlePrint = async (mode: DocumentPaperSize = printSize) => {
     setPrintSize(mode);
+    setPdfSaveState('IDLE');
     applyPrintPageStyle(mode);
     const snap = buildActiveReportSnapshot(mode);
     const res = await triggerNativePrint(mode, {
@@ -1988,14 +1989,25 @@ export const ReportsManager: React.FC = () => {
                               type="button"
                               onClick={() => {
                                 const payload = buildAmanatNotificationPayload(r);
-                                const matchedEv = r.returnHistory?.find((ev) => ev.id === payload.returnEventId);
-                                const snap = buildAmanatDocumentSnapshot({
-                                  record: r,
-                                  meta: resolveMeta({ branchId: r.branchId, issuerName: r.receivedBy }),
-                                  paperSize: 'A4',
-                                  returnEvent: payload.documentType === 'AMANAT_RETURN' ? matchedEv : undefined,
+                                const matchedEv =
+                                  payload.documentType === 'AMANAT_RETURN' &&
+                                  !payload.error &&
+                                  payload.returnEventId
+                                    ? r.returnHistory?.find((ev) => ev.id === payload.returnEventId)
+                                    : undefined;
+                                const snap = payload.error
+                                  ? undefined
+                                  : buildAmanatDocumentSnapshot({
+                                      record: r,
+                                      meta: resolveMeta({ branchId: r.branchId, issuerName: r.receivedBy }),
+                                      paperSize: 'A4',
+                                      returnEvent: matchedEv,
+                                    });
+                                setNotificationState({
+                                  isOpen: true,
+                                  ...payload,
+                                  snapshot: snap,
                                 });
-                                setNotificationState({ isOpen: true, ...payload, snapshot: snap });
                               }}
                               className="p-1.5 text-purple-700 hover:bg-purple-100 rounded-lg transition-colors"
                               title={`إرسال إشعار الأمانة ${r.recordNumber}`}

@@ -412,13 +412,37 @@ export function buildAmanatDocumentSnapshot(params: {
   paperSize?: SupportedDocumentPaperSize;
   cashBoxName?: string;
   returnEvent?: AmanatReturnEvent;
+  returnEventId?: string;
+  mode?: 'AUTO' | 'DEPOSIT' | 'RETURN';
 }): DocumentSnapshot {
-  const { record, meta, cashBoxName, returnEvent } = params;
+  const { record, meta, cashBoxName } = params;
   const paperSize = params.paperSize || 'A4';
   const dec = meta.currency.decimalPlaces ?? 2;
   const sym = meta.currency.symbol;
-  const returnedTotal = roundMoney(Number(record.returnedAmount || 0));
-  const remaining =
+  const history = Array.isArray(record.returnHistory) ? record.returnHistory : [];
+
+  let resolvedReturnEvent = params.returnEvent;
+  if (!resolvedReturnEvent && params.returnEventId) {
+    resolvedReturnEvent = history.find((ev) => ev.id === params.returnEventId);
+    if (!resolvedReturnEvent) {
+      throw new Error(
+        `تعذر العثور على عملية الرد المحددة (${params.returnEventId}) داخل سجل عمليات الأمانة (returnHistory).`
+      );
+    }
+  }
+  if (!resolvedReturnEvent && params.mode !== 'DEPOSIT' && record.type === 'CASH') {
+    if (params.mode === 'RETURN' || record.status === 'RETURNED') {
+      resolvedReturnEvent = history[history.length - 1];
+      if (!resolvedReturnEvent) {
+        throw new Error(
+          'تعذر تحديد مبلغ عملية رد الأمانة من سجل العمليات (returnHistory)؛ لا يمكن إصدار إشعار رد بمبلغ غير موثق.'
+        );
+      }
+    }
+  }
+
+  let returnedTotal = roundMoney(Number(record.returnedAmount || 0));
+  let remaining =
     record.status === 'CANCELLED'
       ? 0
       : roundMoney(
@@ -426,32 +450,68 @@ export function buildAmanatDocumentSnapshot(params: {
             ? Number(record.remainingAmount)
             : Math.max(0, Number(record.amount || 0) - returnedTotal)
         );
-  const isReturnDoc = Boolean(returnEvent) || record.status === 'RETURNED';
+
+  if (resolvedReturnEvent && record.type === 'CASH') {
+    const idx = history.findIndex((ev) => ev.id === resolvedReturnEvent!.id);
+    if (idx >= 0) {
+      returnedTotal = roundMoney(
+        history.slice(0, idx + 1).reduce((sum, ev) => sum + (Number(ev.amount) || 0), 0)
+      );
+      remaining = roundMoney(Math.max(0, Number(record.amount || 0) - returnedTotal));
+    }
+  }
+
+  const isReturnDoc =
+    params.mode === 'DEPOSIT'
+      ? false
+      : Boolean(resolvedReturnEvent) ||
+        (params.mode === 'RETURN' && record.type === 'ITEM') ||
+        record.status === 'RETURNED';
   const kind: DocumentKind = isReturnDoc ? 'AMANAT_RETURN' : 'AMANAT_RECEIPT';
+
+  if (
+    kind === 'AMANAT_RETURN' &&
+    record.type === 'CASH' &&
+    !resolvedReturnEvent &&
+    params.mode !== 'DEPOSIT'
+  ) {
+    throw new Error(
+      'تعذر تحديد حدث رد الأمانة النقدية في سجل العمليات (returnHistory)؛ لا يمكن عرض أصل الأمانة كمبلغ رد.'
+    );
+  }
+
   const displayAmount =
     record.type === 'CASH'
-      ? returnEvent
-        ? roundMoney(Number(returnEvent.amount || 0))
+      ? resolvedReturnEvent && params.mode !== 'DEPOSIT'
+        ? roundMoney(Number(resolvedReturnEvent.amount || 0))
         : roundMoney(Number(record.amount || 0))
       : undefined;
 
-  const isMultiPage = (record.returnHistory?.length || 0) > 12;
+  const isMultiPage = history.length > 12;
 
   return {
     documentId: record.id,
     documentNumber: record.recordNumber,
     documentKind: kind,
     documentTitle:
-      record.status === 'RETURNED'
+      resolvedReturnEvent && params.mode !== 'DEPOSIT'
+        ? remaining <= 0.005
+          ? 'سند تسليم وإبراء ذمة أمانة'
+          : 'سند رد جزئي لأمانة نقدية'
+        : record.status === 'RETURNED'
         ? 'سند تسليم وإبراء ذمة أمانة'
         : record.status === 'CANCELLED'
         ? 'سند أمانة ملغاة'
-        : returnEvent || returnedTotal > 0
+        : returnedTotal > 0 && params.mode !== 'DEPOSIT'
         ? 'سند رد جزئي لأمانة نقدية'
         : 'سند استلام وإيداع أمانة',
     documentSubtitle: 'وحدة الأمانات وحفظ أموال ومقتنيات الغير (2102)',
     statusLabel:
-      record.status === 'RETURNED'
+      resolvedReturnEvent && params.mode !== 'DEPOSIT'
+        ? remaining <= 0.005
+          ? 'تم الرد والإبراء'
+          : 'رد جزئي'
+        : record.status === 'RETURNED'
         ? 'تم الرد والإبراء'
         : record.status === 'CANCELLED'
         ? 'ملغاة'
@@ -459,21 +519,27 @@ export function buildAmanatDocumentSnapshot(params: {
         ? 'رد جزئي'
         : 'محفوظة في الأمانات',
     statusTone:
-      record.status === 'RETURNED'
-        ? 'success'
-        : record.status === 'CANCELLED'
+      record.status === 'CANCELLED'
         ? 'danger'
+        : (resolvedReturnEvent ? remaining <= 0.005 : record.status === 'RETURNED')
+        ? 'success'
         : returnedTotal > 0
         ? 'warning'
         : 'neutral',
-    date: returnEvent?.date || (record.status === 'RETURNED' ? record.returnedDate : undefined) || record.receivedDate,
+    date:
+      (params.mode !== 'DEPOSIT' ? resolvedReturnEvent?.date : undefined) ||
+      (record.status === 'RETURNED' ? record.returnedDate : undefined) ||
+      record.receivedDate,
     issuedAtTabular: formatLocalDateTime().displayTabular,
     paperSize,
     meta,
     partyName: record.depositorName,
     partyPhone: record.depositorPhone,
     amount: displayAmount,
-    amountLabel: returnEvent ? 'مبلغ عملية الرد الحالية' : 'المبلغ الأصلي المودع بأمانة',
+    amountLabel:
+      resolvedReturnEvent && params.mode !== 'DEPOSIT'
+        ? 'مبلغ عملية الرد الحالية'
+        : 'المبلغ الأصلي المودع بأمانة',
     amountInWords:
       displayAmount !== undefined
         ? numberToArabicWords(displayAmount, meta.currency.nameAr)
@@ -499,7 +565,7 @@ export function buildAmanatDocumentSnapshot(params: {
             { label: 'الرصيد المتبقي', value: `${remaining.toFixed(dec)} ${sym}`, highlight: true },
           ]
         : undefined,
-    notes: returnEvent?.notes || record.notes || record.cancelledReason,
+    notes: resolvedReturnEvent?.notes || record.notes || record.cancelledReason,
     referenceText: `REF: ${record.recordNumber}`,
     signatures: [
       { roleLabel: 'المستلم (الموظف)', name: record.receivedBy },
@@ -510,7 +576,7 @@ export function buildAmanatDocumentSnapshot(params: {
     officialFileBaseName: buildStructuredBaseName({
       kind,
       documentNumber: record.recordNumber,
-      date: returnEvent?.date || record.receivedDate,
+      date: (params.mode !== 'DEPOSIT' ? resolvedReturnEvent?.date : undefined) || record.receivedDate,
     }),
   };
 }

@@ -13,11 +13,14 @@ export type DocumentOperationType = 'PDF_EXPORT' | 'PNG_EXPORT' | 'PRINT' | 'SHA
 export type DocumentOperationStatus =
   | 'PREPARED'
   | 'SAVED'
+  | 'DOWNLOAD_INITIATED'
   | 'CANCELED'
   | 'FAILED'
   | 'PRINT_OPENED'
+  | 'PRINT_DIALOG_CLOSED'
   | 'PRINT_SENT'
   | 'SHARE_OPENED'
+  | 'WHATSAPP_LAUNCHED'
   | 'USER_COPIED_TEXT'
   | 'USER_CONFIRMED_SEND';
 
@@ -110,12 +113,15 @@ const ACTION_LABELS: Record<DocumentOperationType, string> = {
 
 const STATUS_LABELS: Record<DocumentOperationStatus, string> = {
   PREPARED: 'تم التجهيز',
-  SAVED: 'تم الحفظ بنجاح',
+  SAVED: 'تم الحفظ والتحقق على القرص',
+  DOWNLOAD_INITIATED: 'بدأ تنزيل الملف من المتصفح',
   CANCELED: 'ألغاه المستخدم',
   FAILED: 'فشلت العملية',
   PRINT_OPENED: 'فتح معاينة الطباعة',
+  PRINT_DIALOG_CLOSED: 'أُغلق حوار الطباعة في المتصفح',
   PRINT_SENT: 'أُرسلت مهمة الطباعة',
   SHARE_OPENED: 'فُتحت نافذة المشاركة',
+  WHATSAPP_LAUNCHED: 'تم فتح واتساب',
   USER_COPIED_TEXT: 'نسخ المستخدم النص',
   USER_CONFIRMED_SEND: 'أكّد المستخدم الإرسال',
 };

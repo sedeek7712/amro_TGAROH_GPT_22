@@ -6,7 +6,7 @@
  * - تسجل عمليات التحضير والطباعة والحفظ والمشاركة في NotificationLogService دون ادعاء التسليم (DELIVERED ممنوع).
  */
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
   AlertTriangle,
@@ -15,16 +15,19 @@ import {
   Copy,
   FileDown,
   FileText,
+  FolderOpen,
   Image as ImageIcon,
   MessageSquare,
   Phone,
   Printer,
   Send,
   Share2,
+  Trash2,
   User,
   WifiOff,
   X,
 } from 'lucide-react';
+import { desktopSession } from '../../services/desktopSession';
 import { useDocumentContext } from '../../hooks/useDocumentContext';
 import { authService } from '../../services/authService';
 import type { DocumentSnapshot } from '../../services/documents/documentService';
@@ -121,7 +124,11 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   const [shareOpenedOnce, setShareOpenedOnce] = useState(false);
   const [confirmedSend, setConfirmedSend] = useState(false);
   const [isBusy, setIsBusy] = useState(false);
-  const activeTempTokenRef = useRef<string | undefined>(undefined);
+  const [activeTempFile, setActiveTempFile] = useState<{
+    tempToken: string;
+    fileName: string;
+    sizeBytes: number;
+  } | null>(null);
 
   const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const actor =
@@ -204,10 +211,6 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
 
   useEffect(() => {
     if (!isOpen) {
-      if (activeTempTokenRef.current) {
-        cleanupShareTempFileIfAny(activeTempTokenRef.current);
-        activeTempTokenRef.current = undefined;
-      }
       return;
     }
 
@@ -218,6 +221,7 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     setStatusFeedback(null);
     setShareOpenedOnce(false);
     setConfirmedSend(false);
+    setActiveTempFile(null);
 
     if (snapshot) {
       setShareFormat(allowPngFormat ? snapshot.recommendedShareFormat : 'PDF');
@@ -234,10 +238,6 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
 
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      if (activeTempTokenRef.current) {
-        cleanupShareTempFileIfAny(activeTempTokenRef.current);
-        activeTempTokenRef.current = undefined;
-      }
       const portal = document.getElementById(PORTAL_ROOT_ID);
       requestAnimationFrame(() => {
         if (!portal || portal.childElementCount === 0) {
@@ -306,7 +306,13 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
         userName: actor?.fullName,
       });
       setStatusFeedback({
-        tone: res.canceled ? 'warning' : res.printed ? 'success' : 'error',
+        tone: res.canceled
+          ? 'warning'
+          : res.printed
+          ? 'success'
+          : res.dialogClosed
+          ? 'info'
+          : 'error',
         text: res.message,
       });
     } finally {
@@ -329,7 +335,14 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
       });
       setSaveState(res.status);
       setStatusFeedback({
-        tone: res.status === 'SAVED' ? 'success' : res.status === 'CANCELED' ? 'warning' : 'error',
+        tone:
+          res.status === 'SAVED'
+            ? 'success'
+            : res.status === 'DOWNLOAD_INITIATED'
+            ? 'info'
+            : res.status === 'CANCELED'
+            ? 'warning'
+            : 'error',
         text: res.message,
       });
     } finally {
@@ -350,7 +363,14 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
       });
       setSaveState(res.status);
       setStatusFeedback({
-        tone: res.status === 'SAVED' ? 'success' : res.status === 'CANCELED' ? 'warning' : 'error',
+        tone:
+          res.status === 'SAVED'
+            ? 'success'
+            : res.status === 'DOWNLOAD_INITIATED'
+            ? 'info'
+            : res.status === 'CANCELED'
+            ? 'warning'
+            : 'error',
         text: res.message,
       });
     } finally {
@@ -361,7 +381,6 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
   const handleShareWhatsApp = async () => {
     if (isBlocked || isBusy) return;
     if (!snapshot) {
-      //Fallback URL only if legacy caller did not supply snapshot
       await handleCopy();
       return;
     }
@@ -369,11 +388,6 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     setIsBusy(true);
     setStatusFeedback({ tone: 'info', text: 'جاري تجهيز المرفق ونص الإشعار محلياً...' });
     try {
-      if (activeTempTokenRef.current) {
-        await cleanupShareTempFileIfAny(activeTempTokenRef.current);
-        activeTempTokenRef.current = undefined;
-      }
-
       const pkg = await prepareSharePackage({
         snapshot,
         preferredFormat: shareFormat,
@@ -383,7 +397,11 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
         actor,
       });
       if (pkg.tempToken) {
-        activeTempTokenRef.current = pkg.tempToken;
+        setActiveTempFile({
+          tempToken: pkg.tempToken,
+          fileName: pkg.fileName,
+          sizeBytes: pkg.sizeBytes,
+        });
       }
 
       const outcome = await executeWhatsAppOrNativeShare({
@@ -394,7 +412,9 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
       });
 
       setShareOpenedOnce(
-        outcome.status === 'SHARE_OPENED' || outcome.status === 'FALLBACK_DOWNLOAD_AND_WA'
+        outcome.status === 'SHARE_OPENED' ||
+          outcome.status === 'WHATSAPP_LAUNCHED' ||
+          outcome.status === 'FALLBACK_DOWNLOAD_AND_WA'
       );
       setStatusFeedback({
         tone:
@@ -402,7 +422,9 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
             ? 'error'
             : outcome.status === 'CANCELED' || outcome.isOffline
             ? 'warning'
-            : 'success',
+            : outcome.whatsappLaunched || outcome.sharedWithAttachment
+            ? 'success'
+            : 'info',
         text: outcome.noticeMessage,
       });
     } catch (err: unknown) {
@@ -411,6 +433,33 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
     } finally {
       setIsBusy(false);
     }
+  };
+
+  const handleRevealTempFile = async () => {
+    if (!activeTempFile || typeof window === 'undefined' || !window.amroDesktop?.revealShareTempFile) {
+      return;
+    }
+    const token = desktopSession.requireToken();
+    const res = await window.amroDesktop.revealShareTempFile({
+      token,
+      tempToken: activeTempFile.tempToken,
+    });
+    if (!res.revealed) {
+      setStatusFeedback({
+        tone: 'warning',
+        text: res.error || 'تعذر فتح مجلد الملف المؤقت.',
+      });
+    }
+  };
+
+  const handleManualCleanupTempFile = async () => {
+    if (!activeTempFile) return;
+    await cleanupShareTempFileIfAny(activeTempFile.tempToken);
+    setActiveTempFile(null);
+    setStatusFeedback({
+      tone: 'info',
+      text: 'تم حذف الملف المؤقت يدوياً بناءً على طلبك.',
+    });
   };
 
   const handleConfirmUserSent = async () => {
@@ -655,6 +704,38 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
                 </span>
               )}
               <span>{statusFeedback?.text || getSaveStatusLabel(saveState)}</span>
+            </div>
+          )}
+
+          {activeTempFile && (
+            <div className="p-2.5 rounded-xl border border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <div className="text-slate-700">
+                <strong>ملف مؤقت للمشاركة:</strong>{' '}
+                <span className="font-mono text-slate-900">{activeTempFile.fileName}</span>{' '}
+                <span className="text-slate-500">
+                  ({(activeTempFile.sizeBytes / 1024).toFixed(1)} KB — يُحفظ حتى 7 أيام)
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
+                {isDesktop && (
+                  <button
+                    type="button"
+                    onClick={handleRevealTempFile}
+                    className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-800 font-semibold"
+                  >
+                    <FolderOpen className="w-3.5 h-3.5" />
+                    <span>إظهار المجلد</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleManualCleanupTempFile}
+                  className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-rose-200 bg-white hover:bg-rose-50 text-rose-700 font-semibold"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>حذف الملف المؤقت</span>
+                </button>
+              </div>
             </div>
           )}
 

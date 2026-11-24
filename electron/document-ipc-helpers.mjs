@@ -549,7 +549,7 @@ export function revealShareTempFileOnDisk({ tempDir, shareTempFiles, shell, temp
  * clipboard format; WhatsApp Desktop can paste the image, while the protocol URL pre-fills
  * the message text in the selected chat.
  */
-export function copyShareTempPngToClipboardOnDisk({
+export async function copyShareTempPngToClipboardOnDisk({
   tempDir,
   shareTempFiles,
   clipboard,
@@ -601,7 +601,7 @@ export function copyShareTempPngToClipboardOnDisk({
       'text/plain': String(messageText || ''),
       'image/png': new BlobCtor([new Uint8Array(pngBytes)], { type: 'image/png' }),
     });
-    clipboard.write([clipboardItem]);
+    await clipboard.write([clipboardItem]);
     return { copied: true, imageCopied: true, sizeBytes: stat.size };
   } catch (error) {
     return {

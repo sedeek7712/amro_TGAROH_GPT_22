@@ -191,6 +191,7 @@ declare global {
         token: string;
         input: { record: ProductImage; originalDataUrl: string; thumbnailDataUrl: string };
       }): Promise<ProductImage>;
+      applyRemoteProductImageTombstone(input: { token: string; record: ProductImage }): Promise<void>;
       markProductImageSynced(input: { token: string; imageId: string }): Promise<ProductImage | undefined>;
       saveProductAtomic(input: { token: string; product: Product; isUpdate?: boolean }): Promise<Product>;
       deleteProductAtomic(input: { token: string; productId: string }): Promise<void>;

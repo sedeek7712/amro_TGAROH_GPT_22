@@ -1,6 +1,7 @@
 import { db } from '../db/erpDatabase';
 import { Product, ProductImage, ProductImageLocalAsset } from '../types/erp';
 import { authService } from './authService';
+import { desktopSession } from './desktopSession';
 import { storage } from './storageService';
 import { syncQueueService } from './syncQueueService';
 import {
@@ -61,7 +62,7 @@ export class ProductMediaService {
 
   public async getProductImages(productId: string): Promise<ProductImage[]> {
     const bridge = desktopBridge();
-    if (bridge) return await bridge.getProductImages({ token: authService.requireDesktopToken(), productId });
+    if (bridge) return await bridge.getProductImages({ token: desktopSession.requireToken(), productId });
     const actor = this.requireProductAccess(productId, 'inventory:view');
     const product = await db.products.get(productId);
     if (!product || !filterRecordsByActivityScope([product], actor)[0]) return [];
@@ -74,7 +75,7 @@ export class ProductMediaService {
 
   public async getImageDataUrl(imageId: string, variant: 'original' | 'thumbnail' = 'thumbnail'): Promise<string | null> {
     const bridge = desktopBridge();
-    if (bridge) return await bridge.getProductImageData({ token: authService.requireDesktopToken(), imageId, variant });
+    if (bridge) return await bridge.getProductImageData({ token: desktopSession.requireToken(), imageId, variant });
     const actor = authService.getCurrentActorSync();
     assertPermission(actor, 'inventory:view', 'عرض صورة الصنف');
     const record = await db.productImages.get(imageId);
@@ -98,7 +99,7 @@ export class ProductMediaService {
     const bridge = desktopBridge();
     if (bridge) {
       return await bridge.addProductImage({
-        token: authService.requireDesktopToken(),
+        token: desktopSession.requireToken(),
         input,
       });
     }
@@ -178,7 +179,7 @@ export class ProductMediaService {
 
   public async setPrimaryImage(imageId: string): Promise<ProductImage> {
     const bridge = desktopBridge();
-    if (bridge) return await bridge.setPrimaryProductImage({ token: authService.requireDesktopToken(), imageId });
+    if (bridge) return await bridge.setPrimaryProductImage({ token: desktopSession.requireToken(), imageId });
     const actor = this.requireProductAccess(imageId, 'inventory:media:manage');
     const current = await db.productImages.get(imageId);
     if (!current || current.tenantId !== actor.tenantId || current.isDeleted) throw new Error('الصورة غير موجودة.');
@@ -219,7 +220,7 @@ export class ProductMediaService {
 
   public async deleteImage(imageId: string): Promise<void> {
     const bridge = desktopBridge();
-    if (bridge) return await bridge.deleteProductImage({ token: authService.requireDesktopToken(), imageId });
+    if (bridge) return await bridge.deleteProductImage({ token: desktopSession.requireToken(), imageId });
     const actor = this.requireProductAccess(imageId, 'inventory:media:manage');
     const current = await db.productImages.get(imageId);
     if (!current || current.tenantId !== actor.tenantId || current.isDeleted) return;
@@ -256,7 +257,7 @@ export class ProductMediaService {
     const bridge = desktopBridge();
     if (bridge) {
       await bridge.cacheRemoteProductImage({
-        token: authService.requireDesktopToken(),
+        token: desktopSession.requireToken(),
         input: { record, originalDataUrl, thumbnailDataUrl },
       });
       return;
@@ -274,7 +275,7 @@ export class ProductMediaService {
   public async markSynced(imageId: string): Promise<void> {
     const bridge = desktopBridge();
     if (bridge) {
-      await bridge.markProductImageSynced({ token: authService.requireDesktopToken(), imageId });
+      await bridge.markProductImageSynced({ token: desktopSession.requireToken(), imageId });
       return;
     }
     const record = await db.productImages.get(imageId);
@@ -284,7 +285,7 @@ export class ProductMediaService {
 
   public async getLocalImageRecord(imageId: string): Promise<ProductImage | undefined> {
     const bridge = desktopBridge();
-    if (bridge) return await bridge.getProductImageRecord({ token: authService.requireDesktopToken(), imageId });
+    if (bridge) return await bridge.getProductImageRecord({ token: desktopSession.requireToken(), imageId });
     const record = await db.productImages.get(imageId);
     if (!record) return undefined;
     const actor = authService.getCurrentActorSync();

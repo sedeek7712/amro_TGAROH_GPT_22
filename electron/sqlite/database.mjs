@@ -9,7 +9,7 @@ const DEFAULT_MIGRATIONS_DIR = path.join(MODULE_DIR, 'migrations');
 const MIGRATION_FILE_PATTERN = /^(\d{3,})_([a-z0-9_]+)\.sql$/i;
 const CORE_TABLES = [
   'tenants', 'branches', 'activities', 'accounts', 'products',
-  'product_batches', 'parties', 'invoices', 'invoice_items',
+  'product_batches', 'product_images', 'parties', 'invoices', 'invoice_items',
   'invoice_stock_deductions', 'journal_entries', 'journal_entry_lines',
   'cash_boxes', 'vouchers', 'amanat_records', 'users', 'audit_logs',
   'outbox_queue', 'sync_conflicts', 'document_sequences', 'legacy_imports',

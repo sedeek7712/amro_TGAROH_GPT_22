@@ -28,6 +28,9 @@ try {
     .map((r) => r.version);
   assert.deepEqual(recordedVersions, expectedMigrationVersions);
 
+  const productImagesTable = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='product_images'").get();
+  assert.ok(productImagesTable, 'Expected product_images table after migration 003');
+
   for (const v2Table of ['payment_allocations', 'party_advance_transactions', 'allocation_audits']) {
     const exists = db
       .prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?")

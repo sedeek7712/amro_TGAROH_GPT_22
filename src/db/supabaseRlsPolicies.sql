@@ -133,6 +133,40 @@ CREATE TABLE IF NOT EXISTS erp_products (
     PRIMARY KEY (tenant_id, id)
 );
 
+CREATE TABLE IF NOT EXISTS erp_product_images (
+    id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
+    product_id TEXT NOT NULL,
+    activity_id TEXT NOT NULL,
+    storage_key TEXT NOT NULL,
+    thumbnail_storage_key TEXT NOT NULL,
+    mime_type TEXT NOT NULL CHECK (mime_type IN ('image/webp','image/jpeg','image/png')),
+    size_bytes BIGINT NOT NULL CHECK (size_bytes BETWEEN 1 AND 10485760),
+    thumbnail_size_bytes BIGINT NOT NULL CHECK (thumbnail_size_bytes BETWEEN 1 AND 1048576),
+    width INTEGER NOT NULL CHECK (width BETWEEN 1 AND 4096),
+    height INTEGER NOT NULL CHECK (height BETWEEN 1 AND 4096),
+    checksum_sha256 TEXT NOT NULL CHECK (length(checksum_sha256) = 64),
+    is_primary BOOLEAN NOT NULL DEFAULT FALSE,
+    sort_order INTEGER NOT NULL DEFAULT 0 CHECK (sort_order >= 0),
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
+    PRIMARY KEY (tenant_id, id),
+    UNIQUE (tenant_id, storage_key),
+    UNIQUE (tenant_id, thumbnail_storage_key),
+    CONSTRAINT fk_product_images_product FOREIGN KEY (tenant_id, product_id)
+        REFERENCES erp_products(tenant_id, id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_product_images_tenant_product
+    ON erp_product_images(tenant_id, product_id, is_deleted, sort_order);
+CREATE INDEX IF NOT EXISTS idx_product_images_tenant_updated
+    ON erp_product_images(tenant_id, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_product_images_single_primary
+    ON erp_product_images(tenant_id, product_id)
+    WHERE is_primary = TRUE AND is_deleted = FALSE;
+
 CREATE TABLE IF NOT EXISTS erp_parties (
     id TEXT NOT NULL,
     tenant_id TEXT NOT NULL REFERENCES erp_tenants(id) ON DELETE CASCADE,
@@ -466,6 +500,7 @@ ALTER TABLE erp_tenant_users ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_accounts ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_cash_boxes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_products ENABLE ROW LEVEL SECURITY;
+ALTER TABLE erp_product_images ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_parties ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_invoices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE erp_journal_entries ENABLE ROW LEVEL SECURITY;
@@ -510,6 +545,30 @@ CREATE POLICY tenant_isolation_cashboxes_write ON erp_cash_boxes
 CREATE POLICY tenant_isolation_products ON erp_products
     FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() != 'DENIED')
     WITH CHECK (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'INVENTORY_KEEPER'));
+
+CREATE POLICY tenant_isolation_product_images ON erp_product_images
+    FOR ALL USING (
+        current_app_tenant_id() IS NOT NULL
+        AND tenant_id = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = erp_product_images.tenant_id
+              AND product.id = erp_product_images.product_id
+              AND product.activity_id = erp_product_images.activity_id
+        )
+        AND current_app_user_role() != 'DENIED'
+    )
+    WITH CHECK (
+        current_app_tenant_id() IS NOT NULL
+        AND tenant_id = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = erp_product_images.tenant_id
+              AND product.id = erp_product_images.product_id
+              AND product.activity_id = erp_product_images.activity_id
+        )
+        AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
+    );
 
 CREATE POLICY tenant_isolation_parties ON erp_parties
     FOR ALL USING (current_app_tenant_id() IS NOT NULL AND tenant_id = current_app_tenant_id() AND current_app_user_role() IN ('ADMIN', 'ACCOUNTANT', 'CASHIER'))
@@ -578,6 +637,7 @@ CREATE OR REPLACE TRIGGER trg_branches_updated_at BEFORE UPDATE ON erp_branches 
 CREATE OR REPLACE TRIGGER trg_accounts_updated_at BEFORE UPDATE ON erp_accounts FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_cash_boxes_updated_at BEFORE UPDATE ON erp_cash_boxes FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_products_updated_at BEFORE UPDATE ON erp_products FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+CREATE OR REPLACE TRIGGER trg_product_images_updated_at BEFORE UPDATE ON erp_product_images FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_parties_updated_at BEFORE UPDATE ON erp_parties FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_invoices_updated_at BEFORE UPDATE ON erp_invoices FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_journal_updated_at BEFORE UPDATE ON erp_journal_entries FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
@@ -586,6 +646,78 @@ CREATE OR REPLACE TRIGGER trg_payment_allocations_updated_at BEFORE UPDATE ON er
 CREATE OR REPLACE TRIGGER trg_party_advances_updated_at BEFORE UPDATE ON erp_party_advances FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_allocation_audits_updated_at BEFORE UPDATE ON erp_allocation_audits FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
 CREATE OR REPLACE TRIGGER trg_amanat_updated_at BEFORE UPDATE ON erp_amanat_items FOR EACH ROW EXECUTE FUNCTION trigger_set_timestamp();
+
+-- Product binaries live in private Storage, never in PostgreSQL rows or invoice payloads.
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('erp-product-media', 'erp-product-media', FALSE, 10485760, ARRAY['image/webp','image/jpeg','image/png'])
+ON CONFLICT (id) DO UPDATE SET
+    public = FALSE,
+    file_size_limit = EXCLUDED.file_size_limit,
+    allowed_mime_types = EXCLUDED.allowed_mime_types;
+
+DROP POLICY IF EXISTS product_media_tenant_read ON storage.objects;
+DROP POLICY IF EXISTS product_media_tenant_insert ON storage.objects;
+DROP POLICY IF EXISTS product_media_tenant_update ON storage.objects;
+DROP POLICY IF EXISTS product_media_tenant_delete ON storage.objects;
+
+CREATE POLICY product_media_tenant_read ON storage.objects
+    FOR SELECT USING (
+        bucket_id = 'erp-product-media'
+        AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
+        AND current_app_user_role() != 'DENIED'
+    );
+CREATE POLICY product_media_tenant_insert ON storage.objects
+    FOR INSERT WITH CHECK (
+        bucket_id = 'erp-product-media'
+        AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
+        AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
+    );
+CREATE POLICY product_media_tenant_update ON storage.objects
+    FOR UPDATE USING (
+        bucket_id = 'erp-product-media'
+        AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
+        AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
+    ) WITH CHECK (
+        bucket_id = 'erp-product-media'
+        AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
+        AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
+    );
+CREATE POLICY product_media_tenant_delete ON storage.objects
+    FOR DELETE USING (
+        bucket_id = 'erp-product-media'
+        AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
+        AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
+    );
 
 -- SYNC-01: تنفيذ الحركة المالية/المخزنية وتسجيل مفتاح عدم التكرار في معاملة واحدة لا تقبل التجزئة
 CREATE OR REPLACE FUNCTION apply_outbox_mutation(

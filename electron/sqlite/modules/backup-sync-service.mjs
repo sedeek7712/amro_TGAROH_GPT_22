@@ -69,6 +69,7 @@ function getDefaultPriority(entityType) {
       return 1;
     case 'PARTY':
     case 'PRODUCT':
+    case 'PRODUCT_IMAGE':
       return 2;
     case 'INVOICE':
     case 'VOUCHER':
@@ -166,6 +167,7 @@ export function pruneAutoBackups(directory, maxRetained, prefixes = ['auto-exit-
   for (let i = limit; i < files.length; i += 1) {
     try {
       rmSync(files[i].path, { force: true });
+      rmSync(files[i].path + '.media', { recursive: true, force: true });
       removed += 1;
     } catch {}
   }
@@ -1295,6 +1297,12 @@ export function createBackupSyncService(database, backupDirectory) {
             const id = String(row.id || '');
             if (!id) throw new Error('معرف الصنف مفقود.');
             if (isDeleted) {
+              const linkedImages = database.prepare(
+                'SELECT COUNT(*) AS count FROM product_images WHERE tenant_id = ? AND product_id = ?'
+              ).get(tenantId, id).count;
+              if (linkedImages > 0) {
+                throw new Error('تأجيل حذف الصنف البعيد: توجد صور مرتبطة لم تتم مزامنة حذفها بعد.');
+              }
               database.prepare('DELETE FROM product_batches WHERE tenant_id = ? AND product_id = ?').run(tenantId, id);
               database.prepare('DELETE FROM products WHERE tenant_id = ? AND id = ?').run(tenantId, id);
             } else {

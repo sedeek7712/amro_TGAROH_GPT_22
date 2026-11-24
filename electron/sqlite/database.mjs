@@ -17,6 +17,7 @@ const CORE_TABLES = [
 const V2_TABLES = [
   'payment_allocations', 'party_advance_transactions', 'allocation_audits',
 ];
+const V3_TABLES = ['product_images'];
 
 function sha256(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -128,6 +129,15 @@ export function verifySqliteFile(filePath, migrationsDirectory = DEFAULT_MIGRATI
       for (const tableName of V2_TABLES) {
         if (!hasTableStmt.get(tableName)) {
           throw new Error('النسخة الاحتياطية تفتقر إلى جدول مطور (v2): ' + tableName);
+        }
+      }
+    }
+
+    const hasV3ProductMediaMigration = migrationFiles.some((m) => m.filename === '003_product_images.sql');
+    if (schemaVersion >= 3 && hasV3ProductMediaMigration) {
+      for (const tableName of V3_TABLES) {
+        if (!hasTableStmt.get(tableName)) {
+          throw new Error('النسخة الاحتياطية تفتقر إلى جدول صور الأصناف (v3): ' + tableName);
         }
       }
     }
@@ -367,7 +377,12 @@ export async function openErpDatabase(options) {
       "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
     );
     const hasV2PaymentMigration = migrationFiles.some((m) => m.filename === '002_payment_allocations_advances.sql');
-    const tablesToRequire = hasV2PaymentMigration ? [...CORE_TABLES, ...V2_TABLES] : CORE_TABLES;
+    const hasV3ProductMediaMigration = migrationFiles.some((m) => m.filename === '003_product_images.sql');
+    const tablesToRequire = [
+      ...CORE_TABLES,
+      ...(hasV2PaymentMigration ? V2_TABLES : []),
+      ...(hasV3ProductMediaMigration ? V3_TABLES : []),
+    ];
     for (const tableName of tablesToRequire) {
       if (!required.get(tableName)) {
         throw new Error('Required ERP table is missing after migration: ' + tableName);

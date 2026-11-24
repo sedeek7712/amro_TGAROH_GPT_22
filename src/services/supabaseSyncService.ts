@@ -19,6 +19,7 @@ import { networkMonitor } from './networkMonitor';
 import { authService } from './authService';
 import { desktopSession } from './desktopSession';
 import { getActiveCurrencyConfig } from '../config/currency';
+import { productMediaService } from './productMediaService';
 import {
   SupabaseSyncConfig,
   CloudSyncResult,
@@ -35,6 +36,7 @@ import {
   PaymentAllocation,
   PartyAdvanceTransaction,
   AllocationAudit,
+  ProductImage,
 } from '../types/erp';
 
 const SUPABASE_CONFIG_KEY = 'multi_activity_erp_supabase_sync_config';
@@ -605,6 +607,101 @@ export class SupabaseSyncService {
     }
   }
 
+  private dataUrlToBlob(dataUrl: string, expectedMime: string): Blob {
+    const match = /^data:(image\/(?:webp|jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || '');
+    if (!match || match[1] !== expectedMime) throw new Error('بيانات صورة الصنف المحلية غير صالحة.');
+    const raw = atob(match[2]);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return new Blob([bytes], { type: expectedMime });
+  }
+
+  private async uploadProductImageObject(
+    cleanUrl: string,
+    config: SupabaseSyncConfig,
+    accessToken: string,
+    storageKey: string,
+    dataUrl: string,
+    mimeType: string
+  ): Promise<void> {
+    const blob = this.dataUrlToBlob(dataUrl, mimeType);
+    const encodedKey = storageKey.split('/').map((part) => encodeURIComponent(part)).join('/');
+    const response = await fetch(`${cleanUrl}/storage/v1/object/erp-product-media/${encodedKey}`, {
+      method: 'POST',
+      headers: {
+        apikey: config.supabaseAnonKey,
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': mimeType,
+        'x-upsert': 'true',
+        'Cache-Control': '31536000',
+        'x-tenant-id': config.tenantId,
+        'x-device-id': config.deviceId,
+      },
+      body: blob,
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`فشل رفع ملف صورة الصنف إلى التخزين الخاص (${response.status}): ${detail.slice(0, 160)}`);
+    }
+  }
+
+  private async deleteProductImageObjects(
+    cleanUrl: string,
+    config: SupabaseSyncConfig,
+    accessToken: string,
+    keys: string[]
+  ): Promise<void> {
+    const prefixes = keys.filter(Boolean);
+    if (prefixes.length === 0) return;
+    const response = await fetch(`${cleanUrl}/storage/v1/object/erp-product-media`, {
+      method: 'DELETE',
+      headers: {
+        apikey: config.supabaseAnonKey,
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'x-tenant-id': config.tenantId,
+      },
+      body: JSON.stringify({ prefixes }),
+    });
+    if (!response.ok && response.status !== 404) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`تعذر حذف ملفات صورة الصنف من التخزين الخاص (${response.status}): ${detail.slice(0, 160)}`);
+    }
+  }
+
+  private async downloadProductImageObject(
+    cleanUrl: string,
+    config: SupabaseSyncConfig,
+    accessToken: string,
+    storageKey: string,
+    mimeType: string,
+    maxBytes: number
+  ): Promise<string> {
+    const encodedKey = storageKey.split('/').map((part) => encodeURIComponent(part)).join('/');
+    const response = await fetch(`${cleanUrl}/storage/v1/object/erp-product-media/${encodedKey}`, {
+      method: 'GET',
+      headers: {
+        apikey: config.supabaseAnonKey,
+        Authorization: `Bearer ${accessToken}`,
+        'x-tenant-id': config.tenantId,
+      },
+    });
+    if (!response.ok) {
+      const detail = await response.text().catch(() => '');
+      throw new Error(`تعذر تنزيل صورة الصنف (${response.status}): ${detail.slice(0, 120)}`);
+    }
+    const blob = await response.blob();
+    if (blob.size <= 0 || blob.size > maxBytes || blob.type && blob.type !== mimeType) {
+      throw new Error('ملف الصورة السحابي لا يطابق النوع أو الحجم المسجل.');
+    }
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('تعذر تحويل الصورة السحابية.'));
+      reader.onerror = () => reject(reader.error || new Error('تعذر قراءة الصورة السحابية.'));
+      reader.readAsDataURL(new Blob([blob], { type: mimeType }));
+    });
+  }
+
   /**
    * رفع حركات طابور Outbox إلى Supabase مع حجز ذري وإقرار صريح وتفريق CREATE/UPDATE/DELETE
    */
@@ -623,6 +720,8 @@ export class SupabaseSyncService {
       return { pushed: 0, failed: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
+    const accessToken: string | undefined = tenantResolution.accessToken;
+    if (!accessToken) return { pushed: 0, failed: 0, errors: ['رمز JWT للمستخدم غير متاح لمزامنة الصور.'] };
     const branchResolution = this.resolveEffectiveBranch(config);
     if (!branchResolution.ok) return { pushed: 0, failed: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };
 
@@ -639,6 +738,7 @@ export class SupabaseSyncService {
     const tableMap: Record<OutboxQueueItem['entityType'], string> = {
       BRANCH: 'erp_branches',
       PRODUCT: 'erp_products',
+      PRODUCT_IMAGE: 'erp_product_images',
       PARTY: 'erp_parties',
       INVOICE: 'erp_invoices',
       JOURNAL_ENTRY: 'erp_journal_entries',
@@ -680,6 +780,22 @@ export class SupabaseSyncService {
         if (!session || (session.role !== 'ADMIN' && !(session.allowedBranches || []).includes(itemBranchId))) {
           throw new Error('حظر عزل الفروع: عنصر المزامنة تابع لفرع غير مصرح به.');
         }
+        if (item.entityType === 'PRODUCT_IMAGE') {
+          const media = item.payload as unknown as ProductImage;
+          if (media.tenantId !== effectiveTenantId) {
+            throw new Error('حظر عزل المؤسسات: بيانات صورة الصنف لا تطابق مؤسسة الجلسة.');
+          }
+          if (item.action !== 'DELETE' && media.syncStatus !== 'SYNCED') {
+            const originalDataUrl = await productMediaService.getImageDataUrl(item.entityId, 'original');
+            const thumbnailDataUrl = await productMediaService.getImageDataUrl(item.entityId, 'thumbnail');
+            if (!originalDataUrl || !thumbnailDataUrl) {
+              throw new Error('ملفات الصورة المحلية غير متاحة؛ ستبقى العملية في Outbox لإعادة المحاولة.');
+            }
+            await this.uploadProductImageObject(cleanUrl, config, accessToken, media.storageKey, originalDataUrl, media.mimeType);
+            await this.uploadProductImageObject(cleanUrl, config, accessToken, media.thumbnailStorageKey, thumbnailDataUrl, media.mimeType);
+          }
+        }
+
         const pkColumn = item.entityType === 'ACCOUNT' ? 'code' : 'id';
         let method: 'POST' | 'PATCH' = 'POST';
         let endpoint = `${cleanUrl}/rest/v1/${targetTable}`;
@@ -703,8 +819,9 @@ export class SupabaseSyncService {
             item.entityId
           )}&tenant_id=eq.${encodeURIComponent(effectiveTenantId)}`;
           preferHeader = 'return=representation';
-          requestBody =
-            item.entityType === 'PARTY' || item.entityType === 'ACCOUNT'
+          requestBody = item.entityType === 'PRODUCT_IMAGE'
+            ? { is_deleted: true, is_primary: false }
+            : item.entityType === 'PARTY' || item.entityType === 'ACCOUNT'
               ? { is_deleted: true }
               : { is_deleted: true, is_active: false };
         } else if (item.action === 'UPDATE') {
@@ -723,7 +840,7 @@ export class SupabaseSyncService {
           method,
           headers: {
             apikey: config.supabaseAnonKey,
-            Authorization: `Bearer ${tenantResolution.accessToken}`,
+            Authorization: `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
             Prefer: preferHeader,
             'x-tenant-id': effectiveTenantId,
@@ -762,7 +879,7 @@ export class SupabaseSyncService {
             method: 'POST',
             headers: {
               apikey: config.supabaseAnonKey,
-              Authorization: `Bearer ${tenantResolution.accessToken}`,
+              Authorization: `Bearer ${accessToken}`,
               'Content-Type': 'application/json',
               Prefer: 'resolution=ignore-duplicates',
               'x-tenant-id': effectiveTenantId,
@@ -782,6 +899,16 @@ export class SupabaseSyncService {
           // عدم تعطيل التأكيد الأساسي إذا كان سجل Idempotency موجوداً مسبقاً
         }
 
+        if (item.entityType === 'PRODUCT_IMAGE') {
+          const media = item.payload as unknown as ProductImage;
+          if (item.action === 'DELETE') {
+            await this.deleteProductImageObjects(cleanUrl, config, accessToken, [
+              media.storageKey,
+              media.thumbnailStorageKey,
+            ]);
+          }
+          await productMediaService.markSynced(item.entityId);
+        }
         await syncQueueService.markSynced(item.id, ackCheck.serverTimestamp);
         pushed++;
       } catch (err: unknown) {
@@ -848,6 +975,30 @@ export class SupabaseSyncService {
           is_default: Boolean(box.isDefault),
           is_active: true,
           is_deleted: false,
+        };
+      }
+
+      case 'PRODUCT_IMAGE': {
+        const image = raw as unknown as ProductImage;
+        return {
+          id: image.id,
+          tenant_id: tenantId,
+          product_id: image.productId,
+          activity_id: image.activityId,
+          storage_key: image.storageKey,
+          thumbnail_storage_key: image.thumbnailStorageKey,
+          mime_type: image.mimeType,
+          size_bytes: image.sizeBytes,
+          thumbnail_size_bytes: image.thumbnailSizeBytes,
+          width: image.width,
+          height: image.height,
+          checksum_sha256: image.checksumSha256,
+          is_primary: Boolean(image.isPrimary),
+          sort_order: Number(image.sortOrder || 0),
+          created_by: image.createdBy,
+          created_at: image.createdAt,
+          updated_at: image.updatedAt,
+          is_deleted: Boolean(image.isDeleted),
         };
       }
 
@@ -1091,6 +1242,8 @@ export class SupabaseSyncService {
       return { pulled: 0, conflicts: 0, errors: [tenantResolution.error!] };
     }
     const effectiveTenantId = tenantResolution.tenantId;
+    const accessToken: string | undefined = tenantResolution.accessToken;
+    if (!accessToken) return { pulled: 0, conflicts: 0, errors: ['رمز JWT للمستخدم غير متاح لتنزيل صور الأصناف.'] };
     const branchResolution = this.resolveEffectiveBranch(config);
     if (!branchResolution.ok) return { pulled: 0, conflicts: 0, errors: [branchResolution.error || 'فرع غير مصرح به'] };
 
@@ -1104,6 +1257,7 @@ export class SupabaseSyncService {
       { name: 'erp_accounts', entityType: 'ACCOUNT', pkField: 'code' },
       { name: 'erp_cash_boxes', entityType: 'CASHBOX', pkField: 'id' },
       { name: 'erp_products', entityType: 'PRODUCT', pkField: 'id' },
+      { name: 'erp_product_images', entityType: 'PRODUCT_IMAGE', pkField: 'id' },
       { name: 'erp_parties', entityType: 'PARTY', pkField: 'id' },
       { name: 'erp_invoices', entityType: 'INVOICE', pkField: 'id' },
       { name: 'erp_journal_entries', entityType: 'JOURNAL_ENTRY', pkField: 'id' },
@@ -1165,7 +1319,7 @@ export class SupabaseSyncService {
             method: 'GET',
             headers: {
               apikey: config.supabaseAnonKey,
-              Authorization: `Bearer ${tenantResolution.accessToken}`,
+              Authorization: `Bearer ${accessToken}`,
               'Content-Type': 'application/json',
               'x-tenant-id': effectiveTenantId,
               'x-device-id': config.deviceId,
@@ -1209,7 +1363,49 @@ export class SupabaseSyncService {
               continue;
             }
 
-            if (bridge) {
+            if (table.entityType === 'PRODUCT_IMAGE') {
+              const media: ProductImage = {
+                id: String(rec.id),
+                tenantId: String(rec.tenant_id || effectiveTenantId),
+                productId: String(rec.product_id || ''),
+                activityId: String(rec.activity_id || '') as ProductImage['activityId'],
+                storageKey: String(rec.storage_key || ''),
+                thumbnailStorageKey: String(rec.thumbnail_storage_key || ''),
+                mimeType: String(rec.mime_type || 'image/webp') as ProductImage['mimeType'],
+                sizeBytes: Number(rec.size_bytes || 0),
+                thumbnailSizeBytes: Number(rec.thumbnail_size_bytes || 0),
+                width: Number(rec.width || 0),
+                height: Number(rec.height || 0),
+                checksumSha256: String(rec.checksum_sha256 || ''),
+                isPrimary: rec.is_primary === true,
+                sortOrder: Number(rec.sort_order || 0),
+                createdBy: String(rec.created_by || 'remote'),
+                createdAt: String(rec.created_at || new Date().toISOString()),
+                updatedAt: String(rec.updated_at || new Date().toISOString()),
+                syncStatus: 'SYNCED',
+                isDeleted: rec.is_deleted === true,
+              };
+              if (media.tenantId !== effectiveTenantId || !media.productId || !media.storageKey || !media.thumbnailStorageKey) {
+                throw new Error('بيانات صورة الصنف البعيدة لا تطابق المؤسسة أو تفتقد مفاتيح التخزين.');
+              }
+              if (media.isDeleted) {
+                await productMediaService.applyRemoteTombstone(media);
+              } else {
+                const originalDataUrl = await this.downloadProductImageObject(
+                  cleanUrl, config, accessToken, media.storageKey, media.mimeType, 10 * 1024 * 1024
+                );
+                const thumbnailDataUrl = await this.downloadProductImageObject(
+                  cleanUrl, config, accessToken, media.thumbnailStorageKey, media.mimeType, 1024 * 1024
+                );
+                const originalBlob = this.dataUrlToBlob(originalDataUrl, media.mimeType);
+                const digest = await crypto.subtle.digest('SHA-256', await originalBlob.arrayBuffer());
+                const checksum = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('');
+                if (checksum !== media.checksumSha256 || originalBlob.size !== media.sizeBytes) {
+                  throw new Error('فشل التحقق من سلامة صورة الصنف بعد تنزيلها (SHA-256/size mismatch).');
+                }
+                await productMediaService.cacheRemoteImage(media, originalDataUrl, thumbnailDataUrl);
+              }
+            } else if (bridge) {
               await bridge.applyRemoteSyncEntity({
                 token: desktopSession.requireToken(),
                 entityType: table.entityType,
@@ -1323,6 +1519,14 @@ export class SupabaseSyncService {
       case 'PRODUCT': {
         const id = String(row.id);
         if (isDeleted) {
+          const tenantId = authService.getActiveTenantIdSync() || '';
+          const linkedImages = await db.productImages
+            .where('[tenantId+productId]')
+            .equals([tenantId, id])
+            .count();
+          if (linkedImages > 0) {
+            throw new Error('تأجيل حذف الصنف البعيد: توجد صور مرتبطة لم تتم مزامنة حذفها بعد.');
+          }
           await db.products.delete(id);
           return;
         }

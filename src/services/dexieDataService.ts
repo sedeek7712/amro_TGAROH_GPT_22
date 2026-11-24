@@ -1227,11 +1227,19 @@ export class DexieDataService implements IDataService {
 
     await db.transaction(
       'rw',
-      [db.products, db.invoices, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
+      [db.products, db.productImages, db.invoices, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
       async () => {
         const existing = await db.products.get(productId);
         if (!existing) return;
         assertActivityAccess(actor, existing.activityId, 'حذف صنف');
+
+        const linkedImages = await db.productImages
+          .where('[tenantId+productId]')
+          .equals([tenantId, productId])
+          .count();
+        if (linkedImages > 0) {
+          throw new FinancialValidationError('لا يمكن حذف الصنف حتى تكتمل مزامنة حذف جميع صوره؛ تحقق من اتصال الإنترنت وحالة المزامنة.');
+        }
 
         const invoices = await db.invoices.toArray();
         const usedInInvoices = invoices.some(

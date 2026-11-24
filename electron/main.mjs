@@ -123,6 +123,7 @@ if (!hasSingleInstance) {
     desktopBackend = createDesktopBackend({
       database: databaseRuntime.database,
       backupDirectory: databaseRuntime.backupDirectory,
+      mediaDirectory: path.join(app.getPath('userData'), 'ProductMedia'),
       authenticationService,
       onDataChanged: emitDataChanged,
     });
@@ -156,6 +157,7 @@ if (!hasSingleInstance) {
         databaseRuntime.backupDirectory,
         { prefix }
       );
+      desktopBackend.productMediaStorage.backupTo(createdPath + '.media');
       pruneAutoBackups(databaseRuntime.backupDirectory, maxRetained);
 
       const customDir =
@@ -164,10 +166,9 @@ if (!hasSingleInstance) {
           : '';
       if (customDir && path.resolve(customDir) !== path.resolve(databaseRuntime.backupDirectory)) {
         if (!existsSync(customDir)) mkdirSync(customDir, { recursive: true });
-        await backupSqliteToDestination(
-          databaseRuntime.database,
-          path.join(customDir, path.basename(createdPath))
-        );
+        const customDatabasePath = path.join(customDir, path.basename(createdPath));
+        await backupSqliteToDestination(databaseRuntime.database, customDatabasePath);
+        desktopBackend.productMediaStorage.backupTo(customDatabasePath + '.media');
         pruneAutoBackups(customDir, maxRetained);
       }
 
@@ -226,6 +227,9 @@ if (!hasSingleInstance) {
     const actor = desktopBackend.requireActor(token);
     assertPermission(actor, 'backup:restore', 'استعادة نسخة احتياطية SQLite');
     const reopenOptions = { userDataPath: app.getPath('userData') };
+    const safetyMediaPath = path.join(app.getPath('temp'), `amro-media-pre-restore-${randomUUID()}`);
+    let preserveSafetyMedia = false;
+    desktopBackend.productMediaStorage.backupTo(safetyMediaPath);
     try {
       const restored = await restoreSqliteBackupFile({
         databasePath: databaseRuntime.databasePath,
@@ -235,8 +239,57 @@ if (!hasSingleInstance) {
         reopenOptions,
       });
       bindDatabaseRuntime(restored.databaseRuntime);
+
+      try {
+        const restoredMediaFound = desktopBackend.productMediaStorage.restoreFrom(sourceBackupPath + '.media');
+        const productImageCount = databaseRuntime.database.prepare(
+          'SELECT COUNT(*) AS count FROM product_images'
+        ).get().count;
+        if (!restoredMediaFound && productImageCount > 0) {
+          throw new Error('النسخة الاحتياطية تحتوي على سجلات صور، لكن مجلد الصور المرفق (.media) غير موجود.');
+        }
+        if (!restoredMediaFound) {
+          desktopBackend.productMediaStorage.clear();
+          diagnosticLogger.log('WARN', 'backup', 'Legacy SQLite backup has no product image records or media sidecar; media folder was cleared.', {
+            restoredFrom: path.basename(sourceBackupPath),
+          });
+        }
+      } catch (mediaRestoreError) {
+        try {
+          const rollback = await restoreSqliteBackupFile({
+            databasePath: databaseRuntime.databasePath,
+            backupDirectory: databaseRuntime.backupDirectory,
+            sourceBackupPath: restored.safetyBackupPath,
+            currentDatabase: databaseRuntime.database,
+            reopenOptions,
+          });
+          bindDatabaseRuntime(rollback.databaseRuntime);
+          const mediaRollbackSucceeded = desktopBackend.productMediaStorage.restoreFrom(safetyMediaPath);
+          if (!mediaRollbackSucceeded) {
+            throw new Error('تعذر استعادة مجلد الصور من نسخة الأمان.');
+          }
+          rmSync(safetyMediaPath, { recursive: true, force: true });
+          syncScheduledBackupTimer();
+          emitAuthInvalidated('تعذرت استعادة صور النسخة؛ تم التراجع إلى قاعدة البيانات والملفات السابقة. يرجى تسجيل الدخول مجدداً.');
+          emitDataChanged(['all', 'session']);
+        } catch (rollbackError) {
+          preserveSafetyMedia = true;
+          diagnosticLogger.log('CRITICAL', 'backup', 'Database/media restore rollback failed; safety media copy retained.', {
+            mediaRestoreError,
+            rollbackError,
+            safetyMediaPath,
+          });
+          throw new Error('فشلت استعادة الصور وتعذر إكمال التراجع الآلي. تم الإبقاء على نسخة أمان الصور داخل مجلد الملفات المؤقتة؛ لا تحذفها.');
+        }
+        throw new Error(
+          'تم رفض استعادة النسخة لأن ملفات صور الأصناف غير مكتملة؛ أعيد النظام إلى حالته السابقة. السبب: ' +
+          (mediaRestoreError instanceof Error ? mediaRestoreError.message : String(mediaRestoreError))
+        );
+      }
+
+      rmSync(safetyMediaPath, { recursive: true, force: true });
       syncScheduledBackupTimer();
-      diagnosticLogger.log('INFO', 'backup', 'SQLite database restored from backup', {
+      diagnosticLogger.log('INFO', 'backup', 'SQLite database and product media restored', {
         restoredFrom: path.basename(restored.restoredFrom),
         safetyBackupPath: path.basename(restored.safetyBackupPath),
       });
@@ -251,9 +304,13 @@ if (!hasSingleInstance) {
       diagnosticLogger.log('ERROR', 'backup', 'SQLite database restore failed', error);
       if (error && error.rolledBackRuntime) {
         bindDatabaseRuntime(error.rolledBackRuntime);
+        desktopBackend.productMediaStorage.restoreFrom(safetyMediaPath);
         syncScheduledBackupTimer();
         emitAuthInvalidated('تعذرت استعادة النسخة وتم التراجع للوضع الآمن؛ يرجى تسجيل الدخول مجدداً.');
         emitDataChanged(['all', 'session']);
+      }
+      if (!preserveSafetyMedia) {
+        rmSync(safetyMediaPath, { recursive: true, force: true });
       }
       throw error;
     }
@@ -482,6 +539,43 @@ if (!hasSingleInstance) {
     ipcMain.handle('erp:inventory:get-product', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.getProductById({ token: input?.token, id: input?.id });
+    });
+
+    ipcMain.handle('erp:inventory:get-product-images', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductImages({ token: input?.token, productId: input?.productId });
+    });
+    ipcMain.handle('erp:inventory:get-product-image-record', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductImageRecord({ token: input?.token, imageId: input?.imageId });
+    });
+    ipcMain.handle('erp:inventory:get-product-image-data', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductImageData({ token: input?.token, imageId: input?.imageId, variant: input?.variant });
+    });
+    ipcMain.handle('erp:inventory:add-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.addProductImage({ token: input?.token, input: input?.input });
+    });
+    ipcMain.handle('erp:inventory:set-primary-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.setPrimaryProductImage({ token: input?.token, imageId: input?.imageId });
+    });
+    ipcMain.handle('erp:inventory:delete-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.deleteProductImage({ token: input?.token, imageId: input?.imageId });
+    });
+    ipcMain.handle('erp:inventory:cache-remote-product-image', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.cacheRemoteProductImage({ token: input?.token, input: input?.input });
+    });
+    ipcMain.handle('erp:inventory:apply-remote-product-image-tombstone', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.applyRemoteProductImageTombstone({ token: input?.token, record: input?.record });
+    });
+    ipcMain.handle('erp:inventory:mark-product-image-synced', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.markProductImageSynced({ token: input?.token, imageId: input?.imageId });
     });
 
     ipcMain.handle('erp:inventory:save-product', (event, input) => {

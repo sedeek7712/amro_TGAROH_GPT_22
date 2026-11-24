@@ -204,6 +204,7 @@ class DjangoSyncService {
       INVOICE: '/invoices/',
       JOURNAL_ENTRY: '/journal-entries/',
       PRODUCT: '/products/',
+      PRODUCT_IMAGE: '/product-images/',
       AMANAT: '/amanat-records/',
       VOUCHER: '/vouchers/',
       PARTY: '/parties/',
@@ -365,6 +366,13 @@ class DjangoSyncService {
       const cleanBaseUrl = config.serverUrl.replace(/\/+$/, '');
 
       for (const item of queue) {
+        if (item.entityType === 'PRODUCT_IMAGE') {
+          const message = 'النقل الثنائي لملفات صور الأصناف غير متاح عبر موصل Django الحالي؛ يتطلب خادم Django endpoint تخزين خاص متوافقاً قبل اعتماد المزامنة.';
+          await syncQueueService.markFailed(item.id, message, true);
+          errors.push(`مزامنة صورة الصنف (${item.entityId}): ${message}`);
+          failed++;
+          continue;
+        }
         const endpoint = this.getEndpointForEntity(item.entityType);
         const targetUrl =
           item.action === 'CREATE'

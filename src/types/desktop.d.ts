@@ -16,6 +16,7 @@ import type {
   PaymentAllocation,
   PaymentVoucher,
   Product,
+  ProductImage,
   SyncConflict,
   SystemAuditLog,
   SystemUser,
@@ -169,6 +170,28 @@ declare global {
 
       getProducts(input: { token: string; activityId?: CommercialActivityId | 'all' }): Promise<Product[]>;
       getProductById(input: { token: string; id: string }): Promise<Product | undefined>;
+      getProductImages(input: { token: string; productId: string }): Promise<ProductImage[]>;
+      getProductImageRecord(input: { token: string; imageId: string }): Promise<ProductImage | undefined>;
+      getProductImageData(input: { token: string; imageId: string; variant?: 'original' | 'thumbnail' }): Promise<string | null>;
+      addProductImage(input: {
+        token: string;
+        input: {
+          productId: string;
+          originalDataUrl: string;
+          thumbnailDataUrl: string;
+          mimeType: 'image/webp' | 'image/jpeg' | 'image/png';
+          width: number;
+          height: number;
+          originalName?: string;
+        };
+      }): Promise<ProductImage>;
+      setPrimaryProductImage(input: { token: string; imageId: string }): Promise<ProductImage>;
+      deleteProductImage(input: { token: string; imageId: string }): Promise<void>;
+      cacheRemoteProductImage(input: {
+        token: string;
+        input: { record: ProductImage; originalDataUrl: string; thumbnailDataUrl: string };
+      }): Promise<ProductImage>;
+      markProductImageSynced(input: { token: string; imageId: string }): Promise<ProductImage | undefined>;
       saveProductAtomic(input: { token: string; product: Product; isUpdate?: boolean }): Promise<Product>;
       deleteProductAtomic(input: { token: string; productId: string }): Promise<void>;
       adjustProductStockAtomic(input: {

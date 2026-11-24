@@ -153,7 +153,19 @@ test('Product media: private files, primary lifecycle, RBAC, audit, finance isol
       },
     }), /صيغة الصورة/);
 
-    const productAfterImages = backend.getProductById({ token: adminToken, id: product.id });
+    // Products with active media cannot be removed; remove media first.
+    assert.throws(
+      () => backend.deleteProductAtomic({ token: adminToken, productId: product.id }),
+      /يحتوي على صور/
+    );
+    assert.ok(backend.getProductById({ token: adminToken, id: product.id }));
+
+    backend.deleteProductImage({ token: adminToken, imageId: first.id });
+    assert.equal(backend.getProductImages({ token: adminToken, productId: product.id }).length, 0);
+    backend.deleteProductAtomic({ token: adminToken, productId: product.id });
+    assert.equal(backend.getProductById({ token: adminToken, id: product.id }), undefined);
+
+    const productAfterImages = productBeforeImages;
     assert.equal(productAfterImages.currentStock, productBeforeImages.currentStock);
     assert.equal(productAfterImages.purchasePrice, productBeforeImages.purchasePrice);
     assert.equal(productAfterImages.sellPrice, productBeforeImages.sellPrice);

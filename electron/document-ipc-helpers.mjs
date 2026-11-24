@@ -554,6 +554,8 @@ export function copyShareTempPngToClipboardOnDisk({
   shareTempFiles,
   clipboard,
   nativeImage,
+  ClipboardItemCtor,
+  BlobCtor,
   tempToken,
   messageText,
 }) {
@@ -587,10 +589,19 @@ export function copyShareTempPngToClipboardOnDisk({
       return { copied: false, error: 'تعذر تحميل صورة الفاتورة إلى حافظة Windows.' };
     }
 
-    clipboard.write({
-      text: String(messageText || ''),
-      image,
+    if (typeof ClipboardItemCtor !== 'function' || typeof BlobCtor !== 'function') {
+      return { copied: false, error: 'واجهة الحافظة الحديثة غير متاحة في إصدار سطح المكتب.' };
+    }
+
+    const pngBytes = image.toPNG();
+    if (!pngBytes || pngBytes.length <= 32) {
+      return { copied: false, error: 'تعذر قراءة بيانات صورة الفاتورة.' };
+    }
+    const clipboardItem = new ClipboardItemCtor({
+      'text/plain': String(messageText || ''),
+      'image/png': new BlobCtor([new Uint8Array(pngBytes)], { type: 'image/png' }),
     });
+    clipboard.write([clipboardItem]);
     return { copied: true, imageCopied: true, sizeBytes: stat.size };
   } catch (error) {
     return {

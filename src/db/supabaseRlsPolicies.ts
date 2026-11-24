@@ -576,11 +576,23 @@ CREATE POLICY tenant_isolation_product_images ON erp_product_images
     FOR ALL USING (
         current_app_tenant_id() IS NOT NULL
         AND tenant_id = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = erp_product_images.tenant_id
+              AND product.id = erp_product_images.product_id
+              AND product.activity_id = erp_product_images.activity_id
+        )
         AND current_app_user_role() != 'DENIED'
     )
     WITH CHECK (
         current_app_tenant_id() IS NOT NULL
         AND tenant_id = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = erp_product_images.tenant_id
+              AND product.id = erp_product_images.product_id
+              AND product.activity_id = erp_product_images.activity_id
+        )
         AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
     );
 
@@ -678,28 +690,58 @@ CREATE POLICY product_media_tenant_read ON storage.objects
     FOR SELECT USING (
         bucket_id = 'erp-product-media'
         AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
         AND current_app_user_role() != 'DENIED'
     );
 CREATE POLICY product_media_tenant_insert ON storage.objects
     FOR INSERT WITH CHECK (
         bucket_id = 'erp-product-media'
         AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
         AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
     );
 CREATE POLICY product_media_tenant_update ON storage.objects
     FOR UPDATE USING (
         bucket_id = 'erp-product-media'
         AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
         AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
     ) WITH CHECK (
         bucket_id = 'erp-product-media'
         AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
         AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
     );
 CREATE POLICY product_media_tenant_delete ON storage.objects
     FOR DELETE USING (
         bucket_id = 'erp-product-media'
         AND (storage.foldername(name))[1] = current_app_tenant_id()
+        AND EXISTS (
+            SELECT 1 FROM public.erp_products AS product
+            WHERE product.tenant_id = current_app_tenant_id()
+              AND product.activity_id = (storage.foldername(name))[2]
+              AND product.id = (storage.foldername(name))[3]
+        )
         AND current_app_user_role() IN ('ADMIN','ACCOUNTANT','INVENTORY_KEEPER')
     );
 

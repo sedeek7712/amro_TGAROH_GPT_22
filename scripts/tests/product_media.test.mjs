@@ -81,6 +81,16 @@ test('Product media: private files, primary lifecycle, RBAC, audit, finance isol
     });
     assert.equal(second.isPrimary, false);
 
+    assert.throws(
+      () => backend.applyRemoteEntity({
+        token: adminToken,
+        entityType: 'PRODUCT',
+        row: { id: product.id, is_deleted: true },
+      }),
+      /تأجيل حذف الصنف البعيد/
+    );
+    assert.ok(backend.getProductById({ token: adminToken, id: product.id }));
+
     const firstFile = path.join(mediaDirectory, ...first.storageKey.split('/'));
     const firstThumb = path.join(mediaDirectory, ...first.thumbnailStorageKey.split('/'));
     assert.ok(existsSync(firstFile));

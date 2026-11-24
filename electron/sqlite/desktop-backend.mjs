@@ -2,12 +2,15 @@ import { createCoreService } from './modules/core-service.mjs';
 import { createInventoryPartiesService } from './modules/inventory-parties-service.mjs';
 import { createFinancialService } from './modules/financial-service.mjs';
 import { createBackupSyncService } from './modules/backup-sync-service.mjs';
+import { createProductMediaStorage } from '../product-media-storage.mjs';
+import { createProductMediaService } from './modules/product-media-service.mjs';
 import { importLegacyBackup, previewLegacyBackup } from './legacy-backup-importer.mjs';
 import { PermissionError } from './rbac.mjs';
 
 export function createDesktopBackend({
   database,
   backupDirectory,
+  mediaDirectory,
   authenticationService,
   onDataChanged = () => {},
 }) {
@@ -19,6 +22,8 @@ export function createDesktopBackend({
   const inventoryParties = createInventoryPartiesService(database, core);
   const financial = createFinancialService(database, core);
   const backupSync = createBackupSyncService(database, backupDirectory);
+  const mediaStorage = createProductMediaStorage({ rootDirectory: mediaDirectory || `${backupDirectory || process.cwd()}.product-media` });
+  const productMedia = createProductMediaService(database, mediaStorage);
 
   function requireActor(token, requestedBranchId) {
     const actor = authenticationService.getActor(token, requestedBranchId);
@@ -33,6 +38,7 @@ export function createDesktopBackend({
     inventoryParties,
     financial,
     backupSync,
+    productMediaStorage: mediaStorage,
     requireActor,
 
     // --- Runtime & Auth ---
@@ -240,6 +246,47 @@ export function createDesktopBackend({
     getProductById({ token, id }) {
       const actor = requireActor(token);
       return inventoryParties.getProductById(actor, id);
+    },
+
+    getProductImages({ token, productId }) {
+      return productMedia.getProductImages(requireActor(token), productId);
+    },
+
+    getProductImageRecord({ token, imageId }) {
+      return productMedia.getProductImageRecord(requireActor(token), imageId);
+    },
+
+    getProductImageData({ token, imageId, variant }) {
+      return productMedia.getProductImageData(requireActor(token), imageId, variant);
+    },
+
+    addProductImage({ token, input }) {
+      const result = productMedia.addProductImage(requireActor(token), input);
+      onDataChanged(['productImages', 'outbox', 'auditLogs']);
+      return result;
+    },
+
+    setPrimaryProductImage({ token, imageId }) {
+      const result = productMedia.setPrimaryProductImage(requireActor(token), imageId);
+      onDataChanged(['productImages', 'outbox', 'auditLogs']);
+      return result;
+    },
+
+    deleteProductImage({ token, imageId }) {
+      productMedia.deleteProductImage(requireActor(token), imageId);
+      onDataChanged(['productImages', 'outbox', 'auditLogs']);
+    },
+
+    cacheRemoteProductImage({ token, input }) {
+      const result = productMedia.cacheRemoteProductImage(requireActor(token), input);
+      onDataChanged(['productImages']);
+      return result;
+    },
+
+    markProductImageSynced({ token, imageId }) {
+      const result = productMedia.markProductImageSynced(requireActor(token), imageId);
+      onDataChanged(['productImages']);
+      return result;
     },
 
     saveProductAtomic({ token, product, isUpdate }) {
@@ -539,6 +586,8 @@ export function createDesktopBackend({
     async createNativeBackupNow({ token, prefix }) {
       const actor = requireActor(token);
       const created = await backupSync.createNativeBackupNow(actor, prefix);
+      mediaStorage.backupTo(created.path + '.media');
+      if (created.copiedToCustomPath) mediaStorage.backupTo(created.copiedToCustomPath + '.media');
       onDataChanged(['backups', 'auditLogs']);
       return created;
     },
@@ -546,6 +595,7 @@ export function createDesktopBackend({
     async exportNativeBackupToPath({ token, destinationPath }) {
       const actor = requireActor(token);
       const exported = await backupSync.exportNativeBackupToPath(actor, destinationPath);
+      mediaStorage.backupTo(exported.path + '.media');
       onDataChanged(['auditLogs']);
       return exported;
     },

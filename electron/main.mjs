@@ -526,6 +526,10 @@ if (!hasSingleInstance) {
       assertTrustedMainFrame(event);
       return desktopBackend.cacheRemoteProductImage({ token: input?.token, input: input?.input });
     });
+    ipcMain.handle('erp:inventory:apply-remote-product-image-tombstone', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.applyRemoteProductImageTombstone({ token: input?.token, record: input?.record });
+    });
     ipcMain.handle('erp:inventory:mark-product-image-synced', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.markProductImageSynced({ token: input?.token, imageId: input?.imageId });

@@ -283,6 +283,11 @@ export function createDesktopBackend({
       return result;
     },
 
+    applyRemoteProductImageTombstone({ token, record }) {
+      productMedia.applyRemoteProductImageTombstone(requireActor(token), record);
+      onDataChanged(['productImages']);
+    },
+
     markProductImageSynced({ token, imageId }) {
       const result = productMedia.markProductImageSynced(requireActor(token), imageId);
       onDataChanged(['productImages']);

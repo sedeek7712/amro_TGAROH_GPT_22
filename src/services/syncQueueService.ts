@@ -57,6 +57,7 @@ class SyncQueueService {
         return 1; // أولوية قصوى: الفروع والحسابات والدفاتر والصناديق الأساسية
       case 'PARTY':
       case 'PRODUCT':
+      case 'PRODUCT_IMAGE':
         return 2; // أولوية تأسيسية: أطراف التعامل (عملاء/موردين) والأصناف والمخزون
       case 'INVOICE':
       case 'VOUCHER':

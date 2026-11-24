@@ -179,6 +179,9 @@ export async function prepareSharePackage(params: {
 }): Promise<PreparedSharePackage> {
   const { snapshot, preferredFormat = 'AUTO', messageText, recipientPhone, recipientName, actor } =
     params;
+  if (!actor || !actor.active) {
+    throw new Error('لا يمكن تجهيز مشاركة المستند دون مستخدم نشط ومصادق عليه.');
+  }
   const normalizedPhone = formatWhatsAppPhone(recipientPhone);
   if (!normalizedPhone) throw new Error('رقم واتساب غير صالح؛ تحقق من الرقم ومفتاح الدولة.');
   if (!String(messageText || '').trim()) throw new Error('نص رسالة واتساب فارغ.');

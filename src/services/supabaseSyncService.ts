@@ -608,7 +608,7 @@ export class SupabaseSyncService {
   }
 
   private dataUrlToBlob(dataUrl: string, expectedMime: string): Blob {
-    const match = /^data:(image\\/(?:webp|jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || '');
+    const match = /^data:(image\/(?:webp|jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl || '');
     if (!match || match[1] !== expectedMime) throw new Error('بيانات صورة الصنف المحلية غير صالحة.');
     const raw = atob(match[2]);
     const bytes = new Uint8Array(raw.length);

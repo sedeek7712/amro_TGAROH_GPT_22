@@ -246,6 +246,17 @@ export function createProductMediaService(database, mediaStorage) {
           "UPDATE product_images SET is_primary=0,is_deleted=1,sync_status='SYNCED',updated_at=?,data_json=? WHERE tenant_id=? AND id=?"
         ).run(record.updatedAt || new Date().toISOString(), JSON.stringify({ ...mapRow(existing), ...record, isDeleted: true, isPrimary: false, syncStatus: 'SYNCED' }), actor.tenantId, record.id);
         mediaStorage.remove([existing.storage_key, existing.thumbnail_storage_key]);
+        if (existing.is_primary === 1) {
+          const nextRow = database.prepare(
+            'SELECT * FROM product_images WHERE tenant_id = ? AND product_id = ? AND is_deleted = 0 ORDER BY sort_order ASC, created_at ASC LIMIT 1'
+          ).get(actor.tenantId, existing.product_id);
+          if (nextRow) {
+            const promoted = { ...mapRow(nextRow), isPrimary: true, syncStatus: 'SYNCED' };
+            database.prepare(
+              "UPDATE product_images SET is_primary=1,sync_status='SYNCED',data_json=? WHERE tenant_id=? AND id=?"
+            ).run(JSON.stringify(promoted), actor.tenantId, promoted.id);
+          }
+        }
       }
     },
 

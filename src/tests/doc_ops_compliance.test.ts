@@ -868,6 +868,7 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
   try {
     let copiedText = '';
     const launchedUrls: string[] = [];
+    const clipboardImagePayloads: Array<{ tempToken: string; messageText: string }> = [];
 
     setMockNavigator({
       onLine: true,
@@ -894,6 +895,10 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
           sizeBytes: Buffer.from(input.bytesBase64, 'base64').length,
         };
       },
+      async copyShareImageToClipboard(input: { tempToken: string; messageText: string }) {
+        clipboardImagePayloads.push(input);
+        return { copied: true, imageCopied: true, sizeBytes: 1024 };
+      },
       async revealShareTempFile() {
         return { revealed: true };
       },
@@ -903,7 +908,7 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
       },
     };
 
-    // Online Electron -> uses https://wa.me/... & records WHATSAPP_LAUNCHED
+    // Online Electron -> launches the installed WhatsApp Desktop app via whatsapp://, never a browser.
     const onlinePkg = await prepareSharePackage({
       snapshot: voucherSnap,
       preferredFormat: 'PNG',
@@ -922,8 +927,14 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
       recipientName: 'سعيد محمد',
     });
     assert.equal(onlineOutcome.status, 'WHATSAPP_LAUNCHED');
-    assert.ok(launchedUrls[0].startsWith('https://wa.me/'));
-    assert.equal(copiedText, 'سند رقم RCT-4001');
+    assert.ok(launchedUrls[0].startsWith('whatsapp://send?phone='));
+    assert.equal(new URL(launchedUrls[0]).searchParams.get('text'), 'سند رقم RCT-4001');
+    assert.equal(onlineOutcome.imageCopiedToClipboard, true);
+    assert.deepEqual(clipboardImagePayloads[0], {
+      tempToken: 'tmp-tok-1',
+      messageText: 'سند رقم RCT-4001',
+    });
+    assert.equal(copiedText, '');
 
     // Offline Electron -> uses whatsapp:// ONLY, handles open failure gracefully
     setMockNavigator({
@@ -937,6 +948,10 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
           fileName: input.fileName,
           sizeBytes: Buffer.from(input.bytesBase64, 'base64').length,
         };
+      },
+      async copyShareImageToClipboard(input: { tempToken: string; messageText: string }) {
+        clipboardImagePayloads.push(input);
+        return { copied: true, imageCopied: true, sizeBytes: 1024 };
       },
       async revealShareTempFile() {
         return { revealed: true };
@@ -966,7 +981,9 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
     assert.ok(launchedUrls[1].startsWith('whatsapp://'));
     assert.equal(offlineOutcome.status, 'FALLBACK_DOWNLOAD_AND_WA');
     assert.equal(offlineOutcome.whatsappLaunched, false);
-    assert.ok(offlineOutcome.noticeMessage.includes('7 أيام'));
+    assert.equal(offlineOutcome.imageCopiedToClipboard, true);
+    assert.ok(offlineOutcome.noticeMessage.includes('عودة الإنترنت'));
+    assert.ok(launchedUrls.every((url) => url.startsWith('whatsapp://')));
 
     // Mobile/Android Web Share -> AbortError -> CANCELED; NotAllowedError -> clean fallback
     delete (env.mockWindow as Record<string, unknown>).amroDesktop;

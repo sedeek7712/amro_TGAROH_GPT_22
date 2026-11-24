@@ -1515,6 +1515,14 @@ export class SupabaseSyncService {
       case 'PRODUCT': {
         const id = String(row.id);
         if (isDeleted) {
+          const tenantId = authService.getActiveTenantIdSync() || '';
+          const linkedImages = await db.productImages
+            .where('[tenantId+productId]')
+            .equals([tenantId, id])
+            .count();
+          if (linkedImages > 0) {
+            throw new Error('تأجيل حذف الصنف البعيد: توجد صور مرتبطة لم تتم مزامنة حذفها بعد.');
+          }
           await db.products.delete(id);
           return;
         }

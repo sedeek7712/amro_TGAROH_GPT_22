@@ -49,6 +49,7 @@ const desktopBridge = Object.freeze({
   setPrimaryProductImage: (input) => ipcRenderer.invoke('erp:inventory:set-primary-product-image', input),
   deleteProductImage: (input) => ipcRenderer.invoke('erp:inventory:delete-product-image', input),
   cacheRemoteProductImage: (input) => ipcRenderer.invoke('erp:inventory:cache-remote-product-image', input),
+  applyRemoteProductImageTombstone: (input) => ipcRenderer.invoke('erp:inventory:apply-remote-product-image-tombstone', input),
   markProductImageSynced: (input) => ipcRenderer.invoke('erp:inventory:mark-product-image-synced', input),
   saveProductAtomic: (input) => ipcRenderer.invoke('erp:inventory:save-product', input),
   deleteProductAtomic: (input) => ipcRenderer.invoke('erp:inventory:delete-product', input),

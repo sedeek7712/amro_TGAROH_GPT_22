@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SCHEMA = ROOT / "electron" / "sqlite" / "migrations" / "001_initial.sql"
+MIGRATIONS_DIR = ROOT / "electron" / "sqlite" / "migrations"
 
 
 def require(condition: bool, message: str) -> None:
@@ -17,8 +17,7 @@ def require(condition: bool, message: str) -> None:
 
 
 def main() -> None:
-    sql = SCHEMA.read_text(encoding="utf-8")
-    digest = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+    migration_files = sorted(MIGRATIONS_DIR.glob("[0-9][0-9][0-9]_*.sql"))
     with tempfile.TemporaryDirectory(prefix="erp-sqlite-check-") as folder:
         db_path = Path(folder) / "erp.sqlite"
         backup_path = Path(folder) / "erp-backup.sqlite"
@@ -27,12 +26,17 @@ def main() -> None:
         conn.execute("PRAGMA foreign_keys=ON")
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=FULL")
-        conn.executescript(sql)
-        conn.execute(
-            """INSERT OR IGNORE INTO schema_migrations
-               (version,name,checksum_sha256,applied_at)
-               VALUES (1,'001_initial',?,datetime('now'))""", (digest,)
-        )
+        for migration in migration_files:
+            sql = migration.read_text(encoding="utf-8")
+            digest = hashlib.sha256(sql.encode("utf-8")).hexdigest()
+            conn.executescript(sql)
+            version = int(migration.name.split("_", 1)[0])
+            name = migration.stem
+            conn.execute(
+                """INSERT OR IGNORE INTO schema_migrations
+                   (version,name,checksum_sha256,applied_at)
+                   VALUES (?,?,?,datetime('now'))""", (version, name, digest)
+            )
         expected = {
             "tenants", "branches", "activities", "accounts", "products",
             "product_batches", "product_images", "parties", "invoices", "invoice_items",

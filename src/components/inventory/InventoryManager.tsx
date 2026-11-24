@@ -37,6 +37,7 @@ import { useLiveProducts } from '../../hooks/useLiveDexie';
 import { Product, ProductBatch, ActivityId } from '../../types/erp';
 import { formatLocalDate } from '../../utils/localDate';
 import { ProductMediaManager } from './ProductMediaManager';
+import { ProductPrimaryImage } from './ProductPrimaryImage';
 
 interface InventoryManagerProps {
   selectedActivity: ActivityId | 'all';
@@ -494,6 +495,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           <table className="w-full text-right text-xs">
             <thead>
               <tr className="border-b border-slate-200 text-slate-500 bg-slate-50">
+                <th className="py-3 px-3 text-center">الصورة</th>
                 <th className="py-3 px-4">كود الصنف</th>
                 <th className="py-3 px-4">اسم الصنف والتفاصيل</th>
                 <th className="py-3 px-4">التصنيف</th>
@@ -507,7 +509,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
             <tbody className="divide-y divide-slate-100">
               {filteredProducts.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-12 text-center text-slate-400">
+                  <td colSpan={9} className="py-12 text-center text-slate-400">
                     <Package className="w-8 h-8 mx-auto mb-2 text-slate-300 stroke-1" />
                     <p className="font-medium">لا توجد أصناف مسجلة في هذا القسم بعد</p>
                     <p className="text-[11px] text-slate-400 mt-1">اضغط على «إضافة صنف جديد» لتسجيل بضائع حقيقية</p>
@@ -524,6 +526,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                         isArchived ? 'bg-slate-50/80 opacity-70 hover:bg-slate-100/70' : 'hover:bg-slate-50/80'
                       }`}
                     >
+                      <td className="py-2 px-3 text-center"><ProductPrimaryImage productId={p.id} productName={p.nameAr} /></td>
                       <td className="py-3 px-4 font-mono font-bold text-slate-900">{p.code}</td>
                       <td className="py-3 px-4">
                         <div className="flex items-center gap-1.5 flex-wrap">

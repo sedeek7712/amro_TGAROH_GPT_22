@@ -17,6 +17,7 @@ const CORE_TABLES = [
 const V2_TABLES = [
   'payment_allocations', 'party_advance_transactions', 'allocation_audits',
 ];
+const V3_TABLES = ['product_images'];
 
 function sha256(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');

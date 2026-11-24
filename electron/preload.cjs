@@ -120,6 +120,7 @@ const desktopBridge = Object.freeze({
   exportDocumentPng: (input) => ipcRenderer.invoke('erp:print:export-png', input),
   runNativePrint: (input) => ipcRenderer.invoke('erp:print:run-native', input),
   prepareShareTempFile: (input) => ipcRenderer.invoke('erp:share:prepare-temp-file', input),
+  copyShareImageToClipboard: (input) => ipcRenderer.invoke('erp:share:copy-image-to-clipboard', input),
   revealShareTempFile: (input) => ipcRenderer.invoke('erp:share:reveal-temp-file', input),
   cleanupShareTempFile: (input) => ipcRenderer.invoke('erp:share:cleanup-temp-file', input),
   openWhatsAppUrl: (input) => ipcRenderer.invoke('erp:share:open-whatsapp-url', input),

@@ -522,6 +522,16 @@ declare global {
         fileName: string;
         sizeBytes: number;
       }>;
+      copyShareImageToClipboard(input: {
+        token: string;
+        tempToken: string;
+        messageText: string;
+      }): Promise<{
+        copied: boolean;
+        imageCopied?: boolean;
+        sizeBytes?: number;
+        error?: string;
+      }>;
       revealShareTempFile(input: {
         token: string;
         tempToken: string;

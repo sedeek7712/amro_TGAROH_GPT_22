@@ -250,9 +250,8 @@ export function createProductMediaService(database, mediaStorage) {
         'SELECT * FROM product_images WHERE tenant_id = ? AND id = ?'
       ).get(actor.tenantId, record.id);
       if (existing) {
-        database.prepare(
-          "UPDATE product_images SET is_primary=0,is_deleted=1,sync_status='SYNCED',updated_at=?,data_json=? WHERE tenant_id=? AND id=?"
-        ).run(record.updatedAt || new Date().toISOString(), JSON.stringify({ ...mapRow(existing), ...record, isDeleted: true, isPrimary: false, syncStatus: 'SYNCED' }), actor.tenantId, record.id);
+        database.prepare('DELETE FROM product_images WHERE tenant_id = ? AND id = ?')
+          .run(actor.tenantId, record.id);
         mediaStorage.remove([existing.storage_key, existing.thumbnail_storage_key]);
         if (existing.is_primary === 1) {
           const nextRow = database.prepare(
@@ -319,6 +318,11 @@ export function createProductMediaService(database, mediaStorage) {
       if (!row) return;
       loadProduct(actor, row.product_id, 'تأكيد مزامنة صورة الصنف');
       const updated = { ...mapRow(row), syncStatus: 'SYNCED' };
+      if (row.is_deleted === 1) {
+        database.prepare('DELETE FROM product_images WHERE tenant_id = ? AND id = ?')
+          .run(actor.tenantId, imageId);
+        return updated;
+      }
       database.prepare(
         "UPDATE product_images SET sync_status='SYNCED',data_json=json_set(data_json,'$.syncStatus','SYNCED') WHERE tenant_id=? AND id=?"
       ).run(actor.tenantId, imageId);

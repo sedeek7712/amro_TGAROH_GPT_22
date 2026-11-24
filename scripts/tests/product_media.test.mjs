@@ -109,6 +109,7 @@ test('Product media: private files, primary lifecycle, RBAC, audit, finance isol
     assert.equal(remaining[0].id, first.id);
     assert.equal(remaining[0].isPrimary, true);
     assert.equal(backend.getProductImageData({ token: adminToken, imageId: second.id, variant: 'original' }), null);
+    backend.markProductImageSynced({ token: adminToken, imageId: second.id });
 
     // A cashier may view inventory but must not attach or alter product images.
     backend.createUser({
@@ -153,15 +154,25 @@ test('Product media: private files, primary lifecycle, RBAC, audit, finance isol
       },
     }), /صيغة الصورة/);
 
-    // Products with active media cannot be removed; remove media first.
+    // A deleted image must be acknowledged by sync before its product can be removed.
     assert.throws(
       () => backend.deleteProductAtomic({ token: adminToken, productId: product.id }),
-      /يحتوي على صور/
+      /مزامنة حذف جميع صوره/
     );
     assert.ok(backend.getProductById({ token: adminToken, id: product.id }));
 
     backend.deleteProductImage({ token: adminToken, imageId: first.id });
     assert.equal(backend.getProductImages({ token: adminToken, productId: product.id }).length, 0);
+    assert.throws(
+      () => backend.deleteProductAtomic({ token: adminToken, productId: product.id }),
+      /مزامنة حذف جميع صوره/
+    );
+    backend.markProductImageSynced({ token: adminToken, imageId: first.id });
+    assert.equal(
+      runtime.database.prepare('SELECT COUNT(*) AS count FROM product_images WHERE tenant_id = ? AND product_id = ?')
+        .get('tenant_main', product.id).count,
+      0
+    );
     backend.deleteProductAtomic({ token: adminToken, productId: product.id });
     assert.equal(backend.getProductById({ token: adminToken, id: product.id }), undefined);
 

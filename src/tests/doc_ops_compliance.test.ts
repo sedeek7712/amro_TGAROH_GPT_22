@@ -935,6 +935,7 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
     assert.equal(decodeURIComponent(protocolText || ''), 'سند رقم RCT-4001');
     assert.equal(onlineOutcome.imageCopiedToClipboard, true);
     assert.deepEqual(clipboardImagePayloads[0], {
+      token: 'desktop-share-token',
       tempToken: 'tmp-tok-1',
       messageText: 'سند رقم RCT-4001',
     });

@@ -1,4 +1,5 @@
 name: Design Preview Validation
+# Validates design changes before they reach the mobile preview.
 
 on:
   pull_request:

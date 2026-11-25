@@ -249,7 +249,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell-root flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none" dir="rtl">
+    <div className={`app-shell-root flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none ${isDesktopRuntime ? "app-shell-desktop" : ""}`} dir="rtl">
       {/* Sidebar Navigation (Drawer on Mobile, Fixed on Desktop) */}
       <Sidebar
         activeView={activeView}
@@ -310,7 +310,7 @@ export default function App() {
         )}
 
         {/* Viewport Content with RBAC Protection */}
-        <main className="app-shell-main flex-1 overflow-y-auto bg-slate-50/60 pb-20 lg:pb-6">
+        <main className="app-shell-main app-desktop-workspace flex-1 overflow-y-auto bg-slate-50/60 pb-20 lg:pb-6">
           {!isViewAllowed ? (
             <div className="p-8 max-w-xl mx-auto my-12 bg-white rounded-2xl border border-rose-200 shadow-sm text-center space-y-4">
               <div className="w-12 h-12 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">

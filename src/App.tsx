@@ -35,6 +35,7 @@ import {
   LayoutDashboard,
   ShoppingCart,
   Package,
+  Smartphone,
   Menu,
   X,
   ShieldAlert,

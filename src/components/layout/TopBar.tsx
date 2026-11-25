@@ -38,6 +38,7 @@ export const TopBar: React.FC<TopBarProps> = ({
   cashBoxes,
 }) => {
   const { isOnline } = useNetworkStatus();
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const outboxStats = useLiveOutboxStats();
   const branches = useLiveBranches();
   const activeBranchId = isDesktop

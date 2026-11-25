@@ -50,3 +50,5 @@ jobs:
       - name: Deploy mobile preview
         id: deployment
         uses: actions/deploy-pages@v4
+
+# Retry deployment after repository Pages source was set to GitHub Actions.

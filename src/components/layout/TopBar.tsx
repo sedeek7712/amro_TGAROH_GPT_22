@@ -5,13 +5,9 @@
 
 import React from 'react';
 import {
-  ShoppingCart,
-  ShieldCheck,
   Wallet,
   Building2,
   Clock,
-  Menu,
-  Smartphone,
   Wifi,
   WifiOff,
   RefreshCw,
@@ -32,8 +28,6 @@ interface TopBarProps {
   selectedActivity: ActivityId | 'all';
   currentUser: SystemUser;
   cashBoxes: CashBox[];
-  onOpenMobileMenu: () => void;
-  onOpenInstallModal: () => void;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -42,8 +36,6 @@ export const TopBar: React.FC<TopBarProps> = ({
   selectedActivity,
   currentUser,
   cashBoxes,
-  onOpenMobileMenu,
-  onOpenInstallModal,
 }) => {
   const { isOnline } = useNetworkStatus();
   const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
@@ -89,8 +81,6 @@ export const TopBar: React.FC<TopBarProps> = ({
 
   const mainBox = cashBoxes.find((b) => b.isDefault) || cashBoxes[0];
   const currencySymbol = getActiveCurrencyConfig().symbol;
-  const canAccessPos = canAccessView(currentUser.role, 'pos');
-  const canAccessAmanat = canAccessView(currentUser.role, 'amanat');
   const canAccessSync = canAccessView(currentUser.role, 'sync');
   const currentTime = new Date().toLocaleDateString('ar-SA', {
     weekday: 'short',
@@ -102,14 +92,6 @@ export const TopBar: React.FC<TopBarProps> = ({
     <header className="app-chrome-only h-14 lg:h-16 bg-white border-b border-slate-200 px-3 lg:px-6 flex items-center justify-between gap-2 lg:gap-6 shrink-0 z-10 select-none">
       {/* Right / Start: Mobile Menu Toggle & Title */}
       <div className="flex items-center gap-2 min-w-0">
-        <button
-          onClick={onOpenMobileMenu}
-          className="lg:hidden p-2 text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors shrink-0"
-          title="فتح القائمة الرئيسية"
-        >
-          <Menu className="w-5 h-5" />
-        </button>
-
         <h1 className="text-xs sm:text-sm lg:text-base font-bold text-slate-900 tracking-tight truncate">
           {viewTitles[activeView]}
         </h1>
@@ -192,41 +174,6 @@ export const TopBar: React.FC<TopBarProps> = ({
               {mainBox.balance.toFixed(2)} {currencySymbol}
             </span>
           </div>
-        )}
-
-        {/* Install Mobile App Button (Web/PWA only) */}
-        {!isDesktop && (
-          <button
-            onClick={onOpenInstallModal}
-            className="flex items-center gap-1 px-2.5 py-1.5 bg-gradient-to-r from-teal-600 to-emerald-600 hover:from-teal-700 hover:to-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-all whitespace-nowrap border border-emerald-500/30"
-            title="تثبيت التطبيق على الهاتف الذكي"
-          >
-            <Smartphone className="w-3.5 h-3.5 text-emerald-200" />
-            <span className="hidden sm:inline">تثبيت التطبيق</span>
-            <span className="sm:hidden">تطبيق</span>
-          </button>
-        )}
-
-        {/* Quick POS Button */}
-        {canAccessPos && (
-          <button
-            onClick={() => setActiveView('pos')}
-            className="flex items-center gap-1 px-2.5 py-1.5 lg:px-3 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors whitespace-nowrap"
-          >
-            <ShoppingCart className="w-3.5 h-3.5" />
-            <span className="hidden xs:inline">بيع سريع</span>
-          </button>
-        )}
-
-        {/* Quick Amanat Button */}
-        {canAccessAmanat && (
-          <button
-            onClick={() => setActiveView('amanat')}
-            className="hidden sm:flex items-center gap-1.5 px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white rounded-lg text-xs font-semibold shadow-sm transition-colors whitespace-nowrap"
-          >
-            <ShieldCheck className="w-3.5 h-3.5" />
-            <span>إيداع أمانة</span>
-          </button>
         )}
 
         {/* Date Display */}

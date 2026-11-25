@@ -33,9 +33,13 @@ import { formatLocalDate } from '../../utils/localDate';
 
 interface PurchasesManagerProps {
   onRefresh: () => void;
+  selectedActivity: ActivityId | 'all';
 }
 
-export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh }) => {
+export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
+  onRefresh,
+  selectedActivity,
+}) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -55,9 +59,16 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
       ? allActivities
       : allActivities.filter((a) => authorizedActivityIds.has(a.id));
 
-  // حقول نموذج فاتورة الشراء
+  // نشاط الفاتورة يتبع اختيار المستخدم العام، ولا يُعتمد تلقائياً عند عرض كافة الأنشطة.
+  const initialActivityIsAuthorized =
+    selectedActivity !== 'all' && allowedActivityOptions.some((a) => a.id === selectedActivity);
   const [activityId, setActivityId] = useState<ActivityId>(
-    allowedActivityOptions[0]?.id || 'pharmacy'
+    initialActivityIsAuthorized
+      ? (selectedActivity as ActivityId)
+      : allowedActivityOptions[0]?.id || 'pharmacy'
+  );
+  const [isActivityConfirmed, setIsActivityConfirmed] = useState(
+    initialActivityIsAuthorized || allowedActivityOptions.length === 1
   );
   const [supplierId, setSupplierId] = useState('');
   const [supplierName, setSupplierName] = useState('');
@@ -138,6 +149,10 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
 
   const handleAddItemToInvoice = () => {
     setFormError(null);
+    if (!isActivityConfirmed) {
+      setFormError('اختر النشاط المستهدف صراحة قبل إضافة الأصناف.');
+      return;
+    }
     const product = products.find((p) => p.id === selectedProductId);
     if (!product) return;
 
@@ -210,6 +225,11 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
     e.preventDefault();
     if (isSubmitting) return;
     setFormError(null);
+
+    if (!isActivityConfirmed) {
+      setFormError('اختر النشاط المستهدف صراحة قبل حفظ فاتورة المشتريات.');
+      return;
+    }
 
     if (items.length === 0) {
       setFormError('يجب إضافة صنف واحد على الأقل لفاتورة المشتريات.');
@@ -626,7 +646,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">النشاط المستهدف *</label>
                   <select
-                    value={activityId}
+                    value={isActivityConfirmed ? activityId : ''}
                     onChange={(e) => {
                       setActivityId(e.target.value as ActivityId);
                       setItems([]);
@@ -634,12 +654,22 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({ onRefresh })
                     }}
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-slate-900 focus:outline-none"
                   >
+                    {!isActivityConfirmed && (
+                      <option value="" disabled>
+                        -- اختر النشاط المستهدف --
+                      </option>
+                    )}
                     {allowedActivityOptions.map((act) => (
                       <option key={act.id} value={act.id}>
                         {act.name}
                       </option>
                     ))}
                   </select>
+                  {!isActivityConfirmed && (
+                    <p className="mt-1 text-[10px] font-bold text-amber-800">
+                      النطاق الحالي «كافة الأنشطة»؛ اختر النشاط صراحة قبل إدراج الأصناف أو حفظ الفاتورة.
+                    </p>
+                  )}
                 </div>
 
                 <div>

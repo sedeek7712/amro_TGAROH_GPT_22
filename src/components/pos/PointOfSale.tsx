@@ -1082,24 +1082,6 @@ export const PointOfSale: React.FC<POSProps> = ({
         </div>
       </div>
 
-      {/* Mobile Floating Cart Summary Button */}
-      {cart.length > 0 && mobileTab === 'catalog' && (
-        <div className="lg:hidden fixed bottom-18 inset-x-3 z-20">
-          <button
-            onClick={() => setMobileTab('cart')}
-            className="w-full bg-emerald-600 hover:bg-emerald-700 text-white font-bold py-3 px-4 rounded-xl shadow-xl flex items-center justify-between transition-transform active:scale-98"
-          >
-            <div className="flex items-center gap-2">
-              <ShoppingCart className="w-5 h-5" />
-              <span>عرض السلة ({cart.length} أصناف)</span>
-            </div>
-            <div className="font-mono tabular-nums text-sm bg-emerald-800/60 px-2.5 py-1 rounded-lg">
-              {total.toFixed(2)} {currencySymbol}
-            </div>
-          </button>
-        </div>
-      )}
-
       {/* Batch Picker Modal */}
       {batchPickerProduct && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">

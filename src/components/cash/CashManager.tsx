@@ -650,27 +650,33 @@ export const CashManager: React.FC<CashManagerProps> = ({ onRefresh }) => {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          <button
-            onClick={() => handleOpenVoucherModal('RECEIPT')}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-colors shrink-0"
-          >
-            <ArrowDownLeft className="w-4 h-4" />
-            <span>+ سند قبض جديد</span>
-          </button>
-          <button
-            onClick={() => handleOpenVoucherModal('PAYMENT')}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition-colors shrink-0"
-          >
-            <ArrowUpRight className="w-4 h-4" />
-            <span>- سند صرف جديد</span>
-          </button>
-          <button
-            onClick={() => setIsAddBoxModalOpen(true)}
-            className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold transition-colors shrink-0"
-          >
-            <Plus className="w-4 h-4" />
-            <span>إضافة صندوق / بنك</span>
-          </button>
+          {activeTab === 'receipts' && (
+            <button
+              onClick={() => handleOpenVoucherModal('RECEIPT')}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold transition-colors shrink-0"
+            >
+              <ArrowDownLeft className="w-4 h-4" />
+              <span>+ سند قبض جديد</span>
+            </button>
+          )}
+          {activeTab === 'payments' && (
+            <button
+              onClick={() => handleOpenVoucherModal('PAYMENT')}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-rose-600 hover:bg-rose-700 text-white rounded-lg text-xs font-bold transition-colors shrink-0"
+            >
+              <ArrowUpRight className="w-4 h-4" />
+              <span>- سند صرف جديد</span>
+            </button>
+          )}
+          {activeTab === 'boxes' && (
+            <button
+              onClick={() => setIsAddBoxModalOpen(true)}
+              className="flex items-center gap-1.5 px-3.5 py-2 bg-slate-800 hover:bg-slate-900 text-white rounded-lg text-xs font-bold transition-colors shrink-0"
+            >
+              <Plus className="w-4 h-4" />
+              <span>إضافة صندوق / بنك</span>
+            </button>
+          )}
         </div>
       </div>
 

@@ -253,7 +253,12 @@
     max-width: 1680px;
     padding: 1.5rem 1.75rem 2rem;
     margin-inline: auto;
-    gap: 1.5rem;
+  }
+
+  /* The dashboard root uses Tailwind space-y utilities, not a flex/grid layout. */
+  .app-shell-desktop .app-executive-dashboard > :not([hidden]) ~ :not([hidden]) {
+    --tw-space-y-reverse: 0;
+    margin-block-start: 1.5rem;
   }
 
   .app-shell-desktop .app-dashboard-header {

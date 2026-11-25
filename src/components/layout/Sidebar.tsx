@@ -236,7 +236,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       )}
 
       {/* 2. Desktop Permanent Sidebar (Hidden on screens < 1024px) */}
-      <aside className="hidden lg:flex w-64 bg-slate-950 text-slate-200 border-l border-slate-800 flex-col shrink-0 app-chrome-only">
+      <aside className="app-desktop-sidebar hidden lg:flex w-72 2xl:w-80 bg-slate-950 text-slate-200 border-l border-slate-800 flex-col shrink-0 app-chrome-only">
         {renderSidebarContent(false)}
       </aside>
     </>

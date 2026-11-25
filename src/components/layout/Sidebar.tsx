@@ -25,7 +25,6 @@ import {
   Wrench,
   Shield,
   X,
-  Smartphone,
   LogOut,
 } from 'lucide-react';
 import { ActivityId, SystemUser } from '../../types/erp';
@@ -41,7 +40,6 @@ interface SidebarProps {
   currentUser: SystemUser;
   isMobileOpen: boolean;
   setIsMobileOpen: (open: boolean) => void;
-  onOpenInstallModal?: () => void;
   onLogout?: () => void;
 }
 
@@ -53,7 +51,6 @@ export const Sidebar: React.FC<SidebarProps> = ({
   currentUser,
   isMobileOpen,
   setIsMobileOpen,
-  onOpenInstallModal,
   onLogout,
 }) => {
   const allNavItems = [
@@ -201,29 +198,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
         })}
       </nav>
 
-      {/* PWA Mobile App Download Button */}
-      {onOpenInstallModal && (
-        <div className="p-3 border-t border-slate-900 bg-slate-900/40">
-          <button
-            onClick={() => {
-              onOpenInstallModal();
-              if (isMobile) setIsMobileOpen(false);
-            }}
-            className="w-full flex items-center justify-center gap-2 py-2 px-3 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-md transition-all border border-emerald-500/20"
-          >
-            <Smartphone className="w-4 h-4 text-emerald-200" />
-            <span>تثبيت التطبيق على الهاتف</span>
-          </button>
-        </div>
-      )}
-
       {/* Footer System Status */}
       <div className="p-3 border-t border-slate-900 bg-slate-950/80 text-[11px] text-slate-400 space-y-2">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-emerald-400"></span>
-            <span>وضع دون إنترنت (جاهز)</span>
-          </div>
+        <div className="flex items-center justify-between gap-2">
+          <span className="text-[10px] text-slate-500">حالة الاتصال والمزامنة في الشريط العلوي</span>
           <span className="font-mono text-[10px] text-slate-500">v1.0.0</span>
         </div>
         {onLogout && (

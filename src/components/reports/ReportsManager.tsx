@@ -37,7 +37,7 @@ import {
   useLiveProducts,
   useLiveVouchers,
 } from '../../hooks/useLiveDexie';
-import type { AmanatRecord, Invoice, Party } from '../../types/erp';
+import type { ActivityId, AmanatRecord, Invoice, Party } from '../../types/erp';
 import { CustomerNotificationModal } from '../common/CustomerNotificationModal';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { AmanatReceiptModal } from '../common/AmanatReceiptModal';
@@ -88,7 +88,11 @@ type ReportTab =
   | 'amanat_custody'
   | 'audit_reconciliation';
 
-export const ReportsManager: React.FC = () => {
+interface ReportsManagerProps {
+  selectedActivity: ActivityId | 'all';
+}
+
+export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity }) => {
   const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const actor =
     authService.getCurrentActorSync() || (isDesktop ? null : storage.getCurrentUser());
@@ -113,7 +117,9 @@ export const ReportsManager: React.FC = () => {
   const [endDate, setEndDate] = useState<string>('');
 
   // فلاتر المخزون والمبيعات
-  const [activityFilter, setActivityFilter] = useState<string>('ALL');
+  const [activityFilter, setActivityFilter] = useState<string>(
+    selectedActivity === 'all' ? 'ALL' : selectedActivity
+  );
   const [searchQuery, setSearchQuery] = useState('');
 
   // معاينات الطباعة المستقلة من التقارير
@@ -581,32 +587,12 @@ export const ReportsManager: React.FC = () => {
 
             <button
               type="button"
-              onClick={() => handlePrint('A4')}
+              onClick={() => handlePrint(printSize)}
               className="flex items-center gap-1.5 px-4 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-xl text-xs font-bold transition-all shadow-sm shrink-0"
-              title="طباعة التقرير بحجم صفحة A4 القياسية"
+              title={`طباعة التقرير بالمقاس المحدد (${printSize})`}
             >
               <Printer className="w-4 h-4 text-emerald-400" />
-              <span>طباعة تقرير A4</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handlePrint('80mm')}
-              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition-all shrink-0"
-              title="طباعة ملخص حراري لطابعات نقاط البيع 80mm"
-            >
-              <Printer className="w-4 h-4 text-emerald-600" />
-              <span>طابعة 80mm</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => handlePrint('58mm')}
-              className="flex items-center gap-1.5 px-3 py-2 bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-300 rounded-xl text-xs font-bold transition-all shrink-0"
-              title="طباعة ملخص حراري لطابعات نقاط البيع 58mm"
-            >
-              <Printer className="w-4 h-4 text-emerald-600" />
-              <span>طابعة 58mm</span>
+              <span>طباعة التقرير</span>
             </button>
           </div>
         </div>

@@ -818,7 +818,7 @@ export function createInventoryPartiesService(database, core = null) {
     },
 
     savePartyAtomic(actor, party, isUpdate = false) {
-      assertPermission(actor, 'party:write', isUpdate ? 'تعديل عميل/مورد' : 'إضافة عميل/مورد');
+      assertPermission(actor, isUpdate ? 'party:write' : 'party:create', isUpdate ? 'تعديل عميل/مورد' : 'إضافة عميل/مورد');
       if (!party || typeof party !== 'object') {
         throw new Error('بيانات العميل أو المورد غير صالحة.');
       }
@@ -841,6 +841,10 @@ export function createInventoryPartiesService(database, core = null) {
         const existingRow = hasAdvCol
           ? database.prepare('SELECT balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?').get(actor.tenantId, id)
           : database.prepare('SELECT balance_decimal, data_json FROM parties WHERE tenant_id = ? AND id = ?').get(actor.tenantId, id);
+
+        if (existingRow && !isUpdate) {
+          throw new Error('لا يمكن لصلاحية الإضافة فقط تعديل عميل مسجل مسبقاً.');
+        }
 
         // Preserve audited balance and advanceBalance on update; only allow initial values on create.
         const existingParsed = existingRow ? parseRowJson(existingRow) : null;

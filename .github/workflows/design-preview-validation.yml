@@ -2,6 +2,9 @@ name: Design Preview Validation
 # Validates design changes before they reach the mobile preview.
 
 on:
+  push:
+    branches:
+      - design/phase-1-dashboard-pos-2026-11-25
   pull_request:
     branches:
       - preview/mobile-test-2026-11-25

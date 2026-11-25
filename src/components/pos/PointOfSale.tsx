@@ -533,10 +533,10 @@ export const PointOfSale: React.FC<POSProps> = ({
       : allActivities.filter((act) => authorizedActivityIds.has(act.id));
 
   return (
-    <div className="p-2.5 sm:p-4 lg:p-6 h-[calc(100vh-3.5rem)] lg:h-[calc(100vh-4rem)] flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto overflow-hidden relative">
+    <div className="p-2.5 sm:p-4 lg:p-6 h-[calc(100dvh-3.5rem)] lg:h-[calc(100dvh-4rem)] min-h-[520px] flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto overflow-hidden relative">
       {/* Activity selector tabs */}
-      <div className="flex items-center justify-between bg-white p-2 rounded-xl border border-slate-200 shrink-0 gap-2">
-        <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-white p-2.5 sm:p-3 rounded-2xl border border-slate-200 shadow-sm shrink-0 gap-2.5">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5">
           {activities.map((act) => (
             <button
               key={act.id}
@@ -544,7 +544,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                 setCurrentActivity(act.id);
                 setSelectedActivity(act.id);
               }}
-              className={`px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+              className={`px-3.5 sm:px-4 py-2 rounded-xl text-xs font-bold transition-all whitespace-nowrap ${
                 currentActivity === act.id
                   ? 'bg-slate-900 text-white shadow-sm'
                   : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -572,7 +572,7 @@ export const PointOfSale: React.FC<POSProps> = ({
       </div>
 
       {/* Mobile Catalog vs Cart Segmented Switcher (Visible on mobile only) */}
-      <div className="lg:hidden flex rounded-lg bg-slate-200 p-1 shrink-0 text-xs font-bold">
+      <div className="lg:hidden flex rounded-xl bg-slate-100 border border-slate-200 p-1 shrink-0 text-xs font-bold">
         <button
           onClick={() => setMobileTab('catalog')}
           className={`flex-1 py-1.5 rounded-md transition-colors ${
@@ -603,11 +603,11 @@ export const PointOfSale: React.FC<POSProps> = ({
       {/* Main POS Split Grid */}
       <div className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-3 sm:gap-4 min-h-0 overflow-hidden">
         {/* Products Search & Catalog: 7 Cols (On mobile, visible when tab is catalog) */}
-        <div className={`lg:col-span-7 bg-white rounded-xl border border-slate-200 flex-col overflow-hidden shadow-xs ${
+        <div className={`lg:col-span-7 bg-white rounded-2xl border border-slate-200 flex-col overflow-hidden shadow-sm min-h-0 ${
           mobileTab === 'catalog' ? 'flex flex-1' : 'hidden lg:flex'
         }`}>
           {/* Search Bar & Barcode Scanner Form */}
-          <form onSubmit={handleBarcodeSubmit} className="p-3 border-b border-slate-200 flex gap-2">
+          <form onSubmit={handleBarcodeSubmit} className="p-3 sm:p-4 border-b border-slate-200 flex gap-2 bg-white">
             <div className="relative flex-1">
               <Search className="w-4 h-4 text-slate-400 absolute right-3 top-3" />
               <input
@@ -616,7 +616,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder="ابحث بالاسم، الباركود، أو رقم القطعة (اضغط Enter للإضافة السريعة)..."
-                className="w-full pl-3 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                className="w-full min-w-0 pl-3 pr-9 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
               />
             </div>
             <button
@@ -629,7 +629,7 @@ export const PointOfSale: React.FC<POSProps> = ({
           </form>
 
           {/* Products Grid */}
-          <div className="flex-1 overflow-y-auto p-3">
+          <div className="flex-1 overflow-y-auto p-3 sm:p-4">
             {filteredProducts.length === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-400">
                 <ShoppingCart className="w-10 h-10 mb-2 stroke-1 text-slate-300" />
@@ -639,7 +639,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                 </p>
               </div>
             ) : (
-              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-2.5">
+              <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
                 {filteredProducts.map((p) => {
                   const isOutOfStock = p.currentStock <= 0;
                   return (
@@ -655,7 +655,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                           addToCart(p);
                         }
                       }}
-                      className={`group p-3 rounded-lg border text-right transition-all flex flex-col justify-between select-none ${
+                      className={`group min-w-0 p-3.5 rounded-xl border text-right transition-all flex flex-col justify-between select-none active:scale-[0.99] ${
                         isOutOfStock
                           ? 'bg-slate-50 border-slate-200 opacity-60 cursor-not-allowed'
                           : 'bg-white border-slate-200 hover:border-emerald-500 hover:shadow-sm cursor-pointer'
@@ -715,7 +715,7 @@ export const PointOfSale: React.FC<POSProps> = ({
           mobileTab === 'cart' ? 'flex flex-1' : 'hidden lg:flex'
         }`}>
           {/* Cart Header */}
-          <div className="p-3 bg-slate-900 text-white flex items-center justify-between">
+          <div className="p-3.5 sm:p-4 bg-slate-950 text-white flex items-center justify-between">
             <div className="flex items-center gap-2">
               <ShoppingCart className="w-4 h-4 text-emerald-400" />
               <span className="text-xs font-bold">فاتورة المبيعات الحالية</span>
@@ -726,7 +726,7 @@ export const PointOfSale: React.FC<POSProps> = ({
           </div>
 
           {/* Customer Selection Bar */}
-          <div className="p-3 border-b border-slate-200 bg-slate-50/50 space-y-2 text-xs">
+          <div className="p-3.5 sm:p-4 border-b border-slate-200 bg-slate-50 space-y-3 text-xs">
             <div className="flex items-center gap-2">
               <User className="w-3.5 h-3.5 text-slate-500 shrink-0" />
               <select
@@ -737,7 +737,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                   const cust = customers.find((c) => c.id === e.target.value);
                   setCustomCustomerName(cust ? cust.nameAr : 'عميل نقدي عام');
                 }}
-                className="flex-1 py-1 px-2 bg-white border border-slate-200 rounded text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                className="flex-1 min-w-0 py-2 px-3 bg-white border border-slate-200 rounded-xl text-xs text-slate-800 focus:outline-none focus:ring-2 focus:ring-emerald-500"
               >
                 <option value="">عميل نقدي عام (افتراضي)</option>
                 {customers.map((c) => (
@@ -840,7 +840,7 @@ export const PointOfSale: React.FC<POSProps> = ({
           )}
 
           {/* Checkout Panel */}
-          <div className="p-3 border-t border-slate-200 bg-slate-50 space-y-2 text-xs">
+          <div className="p-3.5 sm:p-4 border-t border-slate-200 bg-slate-50 space-y-3 text-xs">
             {/* Payment Method Selector */}
             <div className="grid grid-cols-3 gap-1.5">
               <button

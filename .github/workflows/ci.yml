@@ -2,9 +2,9 @@ name: ERP CI Verification
 
 on:
   push:
-    branches: [main]
+    branches: [main, integration/enterprise-release-2026-11-25]
   pull_request:
-    branches: [main]
+    branches: [main, integration/enterprise-release-2026-11-25]
 
 jobs:
   verify:

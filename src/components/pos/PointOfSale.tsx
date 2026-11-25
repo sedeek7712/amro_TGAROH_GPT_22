@@ -30,9 +30,10 @@ import { authService } from '../../services/authService';
 import { hasPermission, getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes, useLiveInvoices } from '../../hooks/useLiveDexie';
-import { Product, ProductBatch, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
+import { Product, ProductBatch, Party, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { formatLocalDate } from '../../utils/localDate';
+import { searchCustomers } from '../../utils/customerSearch';
 
 interface POSProps {
   selectedActivity: ActivityId | 'all';
@@ -80,6 +81,14 @@ export const PointOfSale: React.FC<POSProps> = ({
   const [cart, setCart] = useState<CartItem[]>([]);
   const [selectedCustomerId, setSelectedCustomerId] = useState<string>('');
   const [customCustomerName, setCustomCustomerName] = useState<string>('عميل نقدي عام');
+  const [customerSearchQuery, setCustomerSearchQuery] = useState('');
+  const [isCustomerSearchOpen, setIsCustomerSearchOpen] = useState(false);
+  const [isAddCustomerModalOpen, setIsAddCustomerModalOpen] = useState(false);
+  const [newCustomerName, setNewCustomerName] = useState('');
+  const [newCustomerPhone, setNewCustomerPhone] = useState('');
+  const [newCustomerAddress, setNewCustomerAddress] = useState('');
+  const [newCustomerError, setNewCustomerError] = useState<string | null>(null);
+  const [isSavingNewCustomer, setIsSavingNewCustomer] = useState(false);
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('CASH');
   const [discountAmount, setDiscountAmount] = useState<number>(0);
   const [selectedCashBoxId, setSelectedCashBoxId] = useState<string>(() =>
@@ -110,10 +119,12 @@ export const PointOfSale: React.FC<POSProps> = ({
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   const canUseAdvance = hasPermission(actor, 'party:advance:use');
+  const canCreateCustomer = hasPermission(actor, 'party:create');
   const canReturnSale = hasPermission(actor, 'pos:return');
 
   const products = useLiveProducts(currentActivity);
   const customers = useLiveParties('CUSTOMER');
+  const matchedCustomers = searchCustomers(customers, customerSearchQuery).slice(0, 8);
   const cashBoxes = useLiveCashBoxes();
   const allInvoices = useLiveInvoices('all');
   const currencySymbol = getActiveCurrencyConfig().symbol;
@@ -265,6 +276,46 @@ export const PointOfSale: React.FC<POSProps> = ({
       ? roundMoney(Math.min(Math.max(0, Number(paidAmountInput) || 0), netAfterAdvance))
       : netAfterAdvance;
   const remainingCreditAmount = roundMoney(Math.max(0, netAfterAdvance - actualPaidAmount));
+
+  const selectCustomer = (customer: Party | null) => {
+    setSelectedCustomerId(customer?.id || '');
+    setCustomCustomerName(customer?.nameAr || 'عميل نقدي عام');
+    setApplyAdvanceInput('');
+    setCustomerSearchQuery('');
+    setIsCustomerSearchOpen(false);
+  };
+
+  const handleCreateCustomer = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!canCreateCustomer || isSavingNewCustomer) return;
+    const nameAr = newCustomerName.trim();
+    const phone = newCustomerPhone.trim();
+    if (!nameAr || !phone) {
+      setNewCustomerError('اسم العميل ورقم الهاتف مطلوبان.');
+      return;
+    }
+    setNewCustomerError(null);
+    setIsSavingNewCustomer(true);
+    const newParty: Party = {
+      id: storage.generateUUID(),
+      type: 'CUSTOMER',
+      nameAr,
+      phone,
+      address: newCustomerAddress.trim() || undefined,
+      balance: 0,
+      advanceBalance: 0,
+    };
+    try {
+      const savedCustomer = await dataService.savePartyAtomic(newParty, false);
+      selectCustomer(savedCustomer);
+      setIsAddCustomerModalOpen(false);
+      onRefresh();
+    } catch (error: unknown) {
+      setNewCustomerError(error instanceof Error ? error.message : 'تعذر حفظ العميل. حاول مرة أخرى.');
+    } finally {
+      setIsSavingNewCustomer(false);
+    }
+  };
 
   // إتمام البيع وإصدار الفاتورة والترحيل المحاسبي بالمعاملة الذرية
   const handleCheckout = async () => {
@@ -727,28 +778,68 @@ export const PointOfSale: React.FC<POSProps> = ({
 
           {/* Customer Selection Bar */}
           <div className="p-3 border-b border-slate-200 bg-slate-50/50 space-y-2 text-xs">
-            <div className="flex items-center gap-2">
-              <User className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-              <select
-                value={selectedCustomerId}
-                onChange={(e) => {
-                  setSelectedCustomerId(e.target.value);
-                  setApplyAdvanceInput('');
-                  const cust = customers.find((c) => c.id === e.target.value);
-                  setCustomCustomerName(cust ? cust.nameAr : 'عميل نقدي عام');
-                }}
-                className="flex-1 py-1 px-2 bg-white border border-slate-200 rounded text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
-              >
-                <option value="">عميل نقدي عام (افتراضي)</option>
-                {customers.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.nameAr} - رصيد: {c.balance.toFixed(2)} {currencySymbol}
-                    {(c.advanceBalance || 0) > 0
-                      ? ` | مقدم متاح: ${(c.advanceBalance || 0).toFixed(2)}`
-                      : ''}
-                  </option>
-                ))}
-              </select>
+            <div className="flex items-start gap-2">
+              <User className="w-3.5 h-3.5 text-slate-500 shrink-0 mt-2" />
+              <div className="min-w-0 flex-1 space-y-2">
+                <div className="flex items-center gap-2">
+                  <div className="relative min-w-0 flex-1">
+                    <Search className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400 pointer-events-none" />
+                    <input type="search" value={customerSearchQuery}
+                      onFocus={() => setIsCustomerSearchOpen(true)}
+                      onChange={(e) => { setCustomerSearchQuery(e.target.value); setIsCustomerSearchOpen(true); }}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Escape') setIsCustomerSearchOpen(false);
+                        if (e.key === 'Enter' && matchedCustomers.length === 1) {
+                          e.preventDefault();
+                          selectCustomer(matchedCustomers[0]);
+                        }
+                      }}
+                      placeholder="ابحث باسم العميل أو رقم الهاتف..."
+                      aria-label="البحث عن عميل بالاسم أو رقم الهاتف"
+                      className="w-full py-2 pr-8 pl-2 bg-white border border-slate-200 rounded-lg text-xs text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+                  </div>
+                  {canCreateCustomer && (
+                    <button type="button"
+                      onClick={() => {
+                        setNewCustomerName(''); setNewCustomerPhone(''); setNewCustomerAddress('');
+                        setNewCustomerError(null); setIsCustomerSearchOpen(false); setIsAddCustomerModalOpen(true);
+                      }}
+                      className="shrink-0 inline-flex items-center gap-1 px-2.5 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-bold">
+                      <Plus className="w-3.5 h-3.5" /><span>إضافة عميل</span>
+                    </button>
+                  )}
+                </div>
+                <div className="flex items-center justify-between gap-2 px-2.5 py-1.5 bg-white border border-slate-200 rounded-lg">
+                  <div className="min-w-0">
+                    <span className="text-[10px] text-slate-500 ml-1">العميل المحدد:</span>
+                    <span className="font-bold text-slate-800 truncate">{selectedCustomer?.nameAr || customCustomerName}</span>
+                    {selectedCustomer?.phone && <span className="block text-[10px] text-slate-500 font-mono" dir="ltr">{selectedCustomer.phone}</span>}
+                  </div>
+                  {selectedCustomerId && (
+                    <button type="button" onClick={() => selectCustomer(null)}
+                      className="shrink-0 text-[10px] font-bold text-rose-700 hover:underline">إلغاء التحديد</button>
+                  )}
+                </div>
+                {isCustomerSearchOpen && (
+                  <div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-white shadow-sm">
+                    <button type="button" onClick={() => selectCustomer(null)}
+                      className="w-full px-3 py-2 text-right border-b border-slate-100 hover:bg-slate-50 font-semibold text-slate-700">عميل نقدي عام (افتراضي)</button>
+                    {matchedCustomers.length > 0 ? matchedCustomers.map((customer) => (
+                      <button type="button" key={customer.id} onClick={() => selectCustomer(customer)}
+                        className="w-full px-3 py-2 text-right border-b last:border-b-0 border-slate-100 hover:bg-emerald-50">
+                        <span className="flex items-center justify-between gap-2">
+                          <span className="font-bold text-slate-800">{customer.nameAr}</span>
+                          <span className="text-[10px] text-slate-500 font-mono" dir="ltr">{customer.phone}</span>
+                        </span>
+                        <span className="flex flex-wrap gap-x-3 mt-1 text-[10px] text-slate-500">
+                          <span>الرصيد: {customer.balance.toFixed(2)} {currencySymbol}</span>
+                          <span>المقدم: {(customer.advanceBalance || 0).toFixed(2)} {currencySymbol}</span>
+                        </span>
+                      </button>
+                    )) : <div className="px-3 py-3 text-center text-slate-500">لا توجد نتائج مطابقة للبحث.</div>}
+                  </div>
+                )}
+              </div>
             </div>
 
             {selectedCustomer && availableAdvanceBalance > 0 && (
@@ -1075,6 +1166,45 @@ export const PointOfSale: React.FC<POSProps> = ({
                 );
               })}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* إضافة عميل من نقطة البيع */}
+      {isAddCustomerModalOpen && (
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 p-4 overflow-y-auto">
+          <div className="w-full max-w-md bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-200">
+            <div className="flex items-center justify-between px-4 py-3 bg-emerald-800 text-white">
+              <div className="flex items-center gap-2"><User className="w-4 h-4" /><h3 className="text-sm font-bold">إضافة عميل جديد</h3></div>
+              <button type="button" onClick={() => setIsAddCustomerModalOpen(false)}
+                className="p-1 rounded hover:bg-white/10" aria-label="إغلاق نافذة إضافة العميل"><X className="w-4 h-4" /></button>
+            </div>
+            <form onSubmit={handleCreateCustomer} className="p-4 space-y-3 text-xs">
+              {newCustomerError && <div className="p-2.5 rounded-lg border border-rose-200 bg-rose-50 text-rose-800">{newCustomerError}</div>}
+              <div>
+                <label className="block mb-1 font-semibold text-slate-700">اسم العميل *</label>
+                <input autoFocus required value={newCustomerName} onChange={(e) => setNewCustomerName(e.target.value)}
+                  placeholder="أدخل اسم العميل" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+              </div>
+              <div>
+                <label className="block mb-1 font-semibold text-slate-700">رقم الهاتف *</label>
+                <input type="tel" required value={newCustomerPhone} onChange={(e) => setNewCustomerPhone(e.target.value)}
+                  placeholder="أدخل رقم الهاتف" dir="ltr" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-slate-900 font-mono focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+              </div>
+              <div>
+                <label className="block mb-1 font-semibold text-slate-700">العنوان (اختياري)</label>
+                <input value={newCustomerAddress} onChange={(e) => setNewCustomerAddress(e.target.value)}
+                  placeholder="المدينة أو المنطقة" className="w-full px-3 py-2.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500" />
+              </div>
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button type="button" disabled={isSavingNewCustomer} onClick={() => setIsAddCustomerModalOpen(false)}
+                  className="px-3 py-2 border border-slate-200 rounded-lg text-slate-700 hover:bg-slate-50 disabled:opacity-50">إلغاء</button>
+                <button type="submit" disabled={isSavingNewCustomer}
+                  className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-lg disabled:bg-slate-300">
+                  {isSavingNewCustomer ? 'جارٍ الحفظ...' : 'حفظ واختيار العميل'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

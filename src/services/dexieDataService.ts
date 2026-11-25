@@ -1377,7 +1377,8 @@ export class DexieDataService implements IDataService {
 
   public async savePartyAtomic(party: Party, isUpdate = false): Promise<Party> {
     await this.ensureReady();
-    const { actor, tenantId, branchId } = this.requireAuthorizedActor('party:write');
+    const requiredPermission: Permission = isUpdate ? 'party:write' : 'party:create';
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor(requiredPermission);
 
     if (!party.id) party.id = storage.generateUUID();
     if (!party.nameAr || !party.nameAr.trim()) {
@@ -1386,6 +1387,9 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction('rw', [db.parties, db.outbox, db.auditLogs], async () => {
       const existing = await db.parties.get(party.id);
+      if (existing && !isUpdate) {
+        throw new FinancialValidationError('لا يمكن لصلاحية الإضافة فقط تعديل عميل مسجل مسبقاً.');
+      }
       const persistedParty: Party = {
         ...party,
         nameAr: party.nameAr.trim(),

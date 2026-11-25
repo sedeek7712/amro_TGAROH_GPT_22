@@ -5,6 +5,7 @@ on:
   push:
     branches:
       - design/phase-1-dashboard-pos-2026-11-25
+      - windows/phase-2-executive-dashboard
   pull_request:
     branches:
       - preview/mobile-test-2026-11-25

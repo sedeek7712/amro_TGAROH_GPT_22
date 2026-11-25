@@ -244,3 +244,67 @@
     padding: 1.5rem 2rem 2rem;
   }
 }
+
+
+/* TOOFAN SOFT — Windows executive dashboard presentation */
+@media (min-width: 1024px) {
+  .app-shell-desktop .app-executive-dashboard {
+    width: 100%;
+    max-width: 1680px;
+    padding: 1.5rem 1.75rem 2rem;
+    margin-inline: auto;
+  }
+
+  /* The dashboard root uses Tailwind space-y utilities, not a flex/grid layout. */
+  .app-shell-desktop .app-executive-dashboard > :not([hidden]) ~ :not([hidden]) {
+    --tw-space-y-reverse: 0;
+    margin-block-start: 1.5rem;
+  }
+
+  .app-shell-desktop .app-dashboard-header {
+    min-height: 6.25rem;
+    align-items: center;
+    padding: 1.35rem 1.6rem;
+    border-color: #dbe3ec;
+    box-shadow: 0 3px 12px rgba(15, 23, 42, 0.035);
+  }
+
+  .app-shell-desktop .app-dashboard-kpis {
+    gap: 1rem;
+  }
+
+  .app-shell-desktop .app-dashboard-kpis > div {
+    min-height: 8.25rem;
+    padding: 1.1rem 1.15rem;
+    border-color: #dbe3ec;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.035);
+  }
+
+  .app-shell-desktop .app-dashboard-charts,
+  .app-shell-desktop .app-dashboard-alerts {
+    gap: 1rem;
+  }
+
+  .app-shell-desktop .app-dashboard-activities > div:last-child {
+    gap: 1rem;
+  }
+
+  .app-shell-desktop .app-dashboard-activities > div:last-child > div {
+    min-height: 14rem;
+  }
+
+  .app-shell-desktop .app-dashboard-journal {
+    padding: 1.35rem 1.5rem;
+    border-color: #dbe3ec;
+  }
+
+  .app-shell-desktop .app-dashboard-journal table {
+    min-width: 48rem;
+  }
+}
+
+@media (min-width: 1440px) {
+  .app-shell-desktop .app-dashboard-kpis > div {
+    min-height: 8.75rem;
+  }
+}

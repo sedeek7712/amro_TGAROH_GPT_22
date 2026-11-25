@@ -167,10 +167,17 @@ test('Batch B backend: products, product_batches sync, FEFO adjustment, parties,
     assert.equal(custEdited.balance, 50);
     assert.equal(custEdited.nameAr, 'صيدلية الشفاء الحديثة');
 
+    const cashierCreatedCustomer = backend1.savePartyAtomic({
+      token: cashierToken,
+      party: { id: 'cust-2', type: 'CUSTOMER', nameAr: 'عميل أضيف من نقطة البيع', phone: '777222333', balance: 0 },
+    });
+    assert.equal(cashierCreatedCustomer.nameAr, 'عميل أضيف من نقطة البيع');
+
     assert.throws(
       () => backend1.savePartyAtomic({
         token: cashierToken,
-        party: { id: 'cust-2', type: 'CUSTOMER', nameAr: 'عميل مرفوض', phone: '', balance: 0 },
+        party: { id: 'cust-2', type: 'CUSTOMER', nameAr: 'محاولة تعديل ممنوعة', phone: '777999888', balance: 0 },
+        isUpdate: true,
       }),
       /RBAC/
     );

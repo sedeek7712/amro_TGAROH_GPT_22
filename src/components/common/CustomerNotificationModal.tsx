@@ -834,33 +834,15 @@ export const CustomerNotificationModal: React.FC<CustomerNotificationModalProps>
               </button>
             )}
 
-            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+            <div className="flex justify-start">
               <button
                 type="button"
                 disabled={isBlocked}
                 onClick={handleCopy}
-                className="py-2 px-3 border border-slate-300 hover:bg-slate-50 disabled:opacity-45 text-slate-700 font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
+                className="py-2 px-4 border border-slate-300 hover:bg-slate-50 disabled:opacity-45 text-slate-700 font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
               >
                 {copied ? <Check className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
                 <span>{copied ? 'تم النسخ!' : 'نسخ النص'}</span>
-              </button>
-
-              <button
-                type="button"
-                disabled={isBlocked || isBusy}
-                onClick={handleExportPdf}
-                className="py-2 px-3 border border-slate-300 hover:bg-slate-50 disabled:opacity-45 text-slate-700 font-semibold rounded-lg transition-colors flex items-center justify-center gap-1.5"
-              >
-                <FileDown className="w-4 h-4 text-blue-700" />
-                <span>حفظ PDF</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={onClose}
-                className="py-2 px-3 bg-slate-100 hover:bg-slate-200 text-slate-700 font-semibold rounded-lg transition-colors text-center"
-              >
-                إغلاق
               </button>
             </div>
           </div>

@@ -141,16 +141,7 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
             <p className="text-xs text-slate-500">تخصيص بيانات المنشأة والفاتورة</p>
           </div>
         </div>
-        <button
-          onClick={handleSave}
-          disabled={isSaving}
-          className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-bold shadow-sm transition-all ${
-            saved ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white'
-          }`}
-        >
-          {saved ? <CheckCircle className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-          {isSaving ? 'جارٍ الحفظ...' : saved ? 'تم الحفظ!' : 'حفظ التغييرات'}
-        </button>
+
       </div>
 
       {/* الشعار */}
@@ -344,12 +335,13 @@ export const CompanySettings: React.FC<CompanySettingsProps> = ({ onRefresh }) =
       <div className="flex justify-end pb-6">
         <button
           onClick={handleSave}
-          className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold shadow-sm transition-all ${
+          disabled={isSaving}
+          className={`flex items-center gap-2 px-6 py-2.5 rounded-xl text-sm font-bold shadow-sm transition-all disabled:opacity-60 ${
             saved ? 'bg-emerald-100 text-emerald-700 border border-emerald-200' : 'bg-emerald-600 hover:bg-emerald-700 text-white'
           }`}
         >
           {saved ? <CheckCircle className="w-4 h-4" /> : <Save className="w-4 h-4" />}
-          {saved ? 'تم الحفظ بنجاح!' : 'حفظ التغييرات'}
+          {isSaving ? 'جارٍ الحفظ...' : saved ? 'تم الحفظ بنجاح!' : 'حفظ التغييرات'}
         </button>
       </div>
     </div>

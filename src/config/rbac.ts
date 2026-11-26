@@ -40,6 +40,7 @@ export type Permission =
   | 'inventory:delete'
   | 'inventory:media:manage'
   | 'party:view'
+  | 'party:create'
   | 'party:write'
   | 'vouchers:view'
   | 'voucher:receipt'
@@ -137,6 +138,7 @@ const ALL_PERMISSIONS: Permission[] = [
   'inventory:delete',
   'inventory:media:manage',
   'party:view',
+  'party:create',
   'party:write',
   'vouchers:view',
   'voucher:receipt',
@@ -185,6 +187,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'inventory:media:manage',
     'inventory:adjust',
     'party:view',
+    'party:create',
     'party:write',
     'vouchers:view',
     'voucher:receipt',
@@ -225,6 +228,7 @@ export const ROLE_PERMISSIONS: Record<UserRole, ReadonlySet<Permission>> = {
     'invoices:view',
     'inventory:view',
     'party:view',
+    'party:create',
     'cashbox:view',
     'branches:view',
   ]),

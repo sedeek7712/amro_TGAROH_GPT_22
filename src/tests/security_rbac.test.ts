@@ -49,6 +49,7 @@ import {
 } from '../config/rbac';
 import { EXPECTED_SUPABASE_TABLES, SUPABASE_RLS_SQL } from '../db/supabaseRlsPolicies';
 import { SystemUser } from '../types/erp';
+import { scopeBranchRows } from '../hooks/useLiveDexie';
 
 function makeUser(overrides: Partial<SystemUser> = {}): SystemUser {
   return {
@@ -64,6 +65,18 @@ function makeUser(overrides: Partial<SystemUser> = {}): SystemUser {
     ...overrides,
   };
 }
+
+test('SEC-01: Dexie read scope rejects explicit foreign tenants and keeps legacy tenant-local rows', () => {
+  const admin = makeUser({ tenantId: 'tenant_main', role: 'ADMIN' });
+  const rows = [
+    { id: 'same-tenant', tenantId: 'tenant_main', branchId: 'branch_main' },
+    { id: 'foreign-tenant', tenantId: 'tenant_other', branchId: 'branch_main' },
+    // Legacy Dexie business tables (invoices, cash boxes, vouchers) are tenant-local and omit tenantId.
+    { id: 'legacy-local', branchId: 'branch_main' },
+  ];
+  assert.deepEqual(scopeBranchRows(rows, admin).map((row) => row.id), ['same-tenant', 'legacy-local']);
+  assert.deepEqual(scopeBranchRows(rows, null), []);
+});
 
 describe('Security, Password Hashing, RBAC & RLS Regression Tests (SEC-07, RBAC-08)', () => {
   beforeEach(async () => {

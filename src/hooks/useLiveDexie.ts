@@ -52,7 +52,7 @@ function currentActorKey(actor: SystemUser | null): string {
     : 'anonymous';
 }
 
-function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
+export function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
   records: T[],
   actor: SystemUser | null,
   allowUnauthenticated = false
@@ -60,6 +60,8 @@ function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
   if (!actor) return allowUnauthenticated ? records : [];
   const tenantId = actor.tenantId?.trim();
   if (!tenantId) return [];
+  // Core Dexie business tables are legacy tenant-local records and do not all carry tenantId.
+  // Preserve those local rows, but always reject an explicitly different tenant.
   const tenantRows = records.filter((row) => !row.tenantId || row.tenantId === tenantId);
   return filterRecordsByBranchScope(tenantRows, actor);
 }
@@ -211,7 +213,11 @@ export function useLiveInvoices(activityId?: CommercialActivityId | 'all'): Invo
 export function useLiveAccounts(): Account[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
-    async () => await db.accounts.toArray(),
+    async () => {
+      if (!hasPermission(actor, 'view:accounting')) return [];
+      // Accounts are a tenant-local chart keyed by account code; this legacy Dexie entity has no tenantId/branchId fields.
+      return await db.accounts.toArray();
+    },
     [],
     [currentActorKey(actor)],
     async () => {
@@ -227,6 +233,7 @@ export function useLiveJournalEntries(costCenterId?: CostCenterId | 'all'): Jour
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'view:accounting')) return [];
       const rows = costCenterId && costCenterId !== 'all'
         ? await db.journalEntries.where('costCenterId').equals(costCenterId).reverse().sortBy('date')
         : await db.journalEntries.toCollection().reverse().sortBy('date');
@@ -247,10 +254,11 @@ export function useLiveParties(type?: PartyType): Party[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (type) {
-        return await db.parties.where('type').equals(type).toArray();
-      }
-      return await db.parties.toArray();
+      if (!hasPermission(actor, 'party:view')) return [];
+      // Parties are currently tenant-local in Dexie and do not carry tenantId/branchId in the persisted model.
+      return type
+        ? await db.parties.where('type').equals(type).toArray()
+        : await db.parties.toArray();
     },
     [],
     [type, currentActorKey(actor)],
@@ -324,13 +332,18 @@ export function useLiveUsers(): SystemUser[] {
 }
 
 export function useLiveAuditLogs(currentUser?: SystemUser | null): SystemAuditLog[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'view:audit_logs')) return [];
       const allLogs = await db.auditLogs.toCollection().reverse().sortBy('timestamp');
-      return filterAuditLogsForUser(allLogs, currentUser);
+      const tenantLogs = actor?.tenantId
+        ? allLogs.filter((log) => !log.tenantId || log.tenantId === actor.tenantId)
+        : [];
+      return filterAuditLogsForUser(tenantLogs, currentUser);
     },
     [],
-    [currentUser?.id, currentUser?.role],
+    [currentUser?.id, currentUser?.role, currentActorKey(actor)],
     async () => {
       const token = desktopSession.getToken();
       const current = desktopSession.getActor();
@@ -344,6 +357,7 @@ export function useLiveOutbox(statusFilter?: OutboxQueueItem['status'] | 'all'):
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'sync:manage')) return [];
       const rows = statusFilter && statusFilter !== 'all'
         ? await db.outbox.where('status').equals(statusFilter).reverse().sortBy('createdAt')
         : await db.outbox.toCollection().reverse().sortBy('createdAt');
@@ -371,6 +385,9 @@ export function useLiveOutboxStats(): {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'sync:manage')) {
+        return { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 };
+      }
       const allItems = await db.outbox.toArray();
       const items = actor?.tenantId
         ? scopeBranchRows(allItems.filter((row) => row.tenantId === actor.tenantId), actor)
@@ -401,7 +418,7 @@ export function useLiveConflicts(): SyncConflict[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (!actor?.tenantId) return [];
+      if (!hasPermission(actor, 'sync:manage') || !actor?.tenantId) return [];
       const rows = await db.syncConflicts.where('tenantId').equals(actor.tenantId).reverse().sortBy('detectedAt');
       return scopeBranchRows(rows, actor);
     },
@@ -420,8 +437,9 @@ export function useLiveBranches(): Branch[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!actor?.active || !actor.tenantId || !hasPermission(actor, 'branches:view')) return [];
       const rows = await db.branches.toArray();
-      if (!actor?.active || !actor.tenantId) return [];
+      // Branch is also a legacy tenant-local Dexie entity without a tenantId field.
       if (actor.role === 'ADMIN') return rows;
       const allowed = getAuthorizedBranchIds(actor);
       return rows.filter((branch) => allowed.has(branch.id));
@@ -441,6 +459,7 @@ export function useLivePaymentAllocations(partyId?: string, voucherId?: string):
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'vouchers:view') && !hasPermission(actor, 'party:view')) return [];
       let rows: PaymentAllocation[];
       if (voucherId) {
         rows = await db.paymentAllocations.where('voucherId').equals(voucherId).toArray();
@@ -471,6 +490,7 @@ export function useLivePartyAdvances(partyId?: string): PartyAdvanceTransaction[
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'party:view') && !hasPermission(actor, 'vouchers:view')) return [];
       const rows = partyId
         ? await db.partyAdvanceTransactions.where('partyId').equals(partyId).toArray()
         : await db.partyAdvanceTransactions.toArray();

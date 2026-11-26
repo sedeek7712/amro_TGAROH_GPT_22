@@ -1,5 +1,6 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, shell } from 'electron';
+import { app, BrowserWindow, ClipboardItem, clipboard, dialog, ipcMain, Menu, nativeImage, shell } from 'electron';
 import { randomUUID } from 'node:crypto';
+import { Blob } from 'node:buffer';
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,6 +17,7 @@ import { DesktopAuthenticationService } from './security/authentication.mjs';
 import { createDesktopBackend } from './sqlite/desktop-backend.mjs';
 import { createDiagnosticLogger } from './logging/diagnostic-logger.mjs';
 import {
+  copyShareTempPngToClipboardOnDisk,
   executeCleanupShareTempFileIpc,
   executeExportPdfIpc,
   executeExportPngIpc,
@@ -1074,6 +1076,20 @@ if (!hasSingleInstance) {
         tempDir: getShareTempDirectory(),
         shareTempFiles,
         input,
+      });
+    });
+
+    handleTrustedIpc('erp:share:copy-image-to-clipboard', async (_event, input) => {
+      desktopBackend.requireActor(input?.token);
+      return copyShareTempPngToClipboardOnDisk({
+        tempDir: getShareTempDirectory(),
+        shareTempFiles,
+        clipboard,
+        nativeImage,
+        ClipboardItemCtor: ClipboardItem,
+        BlobCtor: Blob,
+        tempToken: input?.tempToken,
+        messageText: input?.messageText,
       });
     });
 

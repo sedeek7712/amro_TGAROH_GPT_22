@@ -81,6 +81,50 @@ describe('Sync Engine Regression Tests (SYN-03, SYNC-01..06)', () => {
     globalThis.fetch = originalFetch;
   });
 
+  test('SYNC-01: edits after SYNCED create a new outbox revision and coalesce pending edits', async () => {
+    const first = await syncQueueService.enqueue({
+      entityType: 'PRODUCT',
+      entityId: 'prod-revision-1',
+      action: 'UPDATE',
+      payload: { id: 'prod-revision-1', nameAr: 'نسخة أولى' },
+      tenantId: 'tenant_main',
+    });
+    await syncQueueService.markSynced(first.id, '2026-11-26T01:00:00.000Z');
+
+    const second = await syncQueueService.enqueue({
+      entityType: 'PRODUCT',
+      entityId: 'prod-revision-1',
+      action: 'UPDATE',
+      payload: { id: 'prod-revision-1', nameAr: 'نسخة ثانية' },
+      tenantId: 'tenant_main',
+    });
+    assert.notEqual(second.id, first.id, 'A post-sync edit must create a new outbox item');
+    assert.equal(second.status, 'PENDING');
+
+    const third = await syncQueueService.enqueue({
+      entityType: 'PRODUCT',
+      entityId: 'prod-revision-1',
+      action: 'UPDATE',
+      payload: { id: 'prod-revision-1', nameAr: 'نسخة ثالثة' },
+      tenantId: 'tenant_main',
+    });
+    assert.equal(third.id, second.id, 'Repeated edits while pending should coalesce');
+    assert.equal((third.payload as { nameAr: string }).nameAr, 'نسخة ثالثة');
+
+    const leased = await syncQueueService.claimReadyToSyncItems('revision-worker', 10);
+    assert.ok(leased.some((item) => item.id === third.id));
+    const whileSyncing = await syncQueueService.enqueue({
+      entityType: 'PRODUCT',
+      entityId: 'prod-revision-1',
+      action: 'UPDATE',
+      payload: { id: 'prod-revision-1', nameAr: 'أثناء الإرسال' },
+      tenantId: 'tenant_main',
+    });
+    assert.notEqual(whileSyncing.id, third.id, 'A leased payload must not be mutated in flight');
+    assert.equal((await db.outbox.get(third.id))?.status, 'SYNCING');
+    assert.equal((await db.outbox.get(third.id))?.payload && ((await db.outbox.get(third.id))!.payload as { nameAr: string }).nameAr, 'نسخة ثالثة');
+  });
+
   test('SYN-03: HTTP 200 without explicit ACK leaves Outbox items un-synced; partial ACK marks only accepted item', async () => {
     const q1 = await syncQueueService.enqueue({
       entityType: 'PRODUCT',

@@ -502,3 +502,94 @@ test('Batch G SQLite parity: Sales/Purchase Returns (Perpetual), Supplier Advanc
     rmSync(userDataPath, { recursive: true, force: true });
   }
 });
+
+test('INV-01: SQLite allows returning the same product from two distinct sold batches', async () => {
+  const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'erp-batch-split-return-'));
+  try {
+    const rt = await openErpDatabase({ userDataPath });
+    const auth = new DesktopAuthenticationService(rt.database);
+    const backend = createDesktopBackend({ database: rt.database, backupDirectory: rt.backupDirectory, authenticationService: auth });
+    auth.createInitialAdmin({ username: 'admin', fullName: 'المدير العام', password: 'AdminPass#2026' });
+    const token = auth.authenticate({ username: 'admin', password: 'AdminPass#2026' }).token;
+
+    const product = backend.saveProductAtomic({
+      token,
+      product: {
+        id: 'prod-split-batch-return',
+        activityId: 'grocery',
+        code: 'GR-SPLIT-RET',
+        nameAr: 'صنف بتشغيلتين',
+        category: 'اختبار',
+        unit: 'علبة',
+        purchasePrice: 10,
+        sellPrice: 20,
+        currentStock: 10,
+        minStockAlert: 1,
+        batches: [
+          { id: 'batch-split-a', productId: 'prod-split-batch-return', batchNumber: 'BATCH-A', expiryDate: '2027-01-01', quantity: 5, costPrice: 10 },
+          { id: 'batch-split-b', productId: 'prod-split-batch-return', batchNumber: 'BATCH-B', expiryDate: '2027-02-01', quantity: 5, costPrice: 10 },
+        ],
+      },
+      isUpdate: false,
+    });
+    const customer = backend.savePartyAtomic({
+      token,
+      party: { id: 'cust-split-batch-return', type: 'CUSTOMER', nameAr: 'عميل اختبار التشغيلات', phone: '777111999', balance: 0, advanceBalance: 0 },
+      isUpdate: false,
+    });
+    const sale = backend.createSalesInvoiceAtomic({
+      token,
+      params: {
+        clientRequestId: 'sale-split-batch-return',
+        invoice: {
+          id: 'sale-split-batch-return',
+          type: 'SALE',
+          activityId: 'grocery',
+          branchId: 'branch_main',
+          partyId: customer.id,
+          partyName: customer.nameAr,
+          date: '2026-11-26',
+          items: [
+            { id: 'split-line-a', productId: product.id, productName: product.nameAr, quantity: 5, unitPrice: 20, discount: 0, total: 100, batchNumber: 'BATCH-A' },
+            { id: 'split-line-b', productId: product.id, productName: product.nameAr, quantity: 5, unitPrice: 20, discount: 0, total: 100, batchNumber: 'BATCH-B' },
+          ],
+          subtotal: 200, discount: 0, tax: 0, total: 200, paidAmount: 0, paymentMethod: 'CREDIT',
+        },
+        totalCogs: 100,
+        stockDeductions: [
+          { productId: product.id, quantity: 5, batchNumber: 'BATCH-A' },
+          { productId: product.id, quantity: 5, batchNumber: 'BATCH-B' },
+        ],
+      },
+    }).invoice;
+
+    const returnA = backend.createSalesReturnAtomic({
+      token,
+      params: {
+        originalInvoiceId: sale.id,
+        items: [{ productId: product.id, quantity: 5, batchNumber: 'BATCH-A' }],
+        returnReason: 'اختبار إرجاع التشغيلة الأولى',
+        refundMethod: 'AR_OFFSET',
+        date: '2026-11-26',
+      },
+    });
+    assert.equal(returnA.invoice.items[0].batchNumber, 'BATCH-A');
+
+    const returnB = backend.createSalesReturnAtomic({
+      token,
+      params: {
+        originalInvoiceId: sale.id,
+        items: [{ productId: product.id, quantity: 5, batchNumber: 'BATCH-B' }],
+        returnReason: 'اختبار إرجاع التشغيلة الثانية',
+        refundMethod: 'AR_OFFSET',
+        date: '2026-11-26',
+      },
+    });
+    assert.equal(returnB.invoice.items[0].batchNumber, 'BATCH-B');
+    assert.equal(backend.getProductById({ token, id: product.id }).currentStock, 10);
+    assertTrialBalanceZero(rt.database);
+    rt.close();
+  } finally {
+    rmSync(userDataPath, { recursive: true, force: true });
+  }
+});

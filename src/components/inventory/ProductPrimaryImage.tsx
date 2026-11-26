@@ -5,9 +5,14 @@ import { productMediaService } from '../../services/productMediaService';
 interface ProductPrimaryImageProps {
   productId: string;
   productName: string;
+  displaySize?: 'inventory' | 'pos';
 }
 
-export const ProductPrimaryImage: React.FC<ProductPrimaryImageProps> = ({ productId, productName }) => {
+export const ProductPrimaryImage: React.FC<ProductPrimaryImageProps> = ({
+  productId,
+  productName,
+  displaySize = 'inventory',
+}) => {
   const [src, setSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -49,8 +54,13 @@ export const ProductPrimaryImage: React.FC<ProductPrimaryImageProps> = ({ produc
     };
   }, [productId]);
 
+  const frameClass =
+    displaySize === 'pos'
+      ? 'mx-auto flex h-24 w-full items-center justify-center overflow-hidden rounded-xl border border-slate-200 bg-slate-50'
+      : 'mx-auto flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-50';
+
   return (
-    <div ref={rootRef} className="mx-auto flex h-10 w-10 items-center justify-center overflow-hidden rounded-lg border border-slate-200 bg-slate-50">
+    <div ref={rootRef} className={frameClass}>
       {src ? (
         <img src={src} alt={productName} loading="lazy" className="h-full w-full object-contain" />
       ) : (

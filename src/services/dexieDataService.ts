@@ -1377,7 +1377,8 @@ export class DexieDataService implements IDataService {
 
   public async savePartyAtomic(party: Party, isUpdate = false): Promise<Party> {
     await this.ensureReady();
-    const { actor, tenantId, branchId } = this.requireAuthorizedActor('party:write');
+    const requiredPermission: Permission = isUpdate ? 'party:write' : 'party:create';
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor(requiredPermission);
 
     if (!party.id) party.id = storage.generateUUID();
     if (!party.nameAr || !party.nameAr.trim()) {
@@ -1386,6 +1387,9 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction('rw', [db.parties, db.outbox, db.auditLogs], async () => {
       const existing = await db.parties.get(party.id);
+      if (existing && !isUpdate) {
+        throw new FinancialValidationError('لا يمكن لصلاحية الإضافة فقط تعديل عميل مسجل مسبقاً.');
+      }
       const persistedParty: Party = {
         ...party,
         nameAr: party.nameAr.trim(),
@@ -2969,6 +2973,11 @@ export class DexieDataService implements IDataService {
           const accountsByCode = await this.getAccountsByCodeMap();
           validateJournalEntryInput({ entry: returnEntry, accountsByCode });
 
+          if (roundMoney(cashBox!.balance) + 0.001 < effectiveReturn) {
+            throw new FinancialValidationError(
+              `رصيد الصندوق (${cashBox!.nameAr}: ${roundMoney(cashBox!.balance)}) غير كافٍ لرد الأمانة بمبلغ ${effectiveReturn}.`
+            );
+          }
           cashBox!.balance = roundMoney(cashBox!.balance - effectiveReturn);
           await db.cashBoxes.put(cashBox!);
           if (boxAcc) {
@@ -4616,7 +4625,6 @@ export class DexieDataService implements IDataService {
 
         const normalizedTotal = roundMoney(invoice.total);
         const cashPaid = roundMoney(invoice.paidAmount);
-
         const journalLines: JournalEntryLine[] = [
           {
             id: storage.generateUUID(),
@@ -5004,6 +5012,7 @@ export class DexieDataService implements IDataService {
           .toArray();
 
         const returnedByProduct = new Map<string, number>();
+        const returnedByProductBatch = new Map<string, number>();
         const returnedByDeductionKey = new Map<string, number>();
         for (const r of priorReturns) {
           for (const it of r.items || []) {
@@ -5011,6 +5020,13 @@ export class DexieDataService implements IDataService {
               it.productId,
               roundMoney((returnedByProduct.get(it.productId) || 0) + it.quantity, 4)
             );
+            if (it.batchNumber) {
+              const itemKey = `${it.productId}::${it.batchNumber}`;
+              returnedByProductBatch.set(
+                itemKey,
+                roundMoney((returnedByProductBatch.get(itemKey) || 0) + it.quantity, 4)
+              );
+            }
           }
           for (const ded of r.stockDeductionsRecorded || []) {
             const dk = `${ded.productId}::${ded.batchNumber || ''}`;
@@ -5036,20 +5052,26 @@ export class DexieDataService implements IDataService {
           const matchingOrigLines = (orig.items || []).filter(
             (it) =>
               it.productId === reqItem.productId &&
-              (!reqItem.batchNumber || !it.batchNumber || it.batchNumber === reqItem.batchNumber)
+              (!reqItem.batchNumber || it.batchNumber === reqItem.batchNumber)
           );
           if (matchingOrigLines.length === 0) {
             throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود ضمن بنود الفاتورة الأصلية.`);
           }
           const soldQty = roundMoney(matchingOrigLines.reduce((s, l) => s + l.quantity, 0), 4);
-          const alreadyRet = returnedByProduct.get(reqItem.productId) || 0;
+          const batchKey = `${reqItem.productId}::${reqItem.batchNumber || ''}`;
+          const alreadyRet = reqItem.batchNumber
+            ? (returnedByDeductionKey.get(batchKey) || returnedByProductBatch.get(batchKey) || 0)
+            : (returnedByProduct.get(reqItem.productId) || 0);
           const remainingReturnable = roundMoney(soldQty - alreadyRet, 4);
           if (reqQty > remainingReturnable + 0.0001) {
             throw new FinancialValidationError(
               `الكمية المطلوب إرجاعها للصنف (${matchingOrigLines[0].productName}) تتجاوز الكمية المتاحة للإرجاع (${remainingReturnable}).`
             );
           }
-          returnedByProduct.set(reqItem.productId, roundMoney(alreadyRet + reqQty, 4));
+          returnedByProduct.set(reqItem.productId, roundMoney((returnedByProduct.get(reqItem.productId) || 0) + reqQty, 4));
+          if (reqItem.batchNumber) {
+            returnedByProductBatch.set(batchKey, roundMoney((returnedByProductBatch.get(batchKey) || 0) + reqQty, 4));
+          }
 
           const avgLineNetUnit =
             matchingOrigLines.reduce((s, l) => s + l.total, 0) / soldQty;
@@ -5066,7 +5088,7 @@ export class DexieDataService implements IDataService {
           const matchingDeductions = (orig.stockDeductionsRecorded || []).filter(
             (d) =>
               d.productId === reqItem.productId &&
-              (!reqItem.batchNumber || !d.batchNumber || d.batchNumber === reqItem.batchNumber)
+              (!reqItem.batchNumber || d.batchNumber === reqItem.batchNumber)
           );
 
           let qtyLeftToRestore = reqQty;

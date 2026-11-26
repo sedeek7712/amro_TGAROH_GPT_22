@@ -1668,15 +1668,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
                 <p className="text-[11px] text-slate-300 leading-relaxed">
                   رفع كافة المعاملات المالية والمخزنية المحلية المعلقة بضمان تأكيد الخادم (Idempotency Key)، ثم سحب التحديثات الصادرة من الأجهزة ونقاط البيع الأخرى.
                 </p>
-                <button
-                  type="button"
-                  onClick={handleFullCloudSync}
-                  disabled={isSyncingCloud || !isOnline}
-                  className="w-full mt-2 py-2.5 px-4 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-700 disabled:text-slate-500 text-white rounded-lg text-xs font-bold flex items-center justify-center gap-2 transition-all shadow-xs"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingCloud ? 'animate-spin' : ''}`} />
-                  <span>بدء المزامنة الشاملة الآن</span>
-                </button>
+                
               </div>
 
               <div className="p-4 rounded-lg bg-slate-800/80 border border-slate-700 space-y-2">

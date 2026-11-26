@@ -35,6 +35,7 @@ import assert from 'node:assert/strict';
 
 import { db } from '../db/erpDatabase';
 import { dexieDataService } from '../services/dexieDataService';
+import { FinancialValidationError } from '../services/financialValidation';
 import { authService, hashPassword } from '../services/authService';
 import { getInvoiceRemainingAmount } from '../../electron/sqlite/payment-allocation-engine.mjs';
 import { Product, Party, SystemUser, CashBox, Branch } from '../types/erp';
@@ -587,6 +588,24 @@ describe('Phase 7 Dexie: Sales/Purchase Returns (Perpetual), Supplier Advances 1
     assert.equal(cashAmanat.record.cashBoxId, 'cb-br2');
     assert.equal(cashAmanat.record.remainingAmount, 5000);
     assert.equal((await db.cashBoxes.get('cb-br2'))?.balance, 5000);
+
+    // FIN-04: simulate cash already spent; an amanat refund must not overdraw the branch cash box.
+    const cashAccountBefore = await db.accounts.get('1101');
+    assert.ok(cashAccountBefore);
+    await db.cashBoxes.update('cb-br2', { balance: 1000 });
+    await db.accounts.update('1101', { balance: cashAccountBefore.balance - 4000 });
+    await assert.rejects(
+      () => dexieDataService.returnAmanatAtomic({
+        recordId: cashAmanat.record.id,
+        returnAmount: 2000,
+        recipientSignatureName: 'ناصر بن علي',
+      }),
+      (err: unknown) => err instanceof FinancialValidationError
+    );
+    assert.equal((await db.cashBoxes.get('cb-br2'))?.balance, 1000);
+    assert.equal((await db.amanatRecords.get(cashAmanat.record.id))?.returnedAmount || 0, 0);
+    await db.cashBoxes.update('cb-br2', { balance: 5000 });
+    await db.accounts.update('1101', { balance: cashAccountBefore.balance });
 
     // رد جزئي بمبلغ 2000
     const partial1 = await dexieDataService.returnAmanatAtomic({

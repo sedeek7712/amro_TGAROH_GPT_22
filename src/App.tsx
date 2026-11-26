@@ -35,9 +35,8 @@ import {
   LayoutDashboard,
   ShoppingCart,
   Package,
-  ShieldCheck,
-  Menu,
   Smartphone,
+  Menu,
   X,
   ShieldAlert,
 } from 'lucide-react';
@@ -250,7 +249,7 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell-root flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none" dir="rtl">
+    <div className={`app-shell-root flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none ${isDesktopRuntime ? "app-shell-desktop" : ""}`} dir="rtl">
       {/* Sidebar Navigation (Drawer on Mobile, Fixed on Desktop) */}
       <Sidebar
         activeView={activeView}
@@ -260,7 +259,6 @@ export default function App() {
         currentUser={currentUser}
         isMobileOpen={isMobileMenuOpen}
         setIsMobileOpen={setIsMobileMenuOpen}
-        onOpenInstallModal={isDesktopRuntime ? undefined : () => setIsInstallModalOpen(true)}
         onLogout={handleLogout}
       />
 
@@ -273,16 +271,13 @@ export default function App() {
           selectedActivity={selectedActivity}
           currentUser={currentUser}
           cashBoxes={cashBoxes}
-          onOpenMobileMenu={() => setIsMobileMenuOpen(true)}
-          onOpenInstallModal={() => setIsInstallModalOpen(true)}
         />
 
         {/* Mobile Install Promotion Banner */}
         {!isDesktopRuntime && showMobileBanner && (
           <div className="app-chrome-only lg:hidden bg-gradient-to-r from-emerald-800 via-teal-800 to-emerald-900 text-white px-3 py-2 flex items-center justify-between gap-2 text-xs shadow-md shrink-0 border-b border-emerald-700/50 select-none animate-fadeIn">
             <div
-              onClick={() => setIsInstallModalOpen(true)}
-              className="flex items-center gap-2 cursor-pointer flex-1 min-w-0"
+              className="flex items-center gap-2 flex-1 min-w-0"
             >
               <div className="w-7 h-7 rounded-lg bg-emerald-500/30 flex items-center justify-center shrink-0 border border-emerald-400/30">
                 <Smartphone className="w-4 h-4 text-emerald-200" />
@@ -315,7 +310,7 @@ export default function App() {
         )}
 
         {/* Viewport Content with RBAC Protection */}
-        <main className="app-shell-main flex-1 overflow-y-auto bg-slate-50/60 pb-20 lg:pb-6">
+        <main className="app-shell-main app-desktop-workspace flex-1 overflow-y-auto bg-slate-50/60 pb-20 lg:pb-6">
           {!isViewAllowed ? (
             <div className="p-8 max-w-xl mx-auto my-12 bg-white rounded-2xl border border-rose-200 shadow-sm text-center space-y-4">
               <div className="w-12 h-12 bg-rose-100 text-rose-600 rounded-full flex items-center justify-center mx-auto">
@@ -360,7 +355,11 @@ export default function App() {
           )}
 
           {activeView === 'purchases' && (
-            <PurchasesManager onRefresh={handleRefresh} />
+            <PurchasesManager
+              key={selectedActivity}
+              selectedActivity={selectedActivity}
+              onRefresh={handleRefresh}
+            />
           )}
 
           {activeView === 'amanat' && (
@@ -380,7 +379,7 @@ export default function App() {
           )}
 
           {activeView === 'reports' && (
-            <ReportsManager />
+            <ReportsManager key={selectedActivity} selectedActivity={selectedActivity} />
           )}
 
           {activeView === 'users' && (
@@ -434,28 +433,6 @@ export default function App() {
             >
               <Package className="w-5 h-5" />
               <span>المخزون</span>
-            </button>
-          )}
-
-          {canAccessView(currentUser.role, 'amanat') && (
-            <button
-              onClick={() => setActiveView('amanat')}
-              className={`flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold transition-colors ${
-                activeView === 'amanat' ? 'text-purple-400' : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              <ShieldCheck className="w-5 h-5" />
-              <span>الأمانات</span>
-            </button>
-          )}
-
-          {!isDesktopRuntime && (
-            <button
-              onClick={() => setIsInstallModalOpen(true)}
-              className="flex flex-col items-center gap-1 py-1 px-3 rounded-lg text-[10px] font-bold text-emerald-400 hover:text-emerald-300 transition-colors"
-            >
-              <Smartphone className="w-5 h-5" />
-              <span>تثبيت</span>
             </button>
           )}
 

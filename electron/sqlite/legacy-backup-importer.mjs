@@ -197,8 +197,22 @@ export function parseLegacyBackup(rawBackup) {
     }
   }
 
+  if (backup.data.mediaManifest !== undefined) {
+    if (!isObject(backup.data.mediaManifest)) {
+      throw new Error('بيان وسائط النسخة الاحتياطية غير صالح.');
+    }
+    data.mediaManifest = {
+      productImageCount: Number.isSafeInteger(backup.data.mediaManifest.productImageCount)
+        && backup.data.mediaManifest.productImageCount >= 0
+        ? backup.data.mediaManifest.productImageCount
+        : 0,
+      mediaIncluded: backup.data.mediaManifest.mediaIncluded === true,
+    };
+  }
+
   const tenantIds = new Set([DEFAULT_TENANT_ID]);
   for (const list of Object.values(data)) {
+    if (!Array.isArray(list)) continue;
     for (const row of list) tenantIds.add(tenantIdOf(row));
   }
 

@@ -412,6 +412,34 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     const purged = backend2.purgeOldSyncedRecords({ token: token2, olderThanDays: 30 });
     assert.ok(purged >= 2);
 
+    // JSON restore must fail closed when product media exists; the existing product must remain intact.
+    const productImageId = 'product-image-json-guard';
+    rt2.database.prepare(
+      `INSERT INTO product_images (
+        tenant_id,id,product_id,activity_id,storage_key,thumbnail_storage_key,mime_type,
+        size_bytes,thumbnail_size_bytes,width,height,checksum_sha256,is_primary,sort_order,
+        created_by,created_at,updated_at,sync_status,is_deleted,data_json
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    ).run(
+      'tenant_main', productImageId, 'prod-d-1', 'pharmacy',
+      'media/json-guard.png', 'media/json-guard-thumb.png', 'image/png',
+      12, 6, 1, 1, 'a'.repeat(64), 1, 0,
+      'usr-admin', new Date().toISOString(), new Date().toISOString(),
+      'LOCAL_ONLY', 0, JSON.stringify({ id: productImageId, productId: 'prod-d-1' })
+    );
+    const mediaAwareJson = backend2.exportBackupJSON({ token: token2 });
+    const mediaAwarePayload = JSON.parse(mediaAwareJson);
+    assert.equal(mediaAwarePayload.data.mediaManifest.productImageCount, 1);
+    assert.equal(mediaAwarePayload.data.mediaManifest.mediaIncluded, false);
+    const imageGuardResult = await backend2.importBackupJSON({ token: token2, rawJson: mediaAwareJson });
+    assert.equal(imageGuardResult.success, false);
+    assert.match(imageGuardResult.error, /صور الأصناف/);
+    assert.equal(backend2.getProductById({ token: token2, id: 'prod-d-1' }).id, 'prod-d-1');
+    assert.equal(
+      rt2.database.prepare('SELECT COUNT(*) AS count FROM product_images WHERE tenant_id = ?').get('tenant_main').count,
+      1
+    );
+
     // 5. Sync conflicts & applyRemoteEntity (with immutable delete guard)
     const conflict = backend2.recordConflict({
       token: token2,

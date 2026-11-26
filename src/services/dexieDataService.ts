@@ -4625,12 +4625,6 @@ export class DexieDataService implements IDataService {
 
         const normalizedTotal = roundMoney(invoice.total);
         const cashPaid = roundMoney(invoice.paidAmount);
-        if (cashPaid > 0 && targetCashBox && roundMoney(targetCashBox.balance) + 0.001 < cashPaid) {
-          throw new FinancialValidationError(
-            `رصيد الصندوق (${targetCashBox.nameAr}: ${roundMoney(targetCashBox.balance)}) غير كافٍ لسداد فاتورة المشتريات بمبلغ ${cashPaid}.`
-          );
-        }
-
         const journalLines: JournalEntryLine[] = [
           {
             id: storage.generateUUID(),

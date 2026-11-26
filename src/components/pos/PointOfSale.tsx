@@ -643,7 +643,7 @@ export const PointOfSale: React.FC<POSProps> = ({
               : 'text-slate-600'
           }`}
         >
-          <span>سلة الفاتورة ({cart.length})</span>
+          <span>السلة والعملاء ({cart.length})</span>
           {cart.length > 0 && (
             <span className="font-mono text-[10px] bg-white/20 px-1.5 py-0.5 rounded-full">
               {total.toFixed(2)}
@@ -658,6 +658,25 @@ export const PointOfSale: React.FC<POSProps> = ({
         <div className={`lg:col-span-7 bg-white rounded-2xl border border-slate-200 flex-col overflow-hidden shadow-sm min-h-0 ${
           mobileTab === 'catalog' ? 'flex flex-1' : 'hidden lg:flex'
         }`}>
+          {/* Mobile shortcut: customer search/create lives in the invoice panel */}
+          <div className="lg:hidden px-3 pt-3">
+            <button
+              type="button"
+              onClick={() => {
+                setMobileTab('cart');
+                setIsCustomerSearchOpen(true);
+              }}
+              className="w-full flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2.5 text-right text-xs text-emerald-900"
+              aria-label="فتح البحث عن العملاء وإضافة عميل جديد"
+            >
+              <span className="flex items-center gap-2 font-bold">
+                <User className="w-4 h-4" />
+                بحث أو إضافة عميل
+              </span>
+              <span className="text-[10px] text-emerald-700">اضغط لفتح العملاء</span>
+            </button>
+          </div>
+
           {/* Search Bar & Barcode Scanner Form */}
           <form onSubmit={handleBarcodeSubmit} className="p-3 sm:p-4 border-b border-slate-200 flex gap-2 bg-white">
             <div className="relative flex-1">

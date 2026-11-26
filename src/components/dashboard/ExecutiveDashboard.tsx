@@ -168,7 +168,7 @@ export const ExecutiveDashboard: React.FC<ExecutiveDashboardProps> = ({
   ];
 
   return (
-    <div className="app-executive-dashboard p-3 sm:p-5 lg:p-7 space-y-5 sm:space-y-7 max-w-[1440px] mx-auto min-w-0">
+    <div className="app-executive-dashboard app-dashboard-simple p-3 sm:p-5 lg:p-7 space-y-5 sm:space-y-7 max-w-[1440px] mx-auto min-w-0">
       <section className="app-dashboard-header flex flex-col sm:flex-row sm:items-end sm:justify-between gap-3 rounded-2xl border border-slate-200 bg-white p-4 sm:p-5 shadow-sm">
         <div className="min-w-0">
           <p className="text-[11px] font-bold tracking-wide text-emerald-700 mb-1">نظام عمرو النماري</p>

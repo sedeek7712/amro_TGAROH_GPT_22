@@ -231,6 +231,7 @@ export function useLiveJournalEntries(costCenterId?: CostCenterId | 'all'): Jour
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'view:accounting')) return [];
       const rows = costCenterId && costCenterId !== 'all'
         ? await db.journalEntries.where('costCenterId').equals(costCenterId).reverse().sortBy('date')
         : await db.journalEntries.toCollection().reverse().sortBy('date');
@@ -329,13 +330,18 @@ export function useLiveUsers(): SystemUser[] {
 }
 
 export function useLiveAuditLogs(currentUser?: SystemUser | null): SystemAuditLog[] {
+  const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'view:audit_logs')) return [];
       const allLogs = await db.auditLogs.toCollection().reverse().sortBy('timestamp');
-      return filterAuditLogsForUser(allLogs, currentUser);
+      const tenantLogs = actor?.tenantId
+        ? allLogs.filter((log) => log.tenantId === actor.tenantId)
+        : [];
+      return filterAuditLogsForUser(tenantLogs, currentUser);
     },
     [],
-    [currentUser?.id, currentUser?.role],
+    [currentUser?.id, currentUser?.role, currentActorKey(actor)],
     async () => {
       const token = desktopSession.getToken();
       const current = desktopSession.getActor();
@@ -349,6 +355,7 @@ export function useLiveOutbox(statusFilter?: OutboxQueueItem['status'] | 'all'):
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'sync:manage')) return [];
       const rows = statusFilter && statusFilter !== 'all'
         ? await db.outbox.where('status').equals(statusFilter).reverse().sortBy('createdAt')
         : await db.outbox.toCollection().reverse().sortBy('createdAt');
@@ -376,6 +383,9 @@ export function useLiveOutboxStats(): {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'sync:manage')) {
+        return { total: 0, pending: 0, syncing: 0, synced: 0, failed: 0 };
+      }
       const allItems = await db.outbox.toArray();
       const items = actor?.tenantId
         ? scopeBranchRows(allItems.filter((row) => row.tenantId === actor.tenantId), actor)
@@ -406,7 +416,7 @@ export function useLiveConflicts(): SyncConflict[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (!actor?.tenantId) return [];
+      if (!hasPermission(actor, 'sync:manage') || !actor?.tenantId) return [];
       const rows = await db.syncConflicts.where('tenantId').equals(actor.tenantId).reverse().sortBy('detectedAt');
       return scopeBranchRows(rows, actor);
     },
@@ -447,6 +457,7 @@ export function useLivePaymentAllocations(partyId?: string, voucherId?: string):
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'vouchers:view') && !hasPermission(actor, 'party:view')) return [];
       let rows: PaymentAllocation[];
       if (voucherId) {
         rows = await db.paymentAllocations.where('voucherId').equals(voucherId).toArray();
@@ -477,6 +488,7 @@ export function useLivePartyAdvances(partyId?: string): PartyAdvanceTransaction[
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!hasPermission(actor, 'party:view') && !hasPermission(actor, 'vouchers:view')) return [];
       const rows = partyId
         ? await db.partyAdvanceTransactions.where('partyId').equals(partyId).toArray()
         : await db.partyAdvanceTransactions.toArray();

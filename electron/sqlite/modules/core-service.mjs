@@ -55,7 +55,8 @@ export function enqueueOutboxTx(database, actor, {
 }) {
   const tenantId = actor?.tenantId || 'tenant_main';
   const resolvedBranchId = branchId || actor?.branchId || 'branch_main';
-  const key = idempotencyKey || `${entityType}:${entityId}:${action}`;
+  const explicitIdempotencyKey = typeof idempotencyKey === 'string' && idempotencyKey.trim().length > 0;
+  const baseKey = explicitIdempotencyKey ? idempotencyKey.trim() : `${entityType}:${entityId}:${action}`;
   const safePayload = payload && typeof payload === 'object' ? { ...payload } : {};
   delete safePayload.passwordHash;
 
@@ -63,39 +64,67 @@ export function enqueueOutboxTx(database, actor, {
     ? [...new Set(dependsOn.map((d) => String(d).trim()).filter(Boolean))]
     : undefined;
 
+  const writePendingUpdate = (existing) => {
+    let existingObj = {};
+    try { existingObj = JSON.parse(existing.data_json); } catch {}
+    const updatedItem = {
+      ...existingObj,
+      id: existing.id,
+      tenantId,
+      branchId: resolvedBranchId,
+      entityType,
+      entityId,
+      action,
+      payload: safePayload,
+      priority: Number.isFinite(priority) ? priority : (existingObj.priority || 3),
+      status: 'PENDING',
+      retryCount: 0,
+      nextRetryAt: undefined,
+      errorMessage: undefined,
+      leaseOwner: undefined,
+      leaseExpiresAt: undefined,
+      ...(cleanDependsOn ? { dependsOn: cleanDependsOn } : {}),
+    };
+    database.prepare(
+      "UPDATE outbox_queue SET branch_id = ?, priority = ?, payload_json = ?, data_json = ?, status = 'PENDING', retry_count = 0, next_retry_at = NULL, lease_owner = NULL, lease_expires_at = NULL WHERE tenant_id = ? AND id = ?"
+    ).run(
+      resolvedBranchId,
+      updatedItem.priority,
+      JSON.stringify(safePayload),
+      JSON.stringify(updatedItem),
+      tenantId,
+      existing.id
+    );
+    return existing.id;
+  };
+
   const existing = database.prepare(
     'SELECT id, status, data_json FROM outbox_queue WHERE tenant_id = ? AND idempotency_key = ?'
-  ).get(tenantId, key);
+  ).get(tenantId, baseKey);
+
   if (existing) {
     if (existing.status !== 'SYNCED') {
-      let existingObj = {};
-      try { existingObj = JSON.parse(existing.data_json); } catch {}
-      const updatedItem = {
-        ...existingObj,
-        id: existing.id,
-        tenantId,
-        branchId: resolvedBranchId,
-        entityType,
-        entityId,
-        action,
-        payload: safePayload,
-        priority: Number.isFinite(priority) ? priority : (existingObj.priority || 3),
-        ...(cleanDependsOn ? { dependsOn: cleanDependsOn } : {}),
-      };
-      database.prepare(
-        'UPDATE outbox_queue SET branch_id = ?, priority = ?, payload_json = ?, data_json = ? WHERE tenant_id = ? AND id = ?'
-      ).run(
-        resolvedBranchId,
-        updatedItem.priority,
-        JSON.stringify(safePayload),
-        JSON.stringify(updatedItem),
-        tenantId,
-        existing.id
-      );
+      if (existing.status === 'SYNCING' && !explicitIdempotencyKey) {
+        // A leased payload may already be in flight; never mutate it under the worker.
+      } else {
+        return writePendingUpdate(existing);
+      }
+    } else if (explicitIdempotencyKey) {
+      // A repeated request ID remains idempotent even after server confirmation.
+      return existing.id;
     }
-    return existing.id;
+
+    if (!explicitIdempotencyKey) {
+      const active = database.prepare(
+        "SELECT id, status, data_json FROM outbox_queue WHERE tenant_id = ? AND entity_type = ? AND entity_id = ? AND action = ? AND status IN ('PENDING','FAILED') ORDER BY created_at DESC LIMIT 1"
+      ).get(tenantId, entityType, entityId, action);
+      if (active) return writePendingUpdate(active);
+    }
   }
 
+  const key = existing && !explicitIdempotencyKey
+    ? `${baseKey}:revision:${randomUUID()}`
+    : baseKey;
   const id = randomUUID();
   const item = {
     id,

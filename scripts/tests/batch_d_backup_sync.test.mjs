@@ -300,6 +300,58 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
       }
     }
 
+    // Regression: a later edit after server ACK must not reuse the old SYNCED outbox row.
+    const revision1 = backend2.queueOutboxItem({
+      token: token2,
+      item: {
+        entityType: 'PRODUCT',
+        entityId: 'outbox-revision-product',
+        action: 'UPDATE',
+        branchId: 'branch_main',
+        payload: { id: 'outbox-revision-product', nameAr: 'نسخة أولى' },
+      },
+    });
+    backend2.markOutboxSynced({ token: token2, id: revision1.id, serverTimestamp: '2026-11-26T01:00:00.000Z' });
+    const revision2 = backend2.queueOutboxItem({
+      token: token2,
+      item: {
+        entityType: 'PRODUCT',
+        entityId: 'outbox-revision-product',
+        action: 'UPDATE',
+        branchId: 'branch_main',
+        payload: { id: 'outbox-revision-product', nameAr: 'نسخة ثانية' },
+      },
+    });
+    assert.notEqual(revision2.id, revision1.id);
+    assert.equal(revision2.status, 'PENDING');
+    const revision3 = backend2.queueOutboxItem({
+      token: token2,
+      item: {
+        entityType: 'PRODUCT',
+        entityId: 'outbox-revision-product',
+        action: 'UPDATE',
+        branchId: 'branch_main',
+        payload: { id: 'outbox-revision-product', nameAr: 'نسخة ثالثة' },
+      },
+    });
+    assert.equal(revision3.id, revision2.id, 'Pending edits should coalesce into the active revision');
+    assert.equal(revision3.payload.nameAr, 'نسخة ثالثة');
+
+    const leasedRevision = backend2.claimReadyToSyncItems({ token: token2, workerId: 'revision-worker', limit: 10 });
+    assert.ok(leasedRevision.some((item) => item.id === revision3.id));
+    const queuedDuringLease = backend2.queueOutboxItem({
+      token: token2,
+      item: {
+        entityType: 'PRODUCT',
+        entityId: 'outbox-revision-product',
+        action: 'UPDATE',
+        branchId: 'branch_main',
+        payload: { id: 'outbox-revision-product', nameAr: 'أثناء الإرسال' },
+      },
+    });
+    assert.notEqual(queuedDuringLease.id, revision3.id, 'SYNCING payload must remain immutable');
+    assert.equal(backend2.getOutboxQueue({ token: token2 }).find((item) => item.id === revision3.id)?.status, 'SYNCING');
+
     const parentItem = backend2.queueOutboxItem({
       token: token2,
       item: {

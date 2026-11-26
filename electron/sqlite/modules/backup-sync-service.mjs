@@ -825,9 +825,7 @@ export function createBackupSyncService(database, backupDirectory) {
           payload: params.payload || {},
           priority: params.priority ?? getDefaultPriority(params.entityType),
           dependsOn: params.dependsOn,
-          idempotencyKey:
-            params.idempotencyKey ||
-            `${actor.tenantId}_${params.entityType}_${params.entityId}_${params.action}`,
+          idempotencyKey: params.idempotencyKey,
           branchId: targetBranchId,
         });
         database.exec('COMMIT');

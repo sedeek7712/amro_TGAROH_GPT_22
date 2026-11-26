@@ -124,32 +124,66 @@ class SyncQueueService {
     }
 
     // مفتاح حتمي ثابت ومستقر: يعتمد على المؤسسة، نوع الكيان، معرّفه الثابت والإجراء
-    const idempotencyKey =
-      params.idempotencyKey ||
-      `${tenantId}_${params.entityType}_${params.entityId}_${params.action}`;
+    const explicitIdempotencyKey = Boolean(params.idempotencyKey?.trim());
+    const baseKey = explicitIdempotencyKey
+      ? params.idempotencyKey!.trim()
+      : `${tenantId}_${params.entityType}_${params.entityId}_${params.action}`;
 
     const saved = await db.transaction('rw', db.outbox, async () => {
+      const updatePending = async (existing: OutboxQueueItem) => {
+        const updated: OutboxQueueItem = {
+          ...existing,
+          payload: params.payload,
+          dependsOn: params.dependsOn && params.dependsOn.length > 0 ? params.dependsOn : existing.dependsOn,
+          priority: params.priority ?? existing.priority,
+          branchId,
+          status: 'PENDING',
+          retryCount: 0,
+          nextRetryAt: undefined,
+          errorMessage: undefined,
+          leaseOwner: undefined,
+          leaseExpiresAt: undefined,
+        };
+        await db.outbox.put(updated);
+        return updated;
+      };
+
       const existing = await db.outbox
         .where('idempotencyKey')
-        .equals(idempotencyKey)
+        .equals(baseKey)
         .filter((i) => i.tenantId === tenantId)
         .first();
 
       if (existing) {
-        if (existing.status !== 'SYNCED') {
-          existing.payload = params.payload;
-          if (params.dependsOn) existing.dependsOn = params.dependsOn;
-          if (params.priority) existing.priority = params.priority;
-          if (params.branchId) existing.branchId = params.branchId;
-          await db.outbox.put(existing);
+        if (existing.status === 'SYNCED') {
+          if (explicitIdempotencyKey) return existing;
+        } else if (existing.status === 'SYNCING') {
+          if (explicitIdempotencyKey) return existing;
+          // Do not mutate a payload that may already be leased by a sync worker.
+        } else {
+          return await updatePending(existing);
         }
-        return existing;
+      }
+
+      if (!explicitIdempotencyKey) {
+        const active = await db.outbox
+          .filter((i) =>
+            i.tenantId === tenantId &&
+            i.entityType === params.entityType &&
+            i.entityId === params.entityId &&
+            i.action === params.action &&
+            (i.status === 'PENDING' || i.status === 'FAILED')
+          )
+          .last();
+        if (active) return await updatePending(active);
       }
 
       const id = storage.generateUUID();
       const createdAt = new Date().toISOString();
-      const priority = params.priority || this.getDefaultPriority(params.entityType);
-
+      const priority = params.priority ?? this.getDefaultPriority(params.entityType);
+      const idempotencyKey = existing && !explicitIdempotencyKey
+        ? `${baseKey}:revision:${id}`
+        : baseKey;
       const item: OutboxQueueItem = {
         id,
         tenantId,

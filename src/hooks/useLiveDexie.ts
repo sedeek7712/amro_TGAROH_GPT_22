@@ -213,7 +213,8 @@ export function useLiveAccounts(): Account[] {
   return useLiveDexie(
     async () => {
       if (!hasPermission(actor, 'view:accounting')) return [];
-      return scopeBranchRows(await db.accounts.toArray(), actor);
+      // Accounts are a tenant-local chart keyed by account code; this legacy Dexie entity has no tenantId/branchId fields.
+      return await db.accounts.toArray();
     },
     [],
     [currentActorKey(actor)],
@@ -251,10 +252,10 @@ export function useLiveParties(type?: PartyType): Party[] {
   return useLiveDexie(
     async () => {
       if (!hasPermission(actor, 'party:view')) return [];
-      const rows = type
+      // Parties are currently tenant-local in Dexie and do not carry tenantId/branchId in the persisted model.
+      return type
         ? await db.parties.where('type').equals(type).toArray()
         : await db.parties.toArray();
-      return scopeBranchRows(rows, actor);
     },
     [],
     [type, currentActorKey(actor)],
@@ -426,10 +427,10 @@ export function useLiveBranches(): Branch[] {
     async () => {
       if (!actor?.active || !actor.tenantId || !hasPermission(actor, 'branches:view')) return [];
       const rows = await db.branches.toArray();
-      const tenantRows = rows.filter((branch) => branch.tenantId === actor.tenantId);
-      if (actor.role === 'ADMIN') return tenantRows;
+      // Branch is also a legacy tenant-local Dexie entity without a tenantId field.
+      if (actor.role === 'ADMIN') return rows;
       const allowed = getAuthorizedBranchIds(actor);
-      return tenantRows.filter((branch) => allowed.has(branch.id));
+      return rows.filter((branch) => allowed.has(branch.id));
     },
     [],
     [currentActorKey(actor)],

@@ -2973,6 +2973,11 @@ export class DexieDataService implements IDataService {
           const accountsByCode = await this.getAccountsByCodeMap();
           validateJournalEntryInput({ entry: returnEntry, accountsByCode });
 
+          if (roundMoney(cashBox!.balance) + 0.001 < effectiveReturn) {
+            throw new FinancialValidationError(
+              `رصيد الصندوق (${cashBox!.nameAr}: ${roundMoney(cashBox!.balance)}) غير كافٍ لرد الأمانة بمبلغ ${effectiveReturn}.`
+            );
+          }
           cashBox!.balance = roundMoney(cashBox!.balance - effectiveReturn);
           await db.cashBoxes.put(cashBox!);
           if (boxAcc) {
@@ -4620,6 +4625,11 @@ export class DexieDataService implements IDataService {
 
         const normalizedTotal = roundMoney(invoice.total);
         const cashPaid = roundMoney(invoice.paidAmount);
+        if (cashPaid > 0 && targetCashBox && roundMoney(targetCashBox.balance) + 0.001 < cashPaid) {
+          throw new FinancialValidationError(
+            `رصيد الصندوق (${targetCashBox.nameAr}: ${roundMoney(targetCashBox.balance)}) غير كافٍ لسداد فاتورة المشتريات بمبلغ ${cashPaid}.`
+          );
+        }
 
         const journalLines: JournalEntryLine[] = [
           {

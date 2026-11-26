@@ -585,7 +585,7 @@ export const PointOfSale: React.FC<POSProps> = ({
       : allActivities.filter((act) => authorizedActivityIds.has(act.id));
 
   return (
-    <div className="p-2.5 sm:p-4 lg:p-6 h-[calc(100dvh-3.5rem)] lg:h-[calc(100dvh-4rem)] min-h-[520px] flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto overflow-hidden relative">
+    <div className="app-pos-workspace p-2.5 sm:p-4 lg:p-6 h-[calc(100dvh-3.5rem)] lg:h-[calc(100dvh-4rem)] min-h-[520px] flex flex-col gap-3 sm:gap-4 max-w-[1600px] mx-auto overflow-hidden relative">
       {/* Activity selector tabs */}
       <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between bg-white p-2.5 sm:p-3 rounded-2xl border border-slate-200 shadow-sm shrink-0 gap-2.5">
         <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar w-full sm:w-auto pb-0.5">

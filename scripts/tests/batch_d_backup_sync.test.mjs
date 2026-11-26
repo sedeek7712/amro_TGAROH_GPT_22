@@ -351,6 +351,8 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     });
     assert.notEqual(queuedDuringLease.id, revision3.id, 'SYNCING payload must remain immutable');
     assert.equal(backend2.getOutboxQueue({ token: token2 }).find((item) => item.id === revision3.id)?.status, 'SYNCING');
+    // Close the isolated test revision so it cannot affect the following dependency-order assertions.
+    backend2.markOutboxSynced({ token: token2, id: queuedDuringLease.id, serverTimestamp: '2026-11-26T01:01:00.000Z' });
 
     const parentItem = backend2.queueOutboxItem({
       token: token2,

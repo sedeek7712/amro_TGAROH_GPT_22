@@ -60,7 +60,9 @@ export function scopeBranchRows<T extends { branchId?: string; tenantId?: string
   if (!actor) return allowUnauthenticated ? records : [];
   const tenantId = actor.tenantId?.trim();
   if (!tenantId) return [];
-  const tenantRows = records.filter((row) => row.tenantId === tenantId);
+  // Core Dexie business tables are legacy tenant-local records and do not all carry tenantId.
+  // Preserve those local rows, but always reject an explicitly different tenant.
+  const tenantRows = records.filter((row) => !row.tenantId || row.tenantId === tenantId);
   return filterRecordsByBranchScope(tenantRows, actor);
 }
 

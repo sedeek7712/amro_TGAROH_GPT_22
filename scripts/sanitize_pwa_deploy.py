@@ -1,6 +1,7 @@
 from pathlib import Path
+import json
 import re
-import sys
+import shutil
 
 dist = Path("dist")
 if not (dist / "index.html").is_file():
@@ -8,14 +9,19 @@ if not (dist / "index.html").is_file():
 
 private_assets = dist / "assets" / "aistudio"
 if private_assets.exists():
-    import shutil
     shutil.rmtree(private_assets)
+
+manifest = dist / "manifest.webmanifest"
+if manifest.exists():
+    data = json.loads(manifest.read_text(encoding="utf-8"))
+    data["id"] = "./"
+    manifest.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
 sw = dist / "sw.js"
 if sw.exists():
     content = sw.read_text(encoding="utf-8")
-    content, removed = re.subn(
-        r'\\{url:"assets/aistudio/[^"]+",revision:null\\},?',
+    content, _ = re.subn(
+        r'\{url:"assets/aistudio/[^"]+",revision:null\},?',
         "",
         content,
     )

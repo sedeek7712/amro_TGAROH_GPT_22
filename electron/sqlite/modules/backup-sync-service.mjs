@@ -653,7 +653,7 @@ export function createBackupSyncService(database, backupDirectory) {
           'SELECT COUNT(*) AS count FROM product_images WHERE tenant_id = ? AND is_deleted = 0'
         ).get(tenantId)?.count || 0);
         const backupProductImageCount = Number(parsed.data.mediaManifest?.productImageCount || 0);
-        if (currentProductImageCount > 0 || backupProductImageCount > 0 || parsed.data.mediaManifest?.mediaIncluded === false && backupProductImageCount > 0) {
+        if (currentProductImageCount > 0 || backupProductImageCount > 0) {
           return {
             success: false,
             error: 'أوقفت استعادة JSON لحماية صور الأصناف: صيغة JSON لا تتضمن ملفات الصور. استخدم النسخة الاحتياطية الأصلية SQLite مع مجلد الصور المرفق (.media)، ثم أعد المحاولة.',

@@ -60,7 +60,7 @@ function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
   if (!actor) return allowUnauthenticated ? records : [];
   const tenantId = actor.tenantId?.trim();
   if (!tenantId) return [];
-  const tenantRows = records.filter((row) => !row.tenantId || row.tenantId === tenantId);
+  const tenantRows = records.filter((row) => row.tenantId === tenantId);
   return filterRecordsByBranchScope(tenantRows, actor);
 }
 
@@ -211,7 +211,10 @@ export function useLiveInvoices(activityId?: CommercialActivityId | 'all'): Invo
 export function useLiveAccounts(): Account[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
-    async () => await db.accounts.toArray(),
+    async () => {
+      if (!hasPermission(actor, 'view:accounting')) return [];
+      return scopeBranchRows(await db.accounts.toArray(), actor);
+    },
     [],
     [currentActorKey(actor)],
     async () => {
@@ -247,10 +250,11 @@ export function useLiveParties(type?: PartyType): Party[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
-      if (type) {
-        return await db.parties.where('type').equals(type).toArray();
-      }
-      return await db.parties.toArray();
+      if (!hasPermission(actor, 'party:view')) return [];
+      const rows = type
+        ? await db.parties.where('type').equals(type).toArray()
+        : await db.parties.toArray();
+      return scopeBranchRows(rows, actor);
     },
     [],
     [type, currentActorKey(actor)],
@@ -420,11 +424,12 @@ export function useLiveBranches(): Branch[] {
   const actor = authService.getCurrentActorSync();
   return useLiveDexie(
     async () => {
+      if (!actor?.active || !actor.tenantId || !hasPermission(actor, 'branches:view')) return [];
       const rows = await db.branches.toArray();
-      if (!actor?.active || !actor.tenantId) return [];
-      if (actor.role === 'ADMIN') return rows;
+      const tenantRows = rows.filter((branch) => branch.tenantId === actor.tenantId);
+      if (actor.role === 'ADMIN') return tenantRows;
       const allowed = getAuthorizedBranchIds(actor);
-      return rows.filter((branch) => allowed.has(branch.id));
+      return tenantRows.filter((branch) => allowed.has(branch.id));
     },
     [],
     [currentActorKey(actor)],

@@ -229,14 +229,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
           />
 
           {/* Drawer content */}
-          <aside className="fixed inset-y-0 right-0 w-72 max-w-[85vw] bg-slate-950 text-slate-200 border-l border-slate-800 shadow-2xl flex flex-col z-50 animate-in slide-in-from-right">
+          <aside className="app-enterprise-sidebar fixed inset-y-0 right-0 w-72 max-w-[85vw] bg-slate-950 text-slate-200 border-l border-slate-800 shadow-2xl flex flex-col z-50 animate-in slide-in-from-right">
             {renderSidebarContent(true)}
           </aside>
         </div>
       )}
 
       {/* 2. Desktop Permanent Sidebar (Hidden on screens < 1024px) */}
-      <aside className="app-desktop-sidebar hidden lg:flex w-72 2xl:w-80 bg-slate-950 text-slate-200 border-l border-slate-800 flex-col shrink-0 app-chrome-only">
+      <aside className="app-desktop-sidebar app-enterprise-sidebar hidden lg:flex w-72 2xl:w-80 bg-slate-950 text-slate-200 border-l border-slate-800 flex-col shrink-0 app-chrome-only">
         {renderSidebarContent(false)}
       </aside>
     </>

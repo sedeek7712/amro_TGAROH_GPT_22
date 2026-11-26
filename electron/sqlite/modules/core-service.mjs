@@ -56,7 +56,11 @@ export function enqueueOutboxTx(database, actor, {
   const tenantId = actor?.tenantId || 'tenant_main';
   const resolvedBranchId = branchId || actor?.branchId || 'branch_main';
   const explicitIdempotencyKey = typeof idempotencyKey === 'string' && idempotencyKey.trim().length > 0;
-  const baseKey = explicitIdempotencyKey ? idempotencyKey.trim() : `${entityType}:${entityId}:${action}`;
+  // Keep the historical desktop key format for existing databases; also read the older direct-service format below.
+  const baseKey = explicitIdempotencyKey
+    ? idempotencyKey.trim()
+    : `${tenantId}_${entityType}_${entityId}_${action}`;
+  const legacyEntityKey = `${entityType}:${entityId}:${action}`;
   const safePayload = payload && typeof payload === 'object' ? { ...payload } : {};
   delete safePayload.passwordHash;
 
@@ -99,8 +103,8 @@ export function enqueueOutboxTx(database, actor, {
   };
 
   const existing = database.prepare(
-    'SELECT id, status, data_json FROM outbox_queue WHERE tenant_id = ? AND idempotency_key = ?'
-  ).get(tenantId, baseKey);
+    'SELECT id, status, data_json FROM outbox_queue WHERE tenant_id = ? AND idempotency_key IN (?, ?) ORDER BY CASE WHEN idempotency_key = ? THEN 0 ELSE 1 END LIMIT 1'
+  ).get(tenantId, baseKey, legacyEntityKey, baseKey);
 
   if (existing) {
     if (existing.status !== 'SYNCED') {

@@ -52,7 +52,7 @@ function currentActorKey(actor: SystemUser | null): string {
     : 'anonymous';
 }
 
-function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
+export function scopeBranchRows<T extends { branchId?: string; tenantId?: string }>(
   records: T[],
   actor: SystemUser | null,
   allowUnauthenticated = false

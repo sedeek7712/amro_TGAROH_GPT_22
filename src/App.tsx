@@ -249,7 +249,7 @@ export default function App() {
   }
 
   return (
-    <div className={`app-shell-root flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none ${isDesktopRuntime ? "app-shell-desktop" : ""}`} dir="rtl">
+    <div className={`app-shell-root app-enterprise-shell flex h-screen w-screen overflow-hidden bg-slate-100 text-slate-900 font-sans antialiased select-none ${isDesktopRuntime ? "app-shell-desktop" : ""}`} dir="rtl">
       {/* Sidebar Navigation (Drawer on Mobile, Fixed on Desktop) */}
       <Sidebar
         activeView={activeView}

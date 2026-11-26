@@ -35,6 +35,7 @@ import assert from 'node:assert/strict';
 
 import { db } from '../db/erpDatabase';
 import { dexieDataService } from '../services/dexieDataService';
+import { FinancialValidationError } from '../services/financialValidation';
 import { authService, hashPassword } from '../services/authService';
 import { getInvoiceRemainingAmount } from '../../electron/sqlite/payment-allocation-engine.mjs';
 import { Product, Party, SystemUser, CashBox, Branch } from '../types/erp';

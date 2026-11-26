@@ -118,12 +118,13 @@ export function enqueueOutboxTx(database, actor, {
       return existing.id;
     }
 
-    if (!explicitIdempotencyKey) {
-      const active = database.prepare(
-        "SELECT id, status, data_json FROM outbox_queue WHERE tenant_id = ? AND entity_type = ? AND entity_id = ? AND action = ? AND status IN ('PENDING','FAILED') ORDER BY created_at DESC LIMIT 1"
-      ).get(tenantId, entityType, entityId, action);
-      if (active) return writePendingUpdate(active);
-    }
+  }
+
+  if (!explicitIdempotencyKey) {
+    const active = database.prepare(
+      "SELECT id, status, data_json FROM outbox_queue WHERE tenant_id = ? AND entity_type = ? AND entity_id = ? AND action = ? AND status IN ('PENDING','FAILED') ORDER BY created_at DESC LIMIT 1"
+    ).get(tenantId, entityType, entityId, action);
+    if (active) return writePendingUpdate(active);
   }
 
   const key = existing && !explicitIdempotencyKey

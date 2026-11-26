@@ -1740,11 +1740,16 @@ export function createFinancialService(database, core) {
           .filter((i) => i.originalInvoiceId === orig.id && i.status !== 'REVERSED');
 
         const returnedByProduct = new Map();
+        const returnedByProductBatch = new Map();
         const returnedByDeductionKey = new Map();
         for (const r of priorReturns) {
           for (const it of r.items || []) {
             const qU = parseScaledInt(it.quantity, QTY_SCALE, 'priorRetItem.qty');
             returnedByProduct.set(it.productId, (returnedByProduct.get(it.productId) || 0n) + qU);
+            if (it.batchNumber) {
+              const itemKey = `${it.productId}::${it.batchNumber}`;
+              returnedByProductBatch.set(itemKey, (returnedByProductBatch.get(itemKey) || 0n) + qU);
+            }
           }
           for (const ded of r.stockDeductionsRecorded || []) {
             const dk = `${ded.productId}::${ded.batchNumber || ''}`;
@@ -1772,7 +1777,7 @@ export function createFinancialService(database, core) {
           const matchingOrigLines = (orig.items || []).filter(
             (it) =>
               it.productId === reqItem.productId &&
-              (!reqItem.batchNumber || !it.batchNumber || it.batchNumber === reqItem.batchNumber)
+              (!reqItem.batchNumber || it.batchNumber === reqItem.batchNumber)
           );
           if (matchingOrigLines.length === 0) {
             throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود ضمن بنود الفاتورة الأصلية.`);
@@ -1782,14 +1787,20 @@ export function createFinancialService(database, core) {
             (s, l) => s + parseScaledInt(l.quantity, QTY_SCALE, 'origLine.qty'),
             0n
           );
-          const alreadyRetUnits = returnedByProduct.get(reqItem.productId) || 0n;
+          const batchKey = `${reqItem.productId}::${reqItem.batchNumber || ''}`;
+          const alreadyRetUnits = reqItem.batchNumber
+            ? (returnedByDeductionKey.get(batchKey) || returnedByProductBatch.get(batchKey) || 0n)
+            : (returnedByProduct.get(reqItem.productId) || 0n);
           const remainingRetUnits = soldQtyUnits - alreadyRetUnits;
           if (reqQtyUnits > remainingRetUnits + 1n) {
             throw new FinancialValidationError(
               `الكمية المطلوب إرجاعها للصنف (${matchingOrigLines[0].productName}) تتجاوز الكمية المتاحة للإرجاع (${unitsToNumber(remainingRetUnits, QTY_SCALE)}).`
             );
           }
-          returnedByProduct.set(reqItem.productId, alreadyRetUnits + reqQtyUnits);
+          returnedByProduct.set(reqItem.productId, (returnedByProduct.get(reqItem.productId) || 0n) + reqQtyUnits);
+          if (reqItem.batchNumber) {
+            returnedByProductBatch.set(batchKey, (returnedByProductBatch.get(batchKey) || 0n) + reqQtyUnits);
+          }
 
           const origLineSumUnits = matchingOrigLines.reduce(
             (s, l) => s + parseScaledInt(l.total ?? 0, MONEY_SCALE, 'origLine.total'),
@@ -1808,7 +1819,7 @@ export function createFinancialService(database, core) {
           const matchingDeductions = (orig.stockDeductionsRecorded || []).filter(
             (d) =>
               d.productId === reqItem.productId &&
-              (!reqItem.batchNumber || !d.batchNumber || d.batchNumber === reqItem.batchNumber)
+              (!reqItem.batchNumber || d.batchNumber === reqItem.batchNumber)
           );
 
           const batches = Array.isArray(product.batches)

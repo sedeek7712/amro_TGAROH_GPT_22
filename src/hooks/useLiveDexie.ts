@@ -338,7 +338,7 @@ export function useLiveAuditLogs(currentUser?: SystemUser | null): SystemAuditLo
       if (!hasPermission(actor, 'view:audit_logs')) return [];
       const allLogs = await db.auditLogs.toCollection().reverse().sortBy('timestamp');
       const tenantLogs = actor?.tenantId
-        ? allLogs.filter((log) => log.tenantId === actor.tenantId)
+        ? allLogs.filter((log) => !log.tenantId || log.tenantId === actor.tenantId)
         : [];
       return filterAuditLogsForUser(tenantLogs, currentUser);
     },

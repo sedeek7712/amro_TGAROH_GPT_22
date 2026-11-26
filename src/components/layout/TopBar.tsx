@@ -101,16 +101,16 @@ export const TopBar: React.FC<TopBarProps> = ({
           <span>{activityLabels[selectedActivity]}</span>
         </span>
 
-        <span
+        <button
+          type="button"
           onClick={() => canAccessSync && setActiveView('sync')}
-          className={`hidden md:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-teal-50 text-teal-800 border border-teal-200 shrink-0 ${
-            canAccessSync ? 'cursor-pointer hover:bg-teal-100' : ''
-          }`}
+          disabled={!canAccessSync}
+          className="hidden md:inline-flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] font-semibold bg-slate-50 text-slate-700 border border-slate-200 shrink-0 disabled:cursor-default hover:bg-slate-100 transition-colors"
           title={canAccessSync ? 'الفرع النشط الحالي - انقر لإدارة الفروع ونقاط البيع' : 'الفرع النشط الحالي'}
         >
-          <Building2 className="w-3 h-3 text-teal-600" />
+          <Building2 className="w-3 h-3 text-slate-500" />
           <span>{activeBranch.nameAr} ({activeBranch.code})</span>
-        </span>
+        </button>
       </div>
 
       {/* Left / End: Actions & Quick Info */}

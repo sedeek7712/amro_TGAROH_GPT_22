@@ -1,0 +1,8 @@
+---
+description: Repository governance, data safety, and accounting invariants for all Cursor work
+alwaysApply: true
+---
+
+Read and follow the root AGENTS.md before any task. It is the canonical policy.
+
+Read relevant docs under docs/ai/ before domain changes. Begin with read-only inspection of branch, working tree, existing implementation, and tests. Never edit main directly. Never delete or mutate user/business data, change financial calculations, alter posted accounting entries, weaken permissions, or change schema/backup/restore behavior without explicit owner approval. Keep diffs minimal. Backend/Electron main must validate sensitive permissions; UI hiding is not authorization. Verify actual storage provider and actual current code instead of assuming all Electron operations are already SQLite-backed. Report exact evidence and tests; do not claim real Windows acceptance from CI build alone.

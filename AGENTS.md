@@ -104,6 +104,7 @@
 
 عند تنفيذ أي مهمة تخص دليل المنتجات أو المتغيرات أو SKU أو العلامات التجارية أو وحدات القياس أو تحويلاتها، اقرأ الملفات الثلاثة كاملة قبل العمل:
 - docs/product/PRODUCT_CATALOG_VARIANTS_SPEC.md
+- docs/product/PRODUCT_CATALOG_VARIANTS_DESIGN.md
 - docs/product/PRODUCT_CATALOG_VARIANTS_PLAN.md
 - docs/product/PRODUCT_CATALOG_VARIANTS_PROGRESS.md
 

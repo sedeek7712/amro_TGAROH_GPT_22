@@ -338,6 +338,14 @@ interface ProductFamily {
   updatedAt: string;
 }
 
+interface Brand {
+  id: string;
+  tenantId: string;
+  nameAr: string;
+  normalizedName: string;
+  isActive: boolean;
+}
+
 interface ProductCatalogMeta {
   id: string;
   tenantId: string;

@@ -73,6 +73,7 @@
 
 قبل أي تعديل متعلق بالمنتجات أو المتغيرات أو SKU أو العلامات التجارية أو وحدات القياس، اقرأ:
 - [مواصفات دليل المنتجات والمتغيرات ووحدات القياس](../product/PRODUCT_CATALOG_VARIANTS_SPEC.md)
+- [التصميم الهندسي وERD والعقود](../product/PRODUCT_CATALOG_VARIANTS_DESIGN.md)
 - [خطة التنفيذ المرحلية](../product/PRODUCT_CATALOG_VARIANTS_PLAN.md)
 - [دفتر التقدم والاستكمال](../product/PRODUCT_CATALOG_VARIANTS_PROGRESS.md)
 

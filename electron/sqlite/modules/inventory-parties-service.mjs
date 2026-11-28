@@ -296,10 +296,19 @@ export function createInventoryPartiesService(database, core = null) {
       database.exec('BEGIN IMMEDIATE');
       try {
         const existed = database.prepare(
-          'SELECT activity_id FROM products WHERE tenant_id = ? AND id = ?'
+          'SELECT activity_id,data_json FROM products WHERE tenant_id = ? AND id = ?'
         ).get(actor.tenantId, id);
         if (existed?.activity_id) {
           assertActivityAccess(actor, existed.activity_id, 'تعديل صنف');
+          const existingProduct = parseRowJson(existed);
+          if (existingProduct.unit !== normalizedInput.unit) {
+            const alternateUnitCount = database.prepare(
+              'SELECT COUNT(*) AS count FROM product_units WHERE tenant_id = ? AND product_id = ?'
+            ).get(actor.tenantId, id).count;
+            if (alternateUnitCount > 0) {
+              throw new Error('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة لهذا الصنف.');
+            }
+          }
         }
         persisted = syncProductAndBatchesTx(database, actor.tenantId, normalizedInput);
         enqueueOutboxTx(database, actor, {

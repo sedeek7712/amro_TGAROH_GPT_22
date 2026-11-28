@@ -19,6 +19,7 @@ import {
   Product,
   ProductBatch,
   ProductUnit,
+  SaveProductUnitInput,
   Party,
   Invoice,
   InvoiceItem,
@@ -986,6 +987,83 @@ export class DexieDataService implements IDataService {
     return filterRecordsByActivityScope([product], actor)[0];
   }
 
+  public async getProductUnits(productId: string): Promise<ProductUnit[]> {
+    await this.ensureReady();
+    const { actor, tenantId } = this.requireAuthorizedActor('inventory:view');
+    const id = String(productId || '').trim();
+    const product = await db.products.get(id);
+    if (!product) throw new Error('الصنف غير موجود أو لا تملك صلاحية الوصول إليه.');
+    assertActivityAccess(actor, product.activityId, 'عرض وحدات الصنف');
+    return await db.productUnits
+      .where('[tenantId+productId]')
+      .equals([tenantId, id])
+      .sortBy('createdAt');
+  }
+
+  public async saveProductUnit(input: SaveProductUnitInput): Promise<ProductUnit> {
+    await this.ensureReady();
+    const { actor, tenantId } = this.requireAuthorizedActor('inventory:write');
+    if (typeof input.productId !== 'string' || typeof input.code !== 'string' || typeof input.nameAr !== 'string') {
+      throw new Error('بيانات الصنف ورمز الوحدة واسمها يجب أن تكون نصوصًا صحيحة.');
+    }
+    const productId = input.productId.trim();
+    const code = input.code.trim();
+    const nameAr = input.nameAr.trim();
+    const numerator = input.baseUnitsNumerator;
+    const denominator = input.baseUnitsDenominator;
+    if (!productId || !code || !nameAr) throw new Error('الصنف ورمز الوحدة واسم الوحدة حقول مطلوبة.');
+    if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) || numerator <= 0 || denominator <= 0) {
+      throw new Error('معامل التحويل يجب أن يتكون من عددين صحيحين موجبين.');
+    }
+    let a = BigInt(numerator);
+    let b = BigInt(denominator);
+    let x = a;
+    let y = b;
+    while (y !== 0n) {
+      const remainder = x % y;
+      x = y;
+      y = remainder;
+    }
+    a /= x;
+    b /= x;
+    if (input.id !== undefined && typeof input.id !== 'string') throw new Error('معرف الوحدة غير صالح.');
+    if (input.barcode !== undefined && typeof input.barcode !== 'string') throw new Error('باركود الوحدة يجب أن يكون نصًا.');
+    if (input.isActive !== undefined && typeof input.isActive !== 'boolean') throw new Error('حالة الوحدة غير صالحة.');
+    const id = String(input.id || '').trim() || storage.generateUUID();
+    const nowIso = new Date().toISOString();
+    const barcode = String(input.barcode || '').trim();
+    return await db.transaction('rw', db.products, db.productUnits, async () => {
+      const product = await db.products.get(productId);
+      if (!product) throw new Error('الصنف غير موجود أو لا تملك صلاحية الوصول إليه.');
+      assertActivityAccess(actor, product.activityId, 'إدارة وحدات الصنف');
+      const existing = await db.productUnits.get(id);
+      if (existing && (existing.tenantId !== tenantId || existing.productId !== productId)) {
+        throw new Error('لا يمكن نقل الوحدة البديلة إلى صنف آخر.');
+      }
+      const duplicate = await db.productUnits
+        .where('[tenantId+productId+code]')
+        .equals([tenantId, productId, code])
+        .first();
+      if (duplicate && duplicate.id !== id) throw new Error('رمز الوحدة مستخدم بالفعل لهذا الصنف.');
+      const unit: ProductUnit = {
+        id,
+        tenantId,
+        productId,
+        code,
+        nameAr,
+        ...(existing?.nameEn ? { nameEn: existing.nameEn } : {}),
+        baseUnitsNumerator: Number(a),
+        baseUnitsDenominator: Number(b),
+        ...(barcode ? { barcode, normalizedBarcode: barcode } : {}),
+        isActive: input.isActive === undefined ? (existing?.isActive ?? true) : input.isActive !== false,
+        createdAt: existing?.createdAt || nowIso,
+        updatedAt: nowIso,
+      };
+      await db.productUnits.put(unit);
+      return unit;
+    });
+  }
+
   public async saveProductAtomic(product: Product, isUpdate = false): Promise<Product> {
     await this.ensureReady();
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
@@ -1008,11 +1086,20 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.products, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
+      [db.products, db.productUnits, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
       async () => {
         const existing = await db.products.get(product.id);
         if (existing?.activityId) {
           assertActivityAccess(actor, existing.activityId, 'تعديل صنف');
+          if (existing.unit !== product.unit) {
+            const alternateUnitCount = await db.productUnits
+              .where('[tenantId+productId]')
+              .equals([tenantId, product.id])
+              .count();
+            if (alternateUnitCount > 0) {
+              throw new Error('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة لهذا الصنف.');
+            }
+          }
         }
         await db.products.put(product);
         await syncQueueService.enqueue({

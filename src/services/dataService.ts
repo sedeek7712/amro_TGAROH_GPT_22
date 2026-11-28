@@ -10,6 +10,8 @@ import {
   CompanyProfile,
   Account,
   Product,
+  ProductUnit,
+  SaveProductUnitInput,
   Party,
   Invoice,
   JournalEntry,
@@ -48,6 +50,8 @@ export interface IDataService {
   // المخزون والأصناف
   getProducts(activityId?: CommercialActivityId): Promise<Product[]>;
   getProductById(id: string): Promise<Product | undefined>;
+  getProductUnits(productId: string): Promise<ProductUnit[]>;
+  saveProductUnit(input: SaveProductUnitInput): Promise<ProductUnit>;
   addProduct(product: Product): Promise<void>;
   updateProduct(product: Product): Promise<void>;
   deleteProduct(productId: string): Promise<void>;

@@ -34,7 +34,7 @@ import { authService } from '../../services/authService';
 import { getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts } from '../../hooks/useLiveDexie';
-import { Product, ProductBatch, ActivityId } from '../../types/erp';
+import { Product, ProductBatch, ProductUnit, ActivityId } from '../../types/erp';
 import { formatLocalDate } from '../../utils/localDate';
 import { ProductMediaManager } from './ProductMediaManager';
 import { ProductPrimaryImage } from './ProductPrimaryImage';
@@ -80,6 +80,12 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [managingImagesProduct, setManagingImagesProduct] = useState<Product | null>(null);
+  const [productUnits, setProductUnits] = useState<ProductUnit[]>([]);
+  const [unitDraft, setUnitDraft] = useState({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
+  const [unitError, setUnitError] = useState<string | null>(null);
+  const [isSavingUnit, setIsSavingUnit] = useState(false);
+  const [isLoadingUnits, setIsLoadingUnits] = useState(false);
+
 
   // حقول نموذج الإضافة والتعديل
   const [formNameAr, setFormNameAr] = useState('');
@@ -175,6 +181,10 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setFormInitialQty('0');
     setFormError(null);
     setEditingProduct(null);
+    setProductUnits([]);
+    setUnitDraft({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
+    setUnitError(null);
+    setIsLoadingUnits(false);
   };
 
   const openAddModal = () => {
@@ -182,7 +192,94 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setIsAddModalOpen(true);
   };
 
+  const loadProductUnits = async (productId: string) => {
+    setUnitError(null);
+    setIsLoadingUnits(true);
+    try {
+      setProductUnits(await dataService.getProductUnits(productId));
+    } catch (err: unknown) {
+      setUnitError(err instanceof Error ? err.message : 'تعذر تحميل الوحدات البديلة.');
+    } finally {
+      setIsLoadingUnits(false);
+    }
+  };
+
+  const handleSaveProductUnit = async () => {
+    if (!editingProduct || isSavingUnit) return;
+    setUnitError(null);
+    if (formUnit !== editingProduct.unit) {
+      setUnitError('احفظ الصنف أولًا، ولا تغيّر وحدة المخزون الأساسية مع وجود وحدات بديلة.');
+      return;
+    }
+    const numerator = Number(unitDraft.numerator);
+    const denominator = Number(unitDraft.denominator);
+    if (!unitDraft.code.trim() || !unitDraft.nameAr.trim()) {
+      setUnitError('أدخل رمز الوحدة واسمها.');
+      return;
+    }
+    if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) || numerator <= 0 || denominator <= 0) {
+      setUnitError('أدخل معامل تحويل صحيحًا موجبًا، مثل 24 إلى 1.');
+      return;
+    }
+    setIsSavingUnit(true);
+    try {
+      await dataService.saveProductUnit({
+        ...(unitDraft.id ? { id: unitDraft.id } : {}),
+        productId: editingProduct.id,
+        code: unitDraft.code.trim(),
+        nameAr: unitDraft.nameAr.trim(),
+        baseUnitsNumerator: numerator,
+        baseUnitsDenominator: denominator,
+        ...(unitDraft.barcode.trim() ? { barcode: unitDraft.barcode.trim() } : {}),
+      });
+      setUnitDraft({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
+      await loadProductUnits(editingProduct.id);
+    } catch (err: unknown) {
+      setUnitError(err instanceof Error ? err.message : 'تعذر حفظ الوحدة البديلة.');
+    } finally {
+      setIsSavingUnit(false);
+    }
+  };
+
+  const startEditProductUnit = (unit: ProductUnit) => {
+    setUnitDraft({
+      id: unit.id,
+      code: unit.code,
+      nameAr: unit.nameAr,
+      numerator: String(unit.baseUnitsNumerator),
+      denominator: String(unit.baseUnitsDenominator),
+      barcode: unit.barcode || '',
+    });
+    setUnitError(null);
+  };
+
+  const handleToggleProductUnit = async (unit: ProductUnit) => {
+    if (isSavingUnit) return;
+    setUnitError(null);
+    setIsSavingUnit(true);
+    try {
+      await dataService.saveProductUnit({
+        id: unit.id,
+        productId: unit.productId,
+        code: unit.code,
+        nameAr: unit.nameAr,
+        baseUnitsNumerator: unit.baseUnitsNumerator,
+        baseUnitsDenominator: unit.baseUnitsDenominator,
+        barcode: unit.barcode,
+        isActive: !unit.isActive,
+      });
+      await loadProductUnits(unit.productId);
+    } catch (err: unknown) {
+      setUnitError(err instanceof Error ? err.message : 'تعذر تحديث حالة الوحدة.');
+    } finally {
+      setIsSavingUnit(false);
+    }
+  };
+
   const openEditModal = (product: Product) => {
+    setProductUnits([]);
+    setUnitDraft({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
+    void loadProductUnits(product.id);
     setEditingProduct(product);
     setFormNameAr(product.nameAr);
     setFormBarcode(product.barcode || '');
@@ -209,6 +306,14 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
     if (!formNameAr.trim()) {
       setFormError('يرجى إدخال اسم الصنف التجاري.');
+      return;
+    }
+    if (editingProduct && isLoadingUnits) {
+      setFormError('انتظر حتى يكتمل تحميل الوحدات البديلة.');
+      return;
+    }
+    if (editingProduct && formUnit !== editingProduct.unit && (productUnits.length > 0 || unitError)) {
+      setFormError('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة. راجع الوحدات أولًا في مرحلة مستقلة.');
       return;
     }
 
@@ -763,6 +868,81 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                 </div>
               </div>
 
+              {/* إدارة الوحدات البديلة — تعريف فقط دون حركة مخزون أو أسعار */}
+              <div className="p-3 rounded-lg border border-indigo-100 bg-indigo-50/40 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div>
+                    <div className="font-bold text-slate-900">الوحدات البديلة</div>
+                    <p className="text-[11px] text-slate-600 mt-1">
+                      وحدة المخزون الأساسية لهذا الصنف هي: <strong>{editingProduct?.unit || formUnit}</strong>. معامل الوحدة البديلة يُحسب بالنسبة إليها.
+                    </p>
+                  </div>
+                  <span className="text-[10px] text-indigo-700 bg-indigo-100 px-2 py-1 rounded">تعريف فقط</span>
+                </div>
+                {!editingProduct ? (
+                  <p className="text-[11px] text-slate-600 bg-white rounded-lg p-2 border border-slate-200">
+                    احفظ الصنف أولًا، ثم افتح «تعديل بيانات الصنف» لإضافة وحداته البديلة. لن يتغير المخزون عند تعريف الوحدة.
+                  </p>
+                ) : (
+                  <>
+                    {unitError && <div className="text-[11px] text-rose-700 bg-rose-50 border border-rose-200 rounded-lg p-2">{unitError}</div>}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-slate-700 mb-1">رمز الوحدة *</label>
+                        <input value={unitDraft.code} onChange={(e) => setUnitDraft((v) => ({ ...v, code: e.target.value }))} placeholder="CARTON" className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white font-mono" />
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 mb-1">اسم الوحدة *</label>
+                        <input value={unitDraft.nameAr} onChange={(e) => setUnitDraft((v) => ({ ...v, nameAr: e.target.value }))} placeholder="كرتون" className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white" />
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 mb-1">عدد وحدات الأساس *</label>
+                        <input type="number" min="1" step="1" value={unitDraft.numerator} onChange={(e) => setUnitDraft((v) => ({ ...v, numerator: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white font-mono" />
+                      </div>
+                      <div>
+                        <label className="block text-slate-700 mb-1">على عدد *</label>
+                        <input type="number" min="1" step="1" value={unitDraft.denominator} onChange={(e) => setUnitDraft((v) => ({ ...v, denominator: e.target.value }))} className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white font-mono" />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="block text-slate-700 mb-1">باركود الوحدة (اختياري)</label>
+                        <input value={unitDraft.barcode} onChange={(e) => setUnitDraft((v) => ({ ...v, barcode: e.target.value }))} placeholder="يُحفظ كنص للمحافظة على الأصفار الأولى" className="w-full px-3 py-2 border border-slate-200 rounded-lg bg-white font-mono" />
+                      </div>
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      {unitDraft.id && <button type="button" onClick={() => setUnitDraft({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' })} className="px-3 py-1.5 border border-slate-200 bg-white rounded-lg text-slate-600">إلغاء التعديل</button>}
+                      <button type="button" disabled={isSavingUnit} onClick={() => void handleSaveProductUnit()} className="px-4 py-1.5 bg-indigo-600 hover:bg-indigo-700 disabled:bg-slate-300 text-white rounded-lg font-bold">
+                        {isSavingUnit ? 'جارٍ الحفظ...' : unitDraft.id ? 'حفظ تعديل الوحدة' : 'إضافة الوحدة'}
+                      </button>
+                    </div>
+                    <div className="space-y-2">
+                      {isLoadingUnits ? (
+                        <p className="text-[11px] text-slate-500 text-center py-2">جارٍ تحميل الوحدات البديلة...</p>
+                      ) : productUnits.length === 0 ? (
+                        <p className="text-[11px] text-slate-500 text-center py-2">لا توجد وحدات بديلة لهذا الصنف.</p>
+                      ) : productUnits.map((unit) => (
+                        <div key={unit.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg p-2">
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <strong className="text-slate-900">{unit.nameAr}</strong>
+                              <span className="font-mono text-[10px] text-slate-500">{unit.code}</span>
+                              <span className={unit.isActive ? 'text-[10px] text-emerald-700' : 'text-[10px] text-slate-500'}>{unit.isActive ? 'نشطة' : 'معطلة'}</span>
+                            </div>
+                            <p className="text-[11px] text-slate-600 mt-1">
+                              {unit.baseUnitsNumerator}/{unit.baseUnitsDenominator} من وحدة الأساس {editingProduct.unit}
+                              {unit.barcode ? <span className="font-mono"> · باركود: {unit.barcode}</span> : null}
+                            </p>
+                          </div>
+                          <div className="flex gap-1 shrink-0">
+                            <button type="button" onClick={() => startEditProductUnit(unit)} className="px-2 py-1 text-[11px] text-indigo-700 bg-indigo-50 rounded">تعديل</button>
+                            <button type="button" disabled={isSavingUnit} onClick={() => void handleToggleProductUnit(unit)} className="px-2 py-1 text-[11px] text-slate-700 bg-slate-100 rounded">{unit.isActive ? 'تعطيل' : 'تفعيل'}</button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+
               {/* حقول تخصصية للصيدلية */}
               {activeTab === 'pharmacy' && (
                 <div className="p-3 bg-emerald-50/50 rounded-lg border border-emerald-100 space-y-3">
@@ -944,11 +1124,11 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || isLoadingUnits}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold rounded-lg transition-colors flex items-center gap-1.5"
                 >
                   <Check className="w-4 h-4" />
-                  <span>{isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الصنف'}</span>
+                  <span>{isLoadingUnits ? 'جارٍ تحميل الوحدات...' : isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الصنف'}</span>
                 </button>
               </div>
             </form>

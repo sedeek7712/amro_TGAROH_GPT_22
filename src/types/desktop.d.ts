@@ -16,6 +16,8 @@ import type {
   PaymentAllocation,
   PaymentVoucher,
   Product,
+  ProductUnit,
+  SaveProductUnitInput,
   ProductImage,
   SyncConflict,
   SystemAuditLog,
@@ -170,6 +172,8 @@ declare global {
 
       getProducts(input: { token: string; activityId?: CommercialActivityId | 'all' }): Promise<Product[]>;
       getProductById(input: { token: string; id: string }): Promise<Product | undefined>;
+      getProductUnits(input: { token: string; productId: string }): Promise<ProductUnit[]>;
+      saveProductUnit(input: { token: string; unit: SaveProductUnitInput }): Promise<ProductUnit>;
       getProductImages(input: { token: string; productId: string }): Promise<ProductImage[]>;
       getProductImageRecord(input: { token: string; imageId: string }): Promise<ProductImage | undefined>;
       getProductImageData(input: { token: string; imageId: string; variant?: 'original' | 'thumbnail' }): Promise<string | null>;

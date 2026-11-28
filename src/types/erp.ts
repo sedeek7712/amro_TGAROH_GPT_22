@@ -129,6 +129,8 @@ export interface ProductUnit {
   updatedAt: string;
 }
 
+export type SaveProductUnitInput = Pick<ProductUnit, 'productId' | 'code' | 'nameAr' | 'baseUnitsNumerator' | 'baseUnitsDenominator'> & Partial<Pick<ProductUnit, 'id' | 'barcode' | 'isActive'>>;
+
 export interface ProductCatalogMeta {
   productId: string;
   tenantId: string;

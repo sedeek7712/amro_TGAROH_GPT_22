@@ -543,6 +543,16 @@ if (!hasSingleInstance) {
       return desktopBackend.getProductById({ token: input?.token, id: input?.id });
     });
 
+    ipcMain.handle('erp:inventory:get-product-units', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductUnits({ token: input?.token, productId: input?.productId });
+    });
+
+    ipcMain.handle('erp:inventory:save-product-unit', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.saveProductUnit({ token: input?.token, unit: input?.unit });
+    });
+
     ipcMain.handle('erp:inventory:get-product-images', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.getProductImages({ token: input?.token, productId: input?.productId });

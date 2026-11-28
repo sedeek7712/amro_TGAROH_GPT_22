@@ -76,3 +76,10 @@
 - **طريقة التنفيذ:** فرع مستقل من أحدث main، وPR للمراجعة، واختبارات اصطناعية لـ SQLite وDexie.
 - **المرجع:** محادثة 2026-11-28؛ الفرع `feat/pvar-004b-2-product-units-ui`؛ PR #33.
 - **حالة القرار:** يسمح بتنفيذ المرحلة المحددة فقط. أي توسيع إلى POS أو المشتريات أو التحويل الفعلي أو مزامنة الوحدات أو الدمج يحتاج موافقة مستقلة.
+
+
+- **نتيجة التنفيذ والتحقق:** اكتمل النطاق البرمجي على HEAD `65262f1a4e503eb92bbb315ec6a084bf98195876` ضمن GitHub Actions run `46098346399` (#213)، واجتازت الوظائف الثلاث كلها: `verify` و`sqlite-electron-runtime` و`windows-exe-preview`.
+- **تفاصيل التحقق:** نجح TypeScript/lint، وفحص حدود DataService، واختبارات node:test بما فيها اختبار Dexie الجديد، واختبارات SQLite desktop backend على Node 22 وNode 24، وبناء الإنتاج، وبناء Windows x64 NSIS.
+- **Artifact Windows:** `amro-windows-exe-shell-preview-c2cd39edc17f05824612afcd63e6b68192e0300a`؛ الحجم `141204916` bytes؛ Artifact ID `15244426363`؛ SHA256 لملف ZIP `5fefeef622e63bfb5eb2399c660d5352c742453dcd8e00b3f1dec299ab03efb2`؛ انتهاء الصلاحية `2026-12-12`.
+- **حدود الدليل:** CI أثبت نجاح البناء والاختبارات ورفع artifact؛ لم يُنفذ تثبيت وتشغيل يدوي على جهاز Windows للمستخدم.
+- **حالة PR النهائية عند التحقق:** #33 مفتوح كـ Draft، `mergeable=true`، `merged=false`؛ لا تغيير في main.

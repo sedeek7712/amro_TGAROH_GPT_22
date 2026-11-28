@@ -65,7 +65,7 @@ export class MultiActivityErpDatabase extends Dexie {
   productImages!: Table<ProductImageLocalAsset, string>;
   brands!: Table<Brand, string>;
   productFamilies!: Table<ProductFamily, string>;
-  productCatalogMeta!: Table<ProductCatalogMeta, string>;
+  productCatalogMeta!: Table<ProductCatalogMeta, [string, string]>;
 
   constructor() {
     super('MultiActivityErpDB');

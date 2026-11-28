@@ -206,8 +206,8 @@ function validateCatalogBackupData(data: Record<string, unknown>): void {
     if (product.tenantId && String(product.tenantId) !== tenantId) {
       throw new Error('الوحدة البديلة لا تطابق مؤسسة الصنف.');
     }
-    if (!Number.isSafeInteger(unit.baseUnitsNumerator) || Number(unit.baseUnitsNumerator) <= 0 ||
-        !Number.isSafeInteger(unit.baseUnitsDenominator) || Number(unit.baseUnitsDenominator) <= 0) {
+    if (typeof unit.baseUnitsNumerator !== 'number' || !Number.isSafeInteger(unit.baseUnitsNumerator) || unit.baseUnitsNumerator <= 0 ||
+        typeof unit.baseUnitsDenominator !== 'number' || !Number.isSafeInteger(unit.baseUnitsDenominator) || unit.baseUnitsDenominator <= 0) {
       throw new Error('معامل تحويل الوحدة البديلة يجب أن يكون عددين صحيحين موجبين.');
     }
     if (unit.barcode !== undefined && typeof unit.barcode !== 'string') {

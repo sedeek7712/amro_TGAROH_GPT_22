@@ -134,7 +134,7 @@
 ### DEC-2026-013 — إصلاح سلامة بيانات Windows المحلية (أكواد المنتجات والتخزين وسجل المستندات)
 
 - **التاريخ:** 2026-11-28
-- **الحالة:** نُفّذ برمجيًا محليًا بانتظار الرفع إلى PR #34 وCI ومراجعة المالك (دون دمج)
+- **الحالة:** نُفذ على `main` في الالتزام `7972dc40ee3750f12661ff4d411fa84ed42244d9`، ونجح CI (3/3)، بانتظار مراجعة المالك والاختبار الميداني على Windows؛ لا يعني ذلك الدمج عبر PR #34.
 - **موافقة المالك:** «موافق بصفتك خبير وفريق تطوير متكاملة» ردًا على طلب اعتماد تنفيذ النطاقات الثلاثة على فرع مستقل، مع ترحيل SQLite آمن دون حذف أو تعديل أي بيانات قديمة تلقائيًا.
 - **النطاق المعتمد:**
   1. **A — أكواد المنتجات:** جعل توليد أكواد منتجات Windows مستندًا إلى SQLite، مع تخصيص ذري ومنع التكرار الجديد، والتحقق من المسار البديل لإنشاء SKU، وحماية الأكواد اليدوية.
@@ -149,5 +149,16 @@
   - نُفذ النطاق **B** عبر `src/services/storageService.ts`، و`src/components/sync/SyncBackupModal.tsx`، و`scripts/verify_data_service_boundary.mjs`.
   - نُفذ النطاق **C** عبر `src/services/documents/notificationLogService.ts` ومواءمة `src/tests/doc_ops_004_closure.test.ts` و`src/tests/doc_ops_compliance.test.ts`.
   - أُضيفت اختبارات `scripts/tests/win_local_data_integrity_scope_a.test.mjs` و`src/tests/win_local_data_integrity_scope_bc.test.ts` وحُدّث توقع النسخة في `scripts/tests/pvar_008_units_ops.test.mjs`.
-  - **حالة Git وCI وWindows:** لا يتوفر مجلد `.git` أو بيانات اعتماد GitHub في حاوية البيئة الحالية؛ لذلك لم يُرفع التزام بعد إلى PR #34، ولم يُشغّل GitHub Actions CI أو `build:windows:preview` أو اختبار Windows الفعلي حتى الآن. التفاصيل الكاملة ومخرجات التحقق مسجلة في `docs/ai/work-orders/WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md`.
+  - **حالة Git وCI وWindows وقت إعداد الملاحظة المحلية:** لا يتوفر مجلد `.git` أو بيانات اعتماد GitHub في حاوية البيئة الحالية؛ لذلك لم يُرفع التزام بعد إلى PR #34، ولم يُشغّل GitHub Actions CI أو `build:windows:preview` أو اختبار Windows الفعلي حتى الآن. التفاصيل الكاملة ومخرجات التحقق مسجلة في `docs/ai/work-orders/WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md`.
+
+
+#### تحديث تحقق GitHub — 2026-11-28
+
+- **main:** الالتزام الذي يحتوي تنفيذ A/B/C هو [7972dc40ee3750f12661ff4d411fa84ed42244d9](https://github.com/sedeek7712/amro_TGAROH_GPT_22/commit/7972dc40ee3750f12661ff4d411fa84ed42244d9).
+- **طريقة التسليم:** وصل التنفيذ إلى main مباشرة دون PR مدمج، خلافًا لقاعدة الفرع وPR. نثبت ذلك كسجل واقعي ولا نعتبره موافقة على تكراره.
+- **CI:** [run 46122561382](https://github.com/sedeek7712/amro_TGAROH_GPT_22/actions/runs/46122561382)؛ الوظائف verify وsqlite-electron-runtime وwindows-exe-preview كلها ناجحة (3/3).
+- **Artifact:** حزمة Windows التجريبية رُفعت بنجاح، وانتهاؤها المسجل 2026-12-12 07:46:22 UTC. هذا بناء CI وليس اختبارًا ميدانيًا.
+- **PR #34:** [مفتوح كمسودة وغير مدمج](https://github.com/sedeek7712/amro_TGAROH_GPT_22/pull/34)، وفرعه قديم وغير قابل للدمج حاليًا. حُدّث عنوانه ووصفه لتصحيح الحالة؛ لم يُغلق ولم يُدمج.
+- **PR #35:** [مسودة توثيقية مستقلة](https://github.com/sedeek7712/amro_TGAROH_GPT_22/pull/35) لتصحيح ACTIVE_WORK_ORDER وأمر العمل وسجل القرار؛ لا تحتوي تغييرات تطبيقية.
+- **البوابة المتبقية:** مراجعة المالك واختبار التثبيت والتشغيل والاحتفاظ بالبيانات والتحديث على Windows حقيقي.
 

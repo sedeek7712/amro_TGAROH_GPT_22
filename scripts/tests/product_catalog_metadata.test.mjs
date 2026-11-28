@@ -79,7 +79,8 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
     assert.equal(legacyProduct.current_stock_decimal, '12.5000');
     assert.equal(legacyProduct.code, 'CAT-A');
     const migratedLegacy = database.prepare('SELECT code, current_stock_decimal FROM products WHERE tenant_id=? AND id=?').get('tenant_main', 'legacy-sku');
-    assert.deepEqual(migratedLegacy, { code: 'LEGACY-001', current_stock_decimal: '9.7500' });
+    assert.equal(migratedLegacy.code, 'LEGACY-001');
+    assert.equal(migratedLegacy.current_stock_decimal, '9.7500');
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM product_catalog_meta').get().count, 2);
     assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
     assert.deepEqual(database.prepare('PRAGMA integrity_check').all(), [{ integrity_check: 'ok' }]);

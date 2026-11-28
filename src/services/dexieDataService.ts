@@ -1086,11 +1086,20 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.products, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
+      [db.products, db.productUnits, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
       async () => {
         const existing = await db.products.get(product.id);
         if (existing?.activityId) {
           assertActivityAccess(actor, existing.activityId, 'تعديل صنف');
+          if (existing.unit !== product.unit) {
+            const alternateUnitCount = await db.productUnits
+              .where('[tenantId+productId]')
+              .equals([tenantId, product.id])
+              .count();
+            if (alternateUnitCount > 0) {
+              throw new Error('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة لهذا الصنف.');
+            }
+          }
         }
         await db.products.put(product);
         await syncQueueService.enqueue({

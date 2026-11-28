@@ -37,6 +37,9 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
     database.prepare(
       'INSERT INTO activities (tenant_id,id,code,data_json) VALUES (?,?,?,?)'
     ).run('tenant_main', 'catalog_test_activity', 'CATALOG_TEST', JSON.stringify({ id: 'catalog_test_activity' }));
+    database.prepare(
+      'INSERT INTO activities (tenant_id,id,code,data_json) VALUES (?,?,?,?)'
+    ).run('tenant_main', 'catalog_other_activity', 'CATALOG_OTHER', JSON.stringify({ id: 'catalog_other_activity' }));
 
     const insertProduct = database.prepare(
       'INSERT INTO products (tenant_id,id,activity_id,code,barcode,category,current_stock_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)'
@@ -44,6 +47,7 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
     insertProduct.run('tenant_main', 'catalog-sku-a', 'catalog_test_activity', 'CAT-A', 'CAT-BAR-A', 'ملابس', '12.5000', JSON.stringify({ id: 'catalog-sku-a' }));
     insertProduct.run('tenant_main', 'catalog-sku-b', 'catalog_test_activity', 'CAT-B', 'CAT-BAR-B', 'ملابس', '7.2500', JSON.stringify({ id: 'catalog-sku-b' }));
     insertProduct.run('tenant_main', 'catalog-sku-c', 'catalog_test_activity', 'CAT-C', 'CAT-BAR-C', 'ملابس', '0.0000', JSON.stringify({ id: 'catalog-sku-c' }));
+    insertProduct.run('tenant_main', 'catalog-sku-d', 'catalog_other_activity', 'CAT-D', 'CAT-BAR-D', 'قطع غيار', '0.0000', JSON.stringify({ id: 'catalog-sku-d' }));
 
     database.prepare(
       'INSERT INTO brands (tenant_id,id,name_ar,normalized_name,is_active,data_json) VALUES (?,?,?,?,?,?)'
@@ -68,6 +72,10 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
     assert.throws(() => database.prepare(
       'INSERT INTO product_catalog_meta (tenant_id,product_id,family_id,brand_id,variant_key,variant_attributes_json,data_json) VALUES (?,?,?,?,?,?,?)'
     ).run('tenant_main', 'catalog-sku-c', 'family-test', null, 'size=m', JSON.stringify({ size: 'M' }), '{}'));
+
+    assert.throws(() => database.prepare(
+      'INSERT INTO product_catalog_meta (tenant_id,product_id,family_id,brand_id,variant_key,variant_attributes_json,data_json) VALUES (?,?,?,?,?,?,?)'
+    ).run('tenant_main', 'catalog-sku-d', 'family-test', null, 'size=xl', JSON.stringify({ size: 'XL' }), '{}'), /activity/);
 
     assert.throws(() => database.prepare(
       'INSERT INTO brands (tenant_id,id,name_ar,normalized_name,is_active,data_json) VALUES (?,?,?,?,?,?)'

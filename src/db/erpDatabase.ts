@@ -211,7 +211,7 @@ export class MultiActivityErpDatabase extends Dexie {
 
     // Schema v9: alternate units only; no backfill and no operational side effects.
     this.version(9).stores({
-      productUnits: 'id, tenantId, productId, code, isActive, [tenantId+productId], [tenantId+normalizedBarcode]',
+      productUnits: 'id, tenantId, productId, code, isActive, [tenantId+productId], &[tenantId+productId+code], [tenantId+normalizedBarcode]',
     });
   }
 }

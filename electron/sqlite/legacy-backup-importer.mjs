@@ -450,8 +450,17 @@ export function insertRows(database, data, options = {}) {
   }
 
   for (const row of data.productFamilies || []) {
-    if (!Array.isArray(row.optionSchema)) throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
-    validateCatalogVariantAttributes(row.optionSchema, {});
+    if (!Array.isArray(row.optionSchema) || !row.optionSchema.every(isObject)) {
+      throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
+    }
+    const optionKeys = new Set();
+    for (const option of row.optionSchema) {
+      const key = requiredString(option.key, 'productFamily.option.key');
+      if (optionKeys.has(key) || !Array.isArray(option.values) || option.values.length === 0) {
+        throw new Error('مخطط خيارات مجموعة المنتج يحتوي تعريفاً مكرراً أو بلا قيم.');
+      }
+      optionKeys.add(key);
+    }
     run(
       'INSERT INTO product_families (tenant_id,id,activity_id,name_ar,category_snapshot,brand_id,option_schema_json,is_active,created_at,updated_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
       [tenantIdOf(row), requiredString(row.id,'productFamily.id'), requiredString(row.activityId,'productFamily.activityId'),

@@ -64,13 +64,25 @@ export function createProductUnitsService(database) {
       assertPermission(actor, 'inventory:write', 'إدارة وحدات الصنف');
       if (!input || typeof input !== 'object') throw new Error('بيانات الوحدة البديلة غير صالحة.');
 
-      const productId = String(input.productId || '').trim();
-      const code = String(input.code || '').trim();
-      const nameAr = String(input.nameAr || '').trim();
+      if (typeof input.productId !== 'string' || typeof input.code !== 'string' || typeof input.nameAr !== 'string') {
+        throw new Error('بيانات الصنف ورمز الوحدة واسمها يجب أن تكون نصوصًا صحيحة.');
+      }
+      const productId = input.productId.trim();
+      const code = input.code.trim();
+      const nameAr = input.nameAr.trim();
       if (!productId || !code || !nameAr) {
         throw new Error('الصنف ورمز الوحدة واسم الوحدة حقول مطلوبة.');
       }
-      const ratio = normalizeRatio(Number(input.baseUnitsNumerator), Number(input.baseUnitsDenominator));
+      const ratio = normalizeRatio(input.baseUnitsNumerator, input.baseUnitsDenominator);
+      if (input.barcode !== undefined && input.barcode !== null && typeof input.barcode !== 'string') {
+        throw new Error('باركود الوحدة يجب أن يكون نصًا.');
+      }
+      if (input.id !== undefined && typeof input.id !== 'string') {
+        throw new Error('معرف الوحدة غير صالح.');
+      }
+      if (input.isActive !== undefined && typeof input.isActive !== 'boolean') {
+        throw new Error('حالة الوحدة غير صالحة.');
+      }
       const barcode = String(input.barcode || '').trim();
       const id = String(input.id || '').trim() || randomUUID();
       const nowIso = new Date().toISOString();

@@ -38,6 +38,32 @@ function safeJson(value) {
   return JSON.stringify(value);
 }
 
+function validateCatalogVariantAttributes(optionSchema, attributes) {
+  if (!Array.isArray(optionSchema) || !isObject(attributes)) {
+    throw new Error('مخطط خيارات مجموعة المنتج أو خصائص المتغير غير صالح.');
+  }
+  const allowedKeys = new Set();
+  for (const option of optionSchema) {
+    if (!isObject(option)) throw new Error('يوجد خيار غير صالح في مجموعة المنتج.');
+    const key = requiredString(option.key, 'productFamily.option.key');
+    const values = Array.isArray(option.values) ? option.values.map(String) : [];
+    if (allowedKeys.has(key) || values.length === 0) {
+      throw new Error('مخطط خيارات مجموعة المنتج يحتوي تعريفاً مكرراً أو بلا قيم.');
+    }
+    allowedKeys.add(key);
+    const value = attributes[key];
+    if (option.required === true && (typeof value !== 'string' || !value.trim())) {
+      throw new Error('قيمة خيار مطلوبة مفقودة في متغير SKU: ' + key);
+    }
+    if (value !== undefined && (typeof value !== 'string' || !values.includes(value))) {
+      throw new Error('قيمة متغير SKU غير موجودة ضمن خيارات المجموعة: ' + key);
+    }
+  }
+  if (Object.keys(attributes).some((key) => !allowedKeys.has(key))) {
+    throw new Error('متغير SKU يحتوي خياراً غير معرّف في المجموعة.');
+  }
+}
+
 function stripPasswordHash(user) {
   const copy = { ...user };
   delete copy.passwordHash;
@@ -424,23 +450,43 @@ export function insertRows(database, data, options = {}) {
   }
 
   for (const row of data.productFamilies || []) {
+    if (!Array.isArray(row.optionSchema)) throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
+    validateCatalogVariantAttributes(row.optionSchema, {});
     run(
       'INSERT INTO product_families (tenant_id,id,activity_id,name_ar,category_snapshot,brand_id,option_schema_json,is_active,created_at,updated_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
       [tenantIdOf(row), requiredString(row.id,'productFamily.id'), requiredString(row.activityId,'productFamily.activityId'),
        requiredString(row.nameAr,'productFamily.nameAr'), String(row.categorySnapshot || ''), row.brandId || null,
-       safeJson(Array.isArray(row.optionSchema) ? row.optionSchema : []), boolInt(row.isActive),
+       safeJson(row.optionSchema), boolInt(row.isActive),
        requiredString(row.createdAt,'productFamily.createdAt'), requiredString(row.updatedAt,'productFamily.updatedAt'), safeJson(row)]
     );
   }
 
   for (const row of data.productCatalogMeta || []) {
+    const tenantId = tenantIdOf(row);
+    const productId = requiredString(row.productId,'productCatalogMeta.productId');
     const familyId = row.familyId || null;
     const brandId = row.brandId || null;
     const variantKey = row.variantKey || null;
+    const attributes = row.variantAttributes || {};
+    if (familyId) {
+      const product = data.products.find((item) => tenantIdOf(item) === tenantId && String(item.id) === productId);
+      const family = (data.productFamilies || []).find((item) => tenantIdOf(item) === tenantId && String(item.id) === String(familyId));
+      if (!product || !family || brandId || !variantKey) {
+        throw new Error('بيانات ربط SKU بمجموعة المنتج غير مكتملة.');
+      }
+      if (String(product.activityId) !== String(family.activityId)) {
+        throw new Error('نشاط الصنف لا يطابق نشاط مجموعة المنتج.');
+      }
+      validateCatalogVariantAttributes(family.optionSchema, attributes);
+    } else {
+      if (!brandId || variantKey || !isObject(attributes) || Object.keys(attributes).length > 0) {
+        throw new Error('بيانات العلامة التجارية للمنتج المستقل غير صالحة.');
+      }
+    }
     run(
       'INSERT INTO product_catalog_meta (tenant_id,product_id,family_id,brand_id,variant_key,variant_attributes_json,data_json) VALUES (?,?,?,?,?,?,?)',
-      [tenantIdOf(row), requiredString(row.productId,'productCatalogMeta.productId'), familyId, brandId, variantKey,
-       safeJson(row.variantAttributes || {}), safeJson(row)]
+      [tenantId, productId, familyId, brandId, variantKey,
+       safeJson(attributes), safeJson(row)]
     );
   }
 

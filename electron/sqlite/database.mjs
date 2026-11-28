@@ -177,6 +177,24 @@ export function verifySqliteFile(filePath, migrationsDirectory = DEFAULT_MIGRATI
       }
     }
 
+    const hasV7ProductCodeIntegrity = migrationFiles.some(
+      (m) => m.filename === '007_product_code_integrity.sql'
+    );
+    if (schemaVersion >= 7 && hasV7ProductCodeIntegrity) {
+      const hasIdx = candidateDb.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_products_tenant_normalized_code'"
+      ).get();
+      const hasInsTrg = candidateDb.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_products_prevent_duplicate_code_insert'"
+      ).get();
+      const hasUpdTrg = candidateDb.prepare(
+        "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='trg_products_prevent_duplicate_code_update'"
+      ).get();
+      if (!hasIdx || !hasInsTrg || !hasUpdTrg) {
+        throw new Error('النسخة الاحتياطية تفتقر إلى فهرس/قيود سلامة أكواد المنتجات (v7).');
+      }
+    }
+
     const counts = tableCounts(candidateDb);
     return {
       valid: true,

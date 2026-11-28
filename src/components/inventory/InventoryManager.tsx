@@ -470,7 +470,8 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
         const newProduct: Product = {
           id: newProductId,
-          code: inventory.generateProductCode(activeTab),
+          code: isDesktop ? '' : inventory.generateProductCode(activeTab),
+          ...(isDesktop ? { autoGenerateCode: true } : {}),
           activityId: activeTab,
           barcode: formBarcode.trim() || undefined,
           nameAr: formNameAr.trim(),

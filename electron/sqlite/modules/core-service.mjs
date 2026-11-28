@@ -715,7 +715,7 @@ export function createCoreService(database) {
         database.prepare('DELETE FROM amanat_records WHERE tenant_id = ?').run(actor.tenantId);
         database.prepare('DELETE FROM outbox_queue WHERE tenant_id = ?').run(actor.tenantId);
         database.prepare('DELETE FROM sync_conflicts WHERE tenant_id = ?').run(actor.tenantId);
-        database.prepare('DELETE FROM document_sequences WHERE tenant_id = ?').run(actor.tenantId);
+        database.prepare("DELETE FROM document_sequences WHERE tenant_id = ? AND sequence_key NOT LIKE 'PRODUCT_CODE:%'").run(actor.tenantId);
 
         const accRows = database.prepare('SELECT code, data_json FROM accounts WHERE tenant_id = ?').all(actor.tenantId);
         const updAcc = database.prepare('UPDATE accounts SET balance_decimal = ?, data_json = ? WHERE tenant_id = ? AND code = ?');

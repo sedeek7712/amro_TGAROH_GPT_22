@@ -206,7 +206,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
     };
   }, [isDesktop, refreshDesktopBackupData]);
 
-  const sqlScript = showSqlViewer ? storage.exportPostgreSqlSchemaAndData() : '';
+  const sqlScript = !isDesktop && showSqlViewer ? storage.exportPostgreSqlSchemaAndData() : '';
 
   const handleSyncAllDjango = async () => {
     setIsSyncingDjango(true);
@@ -2171,14 +2171,16 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
                 <Server className="w-5 h-5 text-amber-600" />
                 <span>إعدادات خادم Django REST Framework</span>
               </div>
-              <button
-                type="button"
-                onClick={() => setShowSqlViewer(!showSqlViewer)}
-                className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors border border-slate-200"
-              >
-                <FileCode className="w-3.5 h-3.5 text-amber-600" />
-                <span>استعراض سكريبت Django DDL</span>
-              </button>
+              {!isDesktop && (
+                <button
+                  type="button"
+                  onClick={() => setShowSqlViewer(!showSqlViewer)}
+                  className="px-3 py-1 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-lg text-xs font-bold flex items-center gap-1.5 transition-colors border border-slate-200"
+                >
+                  <FileCode className="w-3.5 h-3.5 text-amber-600" />
+                  <span>استعراض سكريبت Django DDL</span>
+                </button>
+              )}
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
@@ -2317,7 +2319,7 @@ export const SyncBackupModal: React.FC<SyncBackupModalProps> = ({ onRefresh }) =
       )}
 
       {/* Django SQL Viewer Modal */}
-      {showSqlViewer && (
+      {!isDesktop && showSqlViewer && (
         <div className="fixed inset-0 z-50 bg-slate-900/80 backdrop-blur-xs flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl max-w-4xl w-full max-h-[85vh] flex flex-col shadow-2xl border border-slate-200 overflow-hidden">
             <div className="p-4 bg-slate-900 text-white flex items-center justify-between">

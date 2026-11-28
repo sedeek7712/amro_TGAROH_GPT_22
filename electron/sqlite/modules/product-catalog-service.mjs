@@ -6,6 +6,7 @@ import {
 } from '../rbac.mjs';
 import { parseRowJson, writeAuditLogTx } from './core-service.mjs';
 import {
+  allocateProductCodeTx,
   createInventoryPartiesService,
   persistProductWithinTx,
   validateAndNormalizeProductInput,
@@ -485,6 +486,8 @@ export function createProductCatalogService(database, core = null) {
         );
 
         const createdEntries = [];
+        let familySeedBase = null;
+        let variantCodeCounter = 0;
         for (const skuInput of input.skus) {
           if (!skuInput || !skuInput.product || typeof skuInput.product !== 'object') {
             throw new Error('بيانات أحد المتغيرات (SKU) غير صالحة.');
@@ -511,6 +514,21 @@ export function createProductCatalogService(database, core = null) {
             throw new Error(`معرّف الصنف (${normalizedProduct.id}) مكرر أو موجود مسبقاً.`);
           }
           seenProductIds.add(normalizedProduct.id);
+
+          if (normalizedProduct._autoGenerateCode && !normalizedProduct.code) {
+            if (!familySeedBase) {
+              familySeedBase = allocateProductCodeTx(database, actor.tenantId, activityId, nowIso);
+            }
+            let candidate = '';
+            do {
+              variantCodeCounter += 1;
+              candidate = `${familySeedBase}-V${String(variantCodeCounter).padStart(2, '0')}`;
+            } while (
+              seenCodes.has(candidate.toLowerCase()) ||
+              checkExistingCode.get(actor.tenantId, candidate.toLowerCase())
+            );
+            normalizedProduct.code = candidate;
+          }
 
           const normalizedCodeKey = normalizedProduct.code.toLowerCase();
           if (seenCodes.has(normalizedCodeKey) || checkExistingCode.get(actor.tenantId, normalizedCodeKey)) {

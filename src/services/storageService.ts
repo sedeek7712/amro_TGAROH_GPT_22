@@ -221,7 +221,11 @@ const LEGACY_STORAGE_KEYS = {
   ACTIVE_BRANCH_ID: 'alharaj_erp_active_branch_id',
 };
 
-class StorageService {
+function isDesktopElectronRuntime(): boolean {
+  return typeof window !== 'undefined' && Boolean((window as Window).amroDesktop);
+}
+
+export class StorageService {
   private isInitialized = false;
   private memoryFallback = new Map<string, string>();
 
@@ -264,6 +268,7 @@ class StorageService {
   // ترحيل البيانات من المفاتيح السابقة دون حذف المفاتيح القديمة إطلاقاً
   public migrateLegacyLocalStorage(): { migrated: boolean; keysMigrated: string[] } {
     const keysMigrated: string[] = [];
+    if (isDesktopElectronRuntime()) return { migrated: false, keysMigrated };
     if (typeof localStorage === 'undefined') return { migrated: false, keysMigrated };
 
     for (const [keyName, newStorageKey] of Object.entries(STORAGE_KEYS)) {
@@ -288,6 +293,7 @@ class StorageService {
   public initialize(): void {
     if (this.isInitialized) return;
     this.isInitialized = true;
+    if (isDesktopElectronRuntime()) return;
 
     requestPersistentStorage();
     this.migrateLegacyLocalStorage();

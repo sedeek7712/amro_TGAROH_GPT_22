@@ -51,6 +51,7 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
   onSaved,
   onBrandsChanged,
 }) => {
+  const isDesktop = typeof window !== 'undefined' && Boolean(window.amroDesktop);
   const [nameAr, setNameAr] = useState('');
   const [categorySnapshot, setCategorySnapshot] = useState('');
   const [brandId, setBrandId] = useState('');
@@ -245,6 +246,7 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
                 batchNumber: defaultBatch,
                 expiryDate: defaultExpiry,
               },
+              existingCodes: existingCodes ?? [],
             });
 
       if (skuDrafts.length === 0) {
@@ -285,16 +287,22 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
         categorySnapshot: categorySnapshot.trim(),
         ...(brandId ? { brandId } : {}),
         optionSchema: schema,
-        skus: selectedDrafts.map((draft) => ({
-          product: buildSkuProductPayload({
+        skus: selectedDrafts.map((draft) => {
+          const payload = buildSkuProductPayload({
             draft,
             activityId,
             categorySnapshot: categorySnapshot.trim(),
             generateId: () => storage.generateUUID(),
             specializedDefaults,
-          }),
-          variantAttributes: draft.variantAttributes,
-        })),
+          });
+          const useAtomicAutoCode = isDesktop && !draft.codeManuallyEdited;
+          return {
+            product: useAtomicAutoCode
+              ? { ...payload, code: '', autoGenerateCode: true }
+              : payload,
+            variantAttributes: draft.variantAttributes,
+          };
+        }),
       });
       onSaved();
       onClose();
@@ -922,7 +930,9 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
                                     const val = e.target.value;
                                     setSkuDrafts((prev) =>
                                       prev.map((d) =>
-                                        d.tempId === row.tempId ? { ...d, code: val } : d
+                                        d.tempId === row.tempId
+                                          ? { ...d, code: val, codeManuallyEdited: true }
+                                          : d
                                       )
                                     );
                                   }}

@@ -27,6 +27,66 @@ import {
 
 const VALID_PARTY_TYPES = new Set(['CUSTOMER', 'SUPPLIER']);
 
+const PRODUCT_CODE_PREFIXES = {
+  pharmacy: 'MED',
+  grocery: 'FOD',
+  bike_parts: 'MBK',
+  equipment_parts: 'EQP',
+};
+
+export function getProductCodePrefix(activityId) {
+  return PRODUCT_CODE_PREFIXES[String(activityId || '').trim()] || 'ITM';
+}
+
+export function allocateProductCodeTx(database, tenantId, activityId, nowIso = new Date().toISOString()) {
+  const cleanActivityId = String(activityId || '').trim();
+  const prefix = getProductCodePrefix(cleanActivityId);
+  const sequenceKey = `PRODUCT_CODE:${tenantId}:${cleanActivityId}`;
+
+  const existingSeqRow = database.prepare(
+    'SELECT last_seq FROM document_sequences WHERE tenant_id = ? AND sequence_key = ?'
+  ).get(tenantId, sequenceKey);
+
+  let baseSeq;
+  if (existingSeqRow) {
+    baseSeq = Number(existingSeqRow.last_seq) || 0;
+  } else {
+    const pattern = new RegExp(`^${prefix}-(\\d+)$`, 'i');
+    const rows = database.prepare(
+      'SELECT code FROM products WHERE tenant_id = ? AND activity_id = ?'
+    ).all(tenantId, cleanActivityId);
+    let maxExisting = 0;
+    for (const row of rows) {
+      const m = String(row.code || '').trim().match(pattern);
+      if (m) {
+        const parsed = Number.parseInt(m[1], 10);
+        if (Number.isSafeInteger(parsed) && parsed > maxExisting) {
+          maxExisting = parsed;
+        }
+      }
+    }
+    baseSeq = maxExisting;
+  }
+
+  let nextSeq = baseSeq + 1;
+  const checkCodeStmt = database.prepare(
+    'SELECT 1 AS found FROM products WHERE tenant_id = ? AND LOWER(TRIM(code)) = ? LIMIT 1'
+  );
+  let candidate = `${prefix}-${String(nextSeq).padStart(4, '0')}`;
+  while (checkCodeStmt.get(tenantId, candidate.toLowerCase())) {
+    nextSeq += 1;
+    candidate = `${prefix}-${String(nextSeq).padStart(4, '0')}`;
+  }
+
+  database.prepare(
+    `INSERT INTO document_sequences (tenant_id,sequence_key,last_seq,updated_at)
+     VALUES (?,?,?,?)
+     ON CONFLICT(tenant_id,sequence_key) DO UPDATE SET last_seq = excluded.last_seq, updated_at = excluded.updated_at`
+  ).run(tenantId, sequenceKey, nextSeq, nowIso);
+
+  return candidate;
+}
+
 function normalizeBatch(batch, productId, defaultCostPrice, tenantId) {
   const qtyUnits = parseScaledInt(batch.quantity ?? 0, QTY_SCALE, 'batch.quantity');
   if (qtyUnits < 0n) {
@@ -128,8 +188,9 @@ export function syncProductAndBatchesTx(database, tenantId, product) {
   if (purchaseUnits < 0n) {
     throw new Error('سعر الشراء لا يجوز أن يكون سالباً.');
   }
+  const { autoGenerateCode: _dropAutoFlag, _autoGenerateCode: _dropInternalAutoFlag, ...cleanProduct } = product;
   const persistedProduct = {
-    ...product,
+    ...cleanProduct,
     tenantId,
     currentStock: unitsToNumber(stockUnits, QTY_SCALE),
     purchasePrice: unitsToNumber(purchaseUnits, QTY_SCALE),
@@ -139,26 +200,45 @@ export function syncProductAndBatchesTx(database, tenantId, product) {
     batches: publicBatches,
   };
 
-  database.prepare(
-    `INSERT INTO products (tenant_id,id,activity_id,code,barcode,category,current_stock_decimal,data_json)
-     VALUES (?,?,?,?,?,?,?,?)
-     ON CONFLICT(tenant_id,id) DO UPDATE SET
-       activity_id=excluded.activity_id,
-       code=excluded.code,
-       barcode=excluded.barcode,
-       category=excluded.category,
-       current_stock_decimal=excluded.current_stock_decimal,
-       data_json=excluded.data_json`
-  ).run(
-    tenantId,
-    persistedProduct.id,
-    persistedProduct.activityId,
-    persistedProduct.code,
-    persistedProduct.barcode || null,
-    persistedProduct.category || '',
-    formatScaledInt(stockUnits, QTY_SCALE),
-    JSON.stringify(persistedProduct)
-  );
+  const existingRow = database.prepare(
+    'SELECT 1 AS found FROM products WHERE tenant_id = ? AND id = ? LIMIT 1'
+  ).get(tenantId, persistedProduct.id);
+
+  if (existingRow) {
+    database.prepare(
+      `UPDATE products
+       SET activity_id = ?,
+           code = ?,
+           barcode = ?,
+           category = ?,
+           current_stock_decimal = ?,
+           data_json = ?
+       WHERE tenant_id = ? AND id = ?`
+    ).run(
+      persistedProduct.activityId,
+      persistedProduct.code,
+      persistedProduct.barcode || null,
+      persistedProduct.category || '',
+      formatScaledInt(stockUnits, QTY_SCALE),
+      JSON.stringify(persistedProduct),
+      tenantId,
+      persistedProduct.id
+    );
+  } else {
+    database.prepare(
+      `INSERT INTO products (tenant_id,id,activity_id,code,barcode,category,current_stock_decimal,data_json)
+       VALUES (?,?,?,?,?,?,?,?)`
+    ).run(
+      tenantId,
+      persistedProduct.id,
+      persistedProduct.activityId,
+      persistedProduct.code,
+      persistedProduct.barcode || null,
+      persistedProduct.category || '',
+      formatScaledInt(stockUnits, QTY_SCALE),
+      JSON.stringify(persistedProduct)
+    );
+  }
 
   database.prepare('DELETE FROM product_batches WHERE tenant_id = ? AND product_id = ?')
     .run(tenantId, persistedProduct.id);
@@ -223,7 +303,8 @@ export function validateAndNormalizeProductInput(database, actor, product, isUpd
   const nameAr = String(product.nameAr || '').trim();
   const code = String(product.code || '').trim();
   const activityId = String(product.activityId || '').trim();
-  if (!nameAr || !code || !activityId) {
+  const autoGenerateCode = !isUpdate && Boolean(product.autoGenerateCode) && !code;
+  if (!nameAr || (!code && !autoGenerateCode) || !activityId) {
     throw new Error('اسم الصنف وكوده والنشاط التجاري حقول مطلوبة.');
   }
   assertActivityAccess(actor, activityId, isUpdate ? 'تعديل صنف' : 'إضافة صنف');
@@ -249,6 +330,7 @@ export function validateAndNormalizeProductInput(database, actor, product, isUpd
     code,
     nameAr,
     activityId,
+    ...(autoGenerateCode ? { _autoGenerateCode: true } : {}),
   };
 }
 
@@ -259,7 +341,7 @@ export function persistProductWithinTx(database, core, actor, normalizedInput, o
   const entryDate = nowIso.split('T')[0];
 
   const existed = database.prepare(
-    'SELECT activity_id,data_json FROM products WHERE tenant_id = ? AND id = ?'
+    'SELECT activity_id,code,data_json FROM products WHERE tenant_id = ? AND id = ?'
   ).get(actor.tenantId, normalizedInput.id);
   if (existed?.activity_id) {
     assertActivityAccess(actor, existed.activity_id, 'تعديل صنف');
@@ -273,11 +355,38 @@ export function persistProductWithinTx(database, core, actor, normalizedInput, o
       }
     }
   }
-  const cleanBarcode = normalizedInput.barcode ? String(normalizedInput.barcode).trim() : '';
+
+  const resolvedProduct = { ...normalizedInput };
+  if (!existed && !isUpdate && resolvedProduct._autoGenerateCode && !String(resolvedProduct.code || '').trim()) {
+    resolvedProduct.code = allocateProductCodeTx(
+      database,
+      actor.tenantId,
+      resolvedProduct.activityId,
+      nowIso
+    );
+  }
+  const cleanCode = String(resolvedProduct.code || '').trim();
+  if (!cleanCode) {
+    throw new Error('اسم الصنف وكوده والنشاط التجاري حقول مطلوبة.');
+  }
+  resolvedProduct.code = cleanCode;
+
+  const normalizedCodeKey = cleanCode.toLowerCase();
+  const previousNormalizedCodeKey = existed ? String(existed.code || '').trim().toLowerCase() : '';
+  if (!existed || normalizedCodeKey !== previousNormalizedCodeKey) {
+    const dupCodeRow = database.prepare(
+      'SELECT 1 AS found FROM products WHERE tenant_id = ? AND LOWER(TRIM(code)) = ? AND id <> ? LIMIT 1'
+    ).get(actor.tenantId, normalizedCodeKey, resolvedProduct.id);
+    if (dupCodeRow) {
+      throw new Error(`كود الصنف (${cleanCode}) مستخدم بالفعل.`);
+    }
+  }
+
+  const cleanBarcode = resolvedProduct.barcode ? String(resolvedProduct.barcode).trim() : '';
   if (cleanBarcode) {
     const dupProdBarcode = database.prepare(
       'SELECT 1 AS found FROM products WHERE tenant_id = ? AND TRIM(barcode) = ? AND id <> ? LIMIT 1'
-    ).get(actor.tenantId, cleanBarcode, normalizedInput.id);
+    ).get(actor.tenantId, cleanBarcode, resolvedProduct.id);
     const dupUnitBarcode = database.prepare(
       'SELECT 1 AS found FROM product_units WHERE tenant_id = ? AND normalized_barcode = ? LIMIT 1'
     ).get(actor.tenantId, cleanBarcode);
@@ -285,7 +394,7 @@ export function persistProductWithinTx(database, core, actor, normalizedInput, o
       throw new Error(`الباركود (${cleanBarcode}) مستخدم بالفعل لصنف أو وحدة أخرى.`);
     }
   }
-  const persisted = syncProductAndBatchesTx(database, actor.tenantId, normalizedInput);
+  const persisted = syncProductAndBatchesTx(database, actor.tenantId, resolvedProduct);
   enqueueOutboxTx(database, actor, {
     entityType: 'PRODUCT',
     entityId: persisted.id,

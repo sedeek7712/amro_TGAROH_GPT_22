@@ -144,9 +144,11 @@ test('PVAR-008 SQLite migration 005->006 preserves NULL on historical invoice ro
     );
     v5Runtime.close();
 
-    // Upgrade to v6
+    // Upgrade to v6+
     const v6Runtime = await openErpDatabase({ userDataPath });
-    assert.equal(v6Runtime.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 6);
+    const upgradedVersion = v6Runtime.database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version;
+    assert.ok(upgradedVersion >= 6, `Expected upgraded schema version >= 6, got ${upgradedVersion}`);
+    assert.equal(v6Runtime.database.prepare('SELECT version FROM schema_migrations WHERE version=6').get()?.version, 6);
 
     const legacyItemRow = v6Runtime.database
       .prepare('SELECT base_quantity_decimal FROM invoice_items WHERE id=?')

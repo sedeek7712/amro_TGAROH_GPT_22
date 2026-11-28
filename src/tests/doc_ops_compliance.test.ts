@@ -301,7 +301,7 @@ test('DOC-OPS-001: NotificationLogService records valid statuses, strips raw pat
     recipientName: 'أحمد سعيد',
   });
 
-  const logs = getDocumentOperationLogs();
+  const logs = await getDocumentOperationLogs();
   assert.equal(logs.length, 2);
   assert.equal(logs[0].status, 'SHARE_OPENED');
   assert.equal(logs[1].fileName, 'RECEIPT-1001-2026-11-23.pdf');
@@ -407,7 +407,7 @@ test('DOC-OPS-WA-01: dispatch events retain a shared correlation ID and masked r
     syncAudit: false,
   });
 
-  const logs = getDocumentOperationLogs({ dispatchId: 'dispatch-wa-01' });
+  const logs = await getDocumentOperationLogs({ dispatchId: 'dispatch-wa-01' });
   assert.equal(logs.length, 1);
   assert.equal(logs[0].dispatchId, 'dispatch-wa-01');
   assert.equal(logs[0].recipientPhoneMasked, '967••••4567');
@@ -675,7 +675,7 @@ test('AMRO-DOC-OPS-003 Fix 1 & 2: Electron PDF passes snapshot pdfBase64 & logs 
     assert.equal(isValidPngBytes(PNG_MOCK_BYTES), true);
     assert.equal(downloaded.length, 2);
 
-    const browserLogs = getDocumentOperationLogs({ documentNumber: 'RCT-3001' });
+    const browserLogs = await getDocumentOperationLogs({ documentNumber: 'RCT-3001' });
     assert.ok(browserLogs.some((l) => l.status === 'DOWNLOAD_INITIATED'));
     assert.ok(!browserLogs.some((l) => l.status === 'SAVED'));
 
@@ -717,7 +717,7 @@ test('AMRO-DOC-OPS-003 Fix 1 & 2: Electron PDF passes snapshot pdfBase64 & logs 
     assert.equal(electronPdfRes.mode, 'ELECTRON_PDF');
     assert.ok(electronPdfRes.sizeBytes && electronPdfRes.sizeBytes > 32);
 
-    const electronLogs = getDocumentOperationLogs({ documentNumber: 'RCT-3001' });
+    const electronLogs = await getDocumentOperationLogs({ documentNumber: 'RCT-3001' });
     assert.equal(electronLogs[0].status, 'SAVED');
 
     // 3) Multi-page REPORT snapshot exports valid multi-page PDF via Snapshot -> pdfBase64 (while PNG is blocked)
@@ -773,7 +773,7 @@ test('AMRO-DOC-OPS-003 Fix 3: Browser print waits for afterprint -> PRINT_DIALOG
       browserPrintRes.message,
       'انتهت نافذة الطباعة. لا يمكن تأكيد خروج الورق من خلال المتصفح.'
     );
-    const bLogs = getDocumentOperationLogs({ operationType: 'PRINT' });
+    const bLogs = await getDocumentOperationLogs({ operationType: 'PRINT' });
     assert.equal(bLogs[0].status, 'PRINT_DIALOG_CLOSED');
     assert.equal(bLogs[1].status, 'PRINT_OPENED');
     assert.ok(!bLogs.some((l) => l.status === 'PRINT_SENT'));
@@ -1038,7 +1038,7 @@ test('AMRO-DOC-OPS-003 Fix 4 & 5: Windows Electron online/offline WhatsApp launc
     assert.equal(notAllowedOutcome.status, 'FALLBACK_DOWNLOAD_AND_WA');
     assert.ok(notAllowedOutcome.noticeMessage.includes('NotAllowedError'));
 
-    const allShareLogs = getDocumentOperationLogs({ operationType: 'SHARE' });
+    const allShareLogs = await getDocumentOperationLogs({ operationType: 'SHARE' });
     assert.ok(allShareLogs.some((l) => l.status === 'WHATSAPP_LAUNCHED'));
     assert.ok(allShareLogs.some((l) => l.status === 'CANCELED'));
     assert.ok(!allShareLogs.some((l) => (l.status as string) === 'DELIVERED'));

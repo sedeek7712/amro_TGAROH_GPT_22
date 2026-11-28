@@ -221,7 +221,7 @@ test('DOC-004-01: Browser print timeout without afterprint logs PRINT_STATUS_UNK
     assert.equal(unknownRes.outcome, 'browser-unknown');
     assert.ok(unknownRes.message.includes('PRINT_STATUS_UNKNOWN'));
 
-    const unknownLogs = getDocumentOperationLogs({ operationType: 'PRINT' });
+    const unknownLogs = await getDocumentOperationLogs({ operationType: 'PRINT' });
     assert.equal(unknownLogs[0].status, 'PRINT_STATUS_UNKNOWN');
     assert.equal(unknownLogs[1].status, 'PRINT_OPENED');
     assert.ok(!unknownLogs.some((l) => l.status === 'PRINT_DIALOG_CLOSED'));
@@ -239,7 +239,7 @@ test('DOC-004-01: Browser print timeout without afterprint logs PRINT_STATUS_UNK
     assert.equal(closedRes.dialogClosed, true);
     assert.equal(closedRes.statusConfirmed, false);
     assert.equal(closedRes.outcome, 'browser-closed');
-    const closedLogs = getDocumentOperationLogs({ operationType: 'PRINT' });
+    const closedLogs = await getDocumentOperationLogs({ operationType: 'PRINT' });
     assert.equal(closedLogs[0].status, 'PRINT_DIALOG_CLOSED');
   } finally {
     env.restore();
@@ -284,7 +284,7 @@ test('DOC-004-02: Electron triggerNativePrint passes pageSize & contentHeightMm 
     assert.equal(res.printed, false);
     assert.ok(res.message.includes('PRINT_STATUS_UNKNOWN'));
 
-    const logs = getDocumentOperationLogs({ operationType: 'PRINT' });
+    const logs = await getDocumentOperationLogs({ operationType: 'PRINT' });
     assert.equal(logs[0].status, 'PRINT_STATUS_UNKNOWN');
   } finally {
     desktopSession.clear();

@@ -54,6 +54,7 @@ export interface Product {
   id: string;                 // UUID v4
   activityId: CommercialActivityId;
   code: string;               // كود الصنف
+  autoGenerateCode?: boolean; // طلب توليد كود الصنف ذرياً من قاعدة البيانات عند الإنشاء
   barcode?: string;           // الباركود الدولي أو المحلي
   nameAr: string;             // اسم الصنف
   category: string;           // التصنيف

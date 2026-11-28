@@ -1,12 +1,16 @@
 /**
  * خدمة تسجيل ومتابعة عمليات المستندات (الحفظ، الطباعة، الإنشاء، والمشاركة)
  * NotificationLogService + DocumentAuditBridge
+ * - على Windows/Electron: تستخدم SQLite (جدول audit_logs) كمصدر الحقيقة الوحيد دون الكتابة المزدوجة إلى localStorage.
+ * - على الويب: تحافظ على مسار localStorage الحالي مع التزامن الاختياري لسجل الرقابة.
  * - تلتزم الصمت عن أي محتوى حساس ولا تكشف مسارات النظام لغير المصرح لهم.
  * - تمنع تسجيل 'DELIVERED' عند مجرد فتح واتساب أو قائمة المشاركة.
  */
 
+import type { SystemAuditLog } from '../../types/erp';
 import { formatLocalDateTime } from '../../utils/localDate';
 import { dataService } from '../dataService';
+import { sqliteDataService } from '../sqliteDataService';
 
 export type DocumentOperationType = 'PDF_EXPORT' | 'PNG_EXPORT' | 'PRINT' | 'SHARE';
 
@@ -56,9 +60,44 @@ export interface DocumentOperationLogEntry {
     | 'CLIPBOARD';
 }
 
+export interface DocumentOperationAuditProvider {
+  logAction(action: string, details: string): Promise<void>;
+  getAuditLogs(): Promise<SystemAuditLog[]>;
+}
+
+export const DOCUMENT_OPERATION_AUDIT_ACTION = 'DOCUMENT_OPERATION_EVENT';
+export const WHATSAPP_DISPATCH_AUDIT_ACTION = 'WHATSAPP_DISPATCH_EVENT';
+
 const LOG_STORAGE_KEY = 'amro_doc_ops_logs_v1';
 const MAX_STORED_LOGS = 300;
 const inMemoryLogs: DocumentOperationLogEntry[] = [];
+let customElectronAuditProvider: DocumentOperationAuditProvider | null = null;
+
+export function setDocumentOperationAuditProviderForTest(
+  provider: DocumentOperationAuditProvider | null
+): void {
+  customElectronAuditProvider = provider;
+}
+
+function resolveDocumentLogTarget(): {
+  mode: 'SQLITE' | 'WEB';
+  provider: DocumentOperationAuditProvider;
+} {
+  if (customElectronAuditProvider) {
+    return { mode: 'SQLITE', provider: customElectronAuditProvider };
+  }
+  if (typeof window !== 'undefined') {
+    const desktopBridge = (window as Window).amroDesktop;
+    if (
+      desktopBridge &&
+      (typeof desktopBridge.logAction === 'function' ||
+        typeof desktopBridge.getAuditLogs === 'function')
+    ) {
+      return { mode: 'SQLITE', provider: sqliteDataService };
+    }
+  }
+  return { mode: 'WEB', provider: dataService };
+}
 
 function createEventId(): string {
   if (typeof globalThis.crypto !== 'undefined' && typeof globalThis.crypto.randomUUID === 'function') {
@@ -134,6 +173,47 @@ const STATUS_LABELS: Record<DocumentOperationStatus, string> = {
   USER_CONFIRMED_SEND: 'أكّد الموظف أنه ضغط زر الإرسال',
 };
 
+function parseDocumentOperationAuditRow(row: SystemAuditLog): DocumentOperationLogEntry | null {
+  if (
+    row.action !== WHATSAPP_DISPATCH_AUDIT_ACTION &&
+    row.action !== DOCUMENT_OPERATION_AUDIT_ACTION
+  ) {
+    return null;
+  }
+  try {
+    const payload = JSON.parse(row.details) as {
+      schemaVersion?: number;
+      event?: DocumentOperationLogEntry;
+    };
+    const event = payload.event;
+    if (payload.schemaVersion !== 1 || !event || !event.operationType || !event.status) {
+      return null;
+    }
+    if (row.action === WHATSAPP_DISPATCH_AUDIT_ACTION) {
+      if (event.operationType !== 'SHARE' || !event.dispatchId) {
+        return null;
+      }
+    }
+    return event;
+  } catch {
+    return null;
+  }
+}
+
+function matchesLogFilter(
+  item: DocumentOperationLogEntry,
+  filter?: {
+    documentNumber?: string;
+    operationType?: DocumentOperationType;
+    dispatchId?: string;
+  }
+): boolean {
+  if (filter?.documentNumber && item.documentNumber !== filter.documentNumber) return false;
+  if (filter?.operationType && item.operationType !== filter.operationType) return false;
+  if (filter?.dispatchId && item.dispatchId !== filter.dispatchId) return false;
+  return true;
+}
+
 export async function recordDocumentOperation(params: {
   operationType: DocumentOperationType;
   status: DocumentOperationStatus;
@@ -186,64 +266,89 @@ export async function recordDocumentOperation(params: {
     channel: params.channel,
   };
 
+  const parts = [
+    `المستند: ${entry.documentNumber} (${entry.documentType})`,
+    `الحالة: ${STATUS_LABELS[entry.status]}`,
+  ];
+  if (entry.fileName) parts.push(`الملف: ${entry.fileName}`);
+  if (entry.recipientName) parts.push(`المستلم: ${entry.recipientName}`);
+  if (entry.failureReason) parts.push(`السبب: ${entry.failureReason}`);
+
+  const target = resolveDocumentLogTarget();
+
+  if (target.mode === 'SQLITE') {
+    if (params.syncAudit === false) {
+      throw new Error('لا يمكن تعطيل حفظ سجل عمليات المستندات في SQLite على نظام Windows.');
+    }
+    const auditAction =
+      entry.operationType === 'SHARE'
+        ? WHATSAPP_DISPATCH_AUDIT_ACTION
+        : DOCUMENT_OPERATION_AUDIT_ACTION;
+    const auditDetails =
+      entry.operationType === 'SHARE'
+        ? JSON.stringify({ schemaVersion: 1, event: entry })
+        : JSON.stringify({
+            schemaVersion: 1,
+            label: ACTION_LABELS[entry.operationType],
+            summary: parts.join(' | '),
+            event: entry,
+          });
+    await target.provider.logAction(auditAction, auditDetails);
+    return entry;
+  }
+
   const existing = readPersistedLogs();
   writePersistedLogs([entry, ...existing]);
 
   if (params.syncAudit !== false && typeof window !== 'undefined') {
-    const parts = [
-      `المستند: ${entry.documentNumber} (${entry.documentType})`,
-      `الحالة: ${STATUS_LABELS[entry.status]}`,
-    ];
-    if (entry.fileName) parts.push(`الملف: ${entry.fileName}`);
-    if (entry.recipientName) parts.push(`المستلم: ${entry.recipientName}`);
-    if (entry.failureReason) parts.push(`السبب: ${entry.failureReason}`);
-
     try {
       if (entry.operationType === 'SHARE') {
-        await dataService.logAction(
-          'WHATSAPP_DISPATCH_EVENT',
+        await target.provider.logAction(
+          WHATSAPP_DISPATCH_AUDIT_ACTION,
           JSON.stringify({ schemaVersion: 1, event: entry })
         );
       } else {
-        await dataService.logAction(ACTION_LABELS[entry.operationType], parts.join(' | '));
+        await target.provider.logAction(ACTION_LABELS[entry.operationType], parts.join(' | '));
       }
     } catch {
-      // قد يكون الاستدعاء قبل اكتمال الجلسة أو من اختبار وحدة؛ لا نعطل عملية العرض/الحفظ
+      // على الويب قد يكون الاستدعاء قبل اكتمال الجلسة أو من اختبار وحدة؛ السجل محفوظ في localStorage
     }
   }
 
   return entry;
 }
 
-export function getDocumentOperationLogs(filter?: {
+export async function getDocumentOperationLogs(filter?: {
   documentNumber?: string;
   operationType?: DocumentOperationType;
   dispatchId?: string;
-}): DocumentOperationLogEntry[] {
+}): Promise<DocumentOperationLogEntry[]> {
+  const target = resolveDocumentLogTarget();
+  if (target.mode === 'SQLITE') {
+    const auditRows = await target.provider.getAuditLogs();
+    const events = auditRows
+      .map(parseDocumentOperationAuditRow)
+      .filter((item): item is DocumentOperationLogEntry => item !== null)
+      .filter((item) => matchesLogFilter(item, filter))
+      .sort((a, b) => b.timestamp.localeCompare(a.timestamp));
+    return events;
+  }
+
   const all = readPersistedLogs();
-  return all.filter((item) => {
-    if (filter?.documentNumber && item.documentNumber !== filter.documentNumber) return false;
-    if (filter?.operationType && item.operationType !== filter.operationType) return false;
-    if (filter?.dispatchId && item.dispatchId !== filter.dispatchId) return false;
-    return true;
-  });
+  return all.filter((item) => matchesLogFilter(item, filter));
 }
 
 export async function getWhatsAppDispatchAuditTrail(filter?: {
   documentNumber?: string;
   dispatchId?: string;
 }): Promise<DocumentOperationLogEntry[]> {
-  const auditRows = await dataService.getAuditLogs();
+  const target = resolveDocumentLogTarget();
+  const auditRows = await target.provider.getAuditLogs();
   const events = auditRows.flatMap((row) => {
-    if (row.action !== 'WHATSAPP_DISPATCH_EVENT') return [];
-    try {
-      const payload = JSON.parse(row.details) as { schemaVersion?: number; event?: DocumentOperationLogEntry };
-      const event = payload.event;
-      if (payload.schemaVersion !== 1 || !event || event.operationType !== 'SHARE' || !event.dispatchId) return [];
-      return [event];
-    } catch {
-      return [];
-    }
+    if (row.action !== WHATSAPP_DISPATCH_AUDIT_ACTION) return [];
+    const parsed = parseDocumentOperationAuditRow(row);
+    if (!parsed || parsed.operationType !== 'SHARE' || !parsed.dispatchId) return [];
+    return [parsed];
   });
   return events
     .filter((event) => !filter?.documentNumber || event.documentNumber === filter.documentNumber)
@@ -253,6 +358,10 @@ export async function getWhatsAppDispatchAuditTrail(filter?: {
 
 export function clearDocumentOperationLogs(): void {
   inMemoryLogs.length = 0;
+  const target = resolveDocumentLogTarget();
+  if (target.mode === 'SQLITE') {
+    return;
+  }
   if (typeof localStorage !== 'undefined') {
     try {
       localStorage.removeItem(LOG_STORAGE_KEY);

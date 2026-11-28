@@ -129,6 +129,7 @@ export interface VariantSkuDraft {
   variantKey: string;
   nameAr: string;
   code: string;
+  codeManuallyEdited?: boolean;
   barcode: string;
   unit: string;
   purchasePrice: string;
@@ -333,6 +334,7 @@ export function generateVariantCombinations(params: {
       variantKey,
       nameAr: `${cleanFamilyName} - ${orderedValues.join(' / ')}`,
       code: candidateCode,
+      codeManuallyEdited: false,
       barcode: '',
       unit: params.defaults.unit || 'حبة',
       purchasePrice: params.defaults.purchasePrice,

@@ -129,3 +129,25 @@
 - **حالة Git والنشر:** لا يتوفر مجلد `.git` في حاوية البيئة المستوردة؛ يلزم رفع التعديلات إلى فرع مستقل وفتح PR إلى `main` لتشغيل CI السحابي (بما فيه Node 24 وبناء Windows EXE)، ثم الانتقال بعد الموافقة إلى `PVAR-012`.
 
 
+
+
+### DEC-2026-013 — إصلاح سلامة بيانات Windows المحلية (أكواد المنتجات والتخزين وسجل المستندات)
+
+- **التاريخ:** 2026-11-28
+- **الحالة:** نُفّذ برمجيًا محليًا بانتظار الرفع إلى PR #34 وCI ومراجعة المالك (دون دمج)
+- **موافقة المالك:** «موافق بصفتك خبير وفريق تطوير متكاملة» ردًا على طلب اعتماد تنفيذ النطاقات الثلاثة على فرع مستقل، مع ترحيل SQLite آمن دون حذف أو تعديل أي بيانات قديمة تلقائيًا.
+- **النطاق المعتمد:**
+  1. **A — أكواد المنتجات:** جعل توليد أكواد منتجات Windows مستندًا إلى SQLite، مع تخصيص ذري ومنع التكرار الجديد، والتحقق من المسار البديل لإنشاء SKU، وحماية الأكواد اليدوية.
+  2. **B — عزل StorageService:** منع تهيئة المتصفح وعمليات `localStorage` غير اللازمة في Electron، مع الإبقاء على وظائف المساعدة اللازمة وعلى سلوك الويب.
+  3. **C — سجل عمليات المستندات:** حفظ وقراءة سجلات الطباعة وPDF وPNG والمشاركة عبر SQLite في Windows، مع إبقاء مسار الويب والتوافق مع سجلات WhatsApp القديمة.
+- **قواعد حماية البيانات:** يسمح بإنشاء Migration إضافية فقط بعد فحص آلية الترحيل الحالية. لا إنشاء لفهرس فريد قد يفشل بسبب تكرارات تاريخية قبل فحصها؛ لا حذف أو إعادة تسمية أو تصحيح تلقائي لأي كود قديم؛ لا تعديل لصفوف المنتجات القديمة لمجرد وجود تكرار؛ لا تطبيق على قاعدة مستخدم حقيقية أثناء التطوير والاختبارات. يجب إثبات بقاء الأكواد والصفوف القديمة كما هي في اختبارات قاعدة مؤقتة اصطناعية.
+- **الاستثناءات:** لا تشمل تغيير المحاسبة أو الضرائب أو القيود أو الفواتير أو الأرصدة أو أسعار المنتجات أو المخزون أو FIFO/FEFO أو الصلاحيات أو بيانات المستخدمين الحقيقية؛ لا إعادة تصميم واجهات؛ لا إضافة Supabase أو خدمة سحابية جديدة؛ لا حذف تكاملات مزامنة تاريخية غير مرتبطة؛ لا تنظيف تلقائي للتكرارات القديمة؛ لا تعديل مباشر إلى `main` ولا دمج PR.
+- **طريقة التنفيذ:** فرع مستقل من أحدث `main`، ثم Pull Request إلى `main` مع اختبارات SQLite وWeb والاختبارات المعمارية وCI. تبقى موافقة الدمج مستقلة تمامًا.
+- **مرجع أمر العمل الموحد لكل الأدوات:** `docs/ai/ACTIVE_WORK_ORDER.md` و`docs/ai/work-orders/WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md`. تعليمات الأدوات `AGENTS.md` و`CLAUDE.md` و`GEMINI.md` وCopilot وCursor تُوجّه إلى `AGENTS.md`.
+- **نتيجة التنفيذ الفعلي (2026-11-28 — فرع `fix/windows-local-data-integrity-2026-11-28` انطلاقًا من `f074313d7a73966d73a142954b01c719d9162801`):**
+  - نُفذ النطاق **A** عبر `electron/sqlite/migrations/007_product_code_integrity.sql`، و`electron/sqlite/modules/inventory-parties-service.mjs` (`allocateProductCodeTx`)، و`electron/sqlite/modules/product-catalog-service.mjs`، و`electron/sqlite/modules/core-service.mjs`، و`electron/sqlite/database.mjs`، و`src/types/erp.ts`، و`src/components/inventory/InventoryManager.tsx`، و`src/utils/productCatalogUi.ts`، و`src/components/inventory/ProductFamilyModal.tsx`.
+  - نُفذ النطاق **B** عبر `src/services/storageService.ts`، و`src/components/sync/SyncBackupModal.tsx`، و`scripts/verify_data_service_boundary.mjs`.
+  - نُفذ النطاق **C** عبر `src/services/documents/notificationLogService.ts` ومواءمة `src/tests/doc_ops_004_closure.test.ts` و`src/tests/doc_ops_compliance.test.ts`.
+  - أُضيفت اختبارات `scripts/tests/win_local_data_integrity_scope_a.test.mjs` و`src/tests/win_local_data_integrity_scope_bc.test.ts` وحُدّث توقع النسخة في `scripts/tests/pvar_008_units_ops.test.mjs`.
+  - **حالة Git وCI وWindows:** لا يتوفر مجلد `.git` أو بيانات اعتماد GitHub في حاوية البيئة الحالية؛ لذلك لم يُرفع التزام بعد إلى PR #34، ولم يُشغّل GitHub Actions CI أو `build:windows:preview` أو اختبار Windows الفعلي حتى الآن. التفاصيل الكاملة ومخرجات التحقق مسجلة في `docs/ai/work-orders/WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md`.
+

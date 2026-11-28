@@ -32,7 +32,7 @@ test('PVAR-004B-1 migrates SQLite v4 to v5 and enforces alternate-unit ownership
     const oldProduct = database.prepare(
       'SELECT code, current_stock_decimal FROM products WHERE tenant_id=? AND id=?'
     ).get('tenant_main', 'units-product');
-    assert.deepEqual(oldProduct, { code: 'UNIT-SKU', current_stock_decimal: '8.5000' });
+    assert.deepEqual({ ...oldProduct }, { code: 'UNIT-SKU', current_stock_decimal: '8.5000' });
 
     const insertUnit = database.prepare(
       'INSERT INTO product_units (tenant_id,id,product_id,code,name_ar,name_en,base_units_numerator,base_units_denominator,barcode,normalized_barcode,is_active,created_at,updated_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'

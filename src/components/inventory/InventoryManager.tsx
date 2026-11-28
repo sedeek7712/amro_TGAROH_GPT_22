@@ -184,6 +184,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setProductUnits([]);
     setUnitDraft({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
     setUnitError(null);
+    setIsLoadingUnits(false);
   };
 
   const openAddModal = () => {
@@ -206,6 +207,10 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const handleSaveProductUnit = async () => {
     if (!editingProduct || isSavingUnit) return;
     setUnitError(null);
+    if (formUnit !== editingProduct.unit) {
+      setUnitError('احفظ الصنف أولًا، ولا تغيّر وحدة المخزون الأساسية مع وجود وحدات بديلة.');
+      return;
+    }
     const numerator = Number(unitDraft.numerator);
     const denominator = Number(unitDraft.denominator);
     if (!unitDraft.code.trim() || !unitDraft.nameAr.trim()) {

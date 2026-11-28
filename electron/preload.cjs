@@ -42,6 +42,8 @@ const desktopBridge = Object.freeze({
 
   getProducts: (input) => ipcRenderer.invoke('erp:inventory:get-products', input),
   getProductById: (input) => ipcRenderer.invoke('erp:inventory:get-product', input),
+  getProductUnits: (input) => ipcRenderer.invoke('erp:inventory:get-product-units', input),
+  saveProductUnit: (input) => ipcRenderer.invoke('erp:inventory:save-product-unit', input),
   getProductImages: (input) => ipcRenderer.invoke('erp:inventory:get-product-images', input),
   getProductImageRecord: (input) => ipcRenderer.invoke('erp:inventory:get-product-image-record', input),
   getProductImageData: (input) => ipcRenderer.invoke('erp:inventory:get-product-image-data', input),

@@ -18,6 +18,7 @@ const V2_TABLES = [
   'payment_allocations', 'party_advance_transactions', 'allocation_audits',
 ];
 const V3_TABLES = ['product_images'];
+const V4_TABLES = ['brands', 'product_families', 'product_catalog_meta'];
 
 function sha256(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -138,6 +139,15 @@ export function verifySqliteFile(filePath, migrationsDirectory = DEFAULT_MIGRATI
       for (const tableName of V3_TABLES) {
         if (!hasTableStmt.get(tableName)) {
           throw new Error('النسخة الاحتياطية تفتقر إلى جدول صور الأصناف (v3): ' + tableName);
+        }
+      }
+    }
+
+    const hasV4ProductCatalogMigration = migrationFiles.some((m) => m.filename === '004_product_catalog_metadata.sql');
+    if (schemaVersion >= 4 && hasV4ProductCatalogMigration) {
+      for (const tableName of V4_TABLES) {
+        if (!hasTableStmt.get(tableName)) {
+          throw new Error('النسخة الاحتياطية تفتقر إلى جدول بيانات كتالوج المنتجات (v4): ' + tableName);
         }
       }
     }

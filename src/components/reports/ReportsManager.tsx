@@ -35,6 +35,9 @@ import {
   useLivePartyAdvances,
   useLivePaymentAllocations,
   useLiveProducts,
+  useLiveProductCatalog,
+  useLiveProductFamilies,
+  useLiveBrands,
   useLiveVouchers,
 } from '../../hooks/useLiveDexie';
 import type { ActivityId, AmanatRecord, Invoice, Party } from '../../types/erp';
@@ -46,6 +49,11 @@ import { hasPermission } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { buildPartyStatement } from '../../utils/partyStatement';
 import { getProductCostValue } from '../../utils/inventoryValuation';
+import {
+  buildStockValuationReport,
+  getStockValuationLevelLabel,
+  type StockValuationAggregationLevel,
+} from '../../utils/productCatalogReports';
 import { useDocumentContext } from '../../hooks/useDocumentContext';
 import { formatLocalDate, formatLocalDateTime } from '../../utils/localDate';
 import {
@@ -121,6 +129,7 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
     selectedActivity === 'all' ? 'ALL' : selectedActivity
   );
   const [searchQuery, setSearchQuery] = useState('');
+  const [valuationLevel, setValuationLevel] = useState<StockValuationAggregationLevel>('SKU');
 
   // معاينات الطباعة المستقلة من التقارير
   const [printableInvoice, setPrintableInvoice] = useState<Invoice | null>(null);
@@ -144,6 +153,9 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
       : OFFICIAL_ACTIVITIES
     : storage.getActivities();
   const liveProducts = useLiveProducts();
+  const liveCatalogEntries = useLiveProductCatalog();
+  const liveFamilies = useLiveProductFamilies();
+  const liveBrands = useLiveBrands();
   const liveAccounts = useLiveAccounts();
   const liveJournalEntries = useLiveJournalEntries();
   const liveInvoices = useLiveInvoices();
@@ -169,38 +181,19 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
     applyPrintPageStyle(printSize);
   }, [printSize]);
 
-  // 1. تقييم المخزون العام
-  const stockValuation = useMemo(() => {
-    let filtered = liveProducts;
-    if (activityFilter !== 'ALL') {
-      filtered = filtered.filter((p) => p.activityId === activityFilter);
-    }
-    if (searchQuery.trim()) {
-      const q = searchQuery.toLowerCase();
-      filtered = filtered.filter(
-        (p) =>
-          p.nameAr.toLowerCase().includes(q) ||
-          p.code.toLowerCase().includes(q) ||
-          (p.barcode && p.barcode.includes(q)) ||
-          (p.oemNumber && p.oemNumber.toLowerCase().includes(q))
-      );
-    }
-
-    const totalCost = roundMoney(filtered.reduce((s, p) => s + getProductCostValue(p), 0));
-    const totalRetail = roundMoney(
-      filtered.reduce((s, p) => s + (p.currentStock || 0) * (p.sellPrice || 0), 0)
-    );
-    const totalQty = filtered.reduce((s, p) => s + (p.currentStock || 0), 0);
-
-    return {
-      filtered,
-      totalCost,
-      totalRetail,
-      totalQty,
-      itemsCount: filtered.length,
-      potentialProfit: totalRetail - totalCost,
-    };
-  }, [liveProducts, activityFilter, searchQuery]);
+  // 1. تقييم المخزون العام (يدعم مستوى SKU أو التجميع الاشتقاقي على مستوى المجموعة دون احتساب مزدوج)
+  const stockValuation = useMemo(
+    () =>
+      buildStockValuationReport({
+        entries: liveCatalogEntries,
+        products: liveProducts,
+        families: liveFamilies,
+        brands: liveBrands,
+        activityFilter,
+        searchQuery,
+      }),
+    [liveCatalogEntries, liveProducts, liveFamilies, liveBrands, activityFilter, searchQuery]
+  );
 
   // 2. كشف حساب الطرف المختار (عميل / مورد) من المصدر الموحد دون تكرار احتساب السداد
   const statementData = useMemo(() => {
@@ -365,29 +358,61 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
     }
 
     if (activeTab === 'stock_valuation') {
+      const levelLabel = getStockValuationLevelLabel(valuationLevel);
+      const snapshotRows =
+        valuationLevel === 'FAMILY'
+          ? [
+              ...stockValuation.familyGroups.map((g) => [
+                `مجموعة: ${g.family.nameAr} (${g.skuCount} SKU مشتق)`,
+                String(g.totalQty),
+                g.totalCost.toFixed(dec),
+              ]),
+              ...stockValuation.standaloneRows.map((r) => [
+                r.variantLabel ? `${r.product.nameAr} (${r.variantLabel})` : r.product.nameAr,
+                String(r.qty),
+                r.costValue.toFixed(dec),
+              ]),
+            ].slice(0, 80)
+          : stockValuation.skuRows.slice(0, 80).map((r) => [
+              r.variantLabel ? `${r.product.nameAr} (${r.variantLabel})` : r.product.nameAr,
+              String(r.qty),
+              r.costValue.toFixed(dec),
+            ]);
+
       return buildReportDocumentSnapshot({
         reportKey: 'stock_valuation',
         reportTitle: 'تقرير جرد وتقييم المخزون',
-        reportSubtitle: activityFilter === 'ALL' ? 'جميع الأنشطة' : activityFilter,
+        reportSubtitle: `${activityFilter === 'ALL' ? 'جميع الأنشطة' : activityFilter} — مستوى التجميع: ${levelLabel}`,
         meta: docMeta,
         paperSize: size,
         date: todayLocal,
         summaryRows: [
-          { label: 'عدد الأصناف', value: String(stockValuation.filtered.length) },
-          { label: 'إجمالي التكلفة', value: `${stockValuation.totalCost.toFixed(dec)} ${currencySymbol}` },
-          { label: 'القيمة البيعية', value: `${stockValuation.totalRetail.toFixed(dec)} ${currencySymbol}` },
+          { label: 'مستوى التجميع', value: levelLabel },
+          { label: 'عدد SKUs الفعلية', value: String(stockValuation.summary.totalSkuCount) },
+          ...(valuationLevel === 'FAMILY'
+            ? [{ label: 'عدد المجموعات', value: String(stockValuation.summary.familyGroupCount) }]
+            : []),
+          { label: 'إجمالي الكميات', value: String(stockValuation.summary.totalQty) },
+          {
+            label: 'إجمالي التكلفة',
+            value: `${stockValuation.summary.totalCost.toFixed(dec)} ${currencySymbol}`,
+          },
+          {
+            label: 'القيمة البيعية',
+            value: `${stockValuation.summary.totalRetail.toFixed(dec)} ${currencySymbol}`,
+          },
         ],
         table: {
           columns: [
-            { label: 'الصنف', align: 'right', widthWeight: 2.8 },
+            {
+              label: valuationLevel === 'FAMILY' ? 'المجموعة / الصنف المستقل' : 'الصنف (SKU)',
+              align: 'right',
+              widthWeight: 2.8,
+            },
             { label: 'الكمية', align: 'center', widthWeight: 1.0 },
             { label: 'التكلفة', align: 'left', widthWeight: 1.3 },
           ],
-          rows: stockValuation.filtered.slice(0, 80).map((p) => [
-            p.nameAr,
-            String(p.currentStock),
-            getProductCostValue(p).toFixed(dec),
-          ]),
+          rows: snapshotRows,
         },
       });
     }
@@ -1493,43 +1518,63 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
             meta={docMeta}
             paperSize={printSize}
             documentTitle="تقرير جرد وتقييم المخزون"
-            documentSubtitle="تقييم الأرصدة الدفترية وتتبع تشغيلات الصلاحية (FEFO)"
+            documentSubtitle={`تقييم الأرصدة الدفترية وتتبع تشغيلات الصلاحية (FEFO) — مستوى التجميع: ${getStockValuationLevelLabel(valuationLevel)}`}
             documentDate={todayLocal}
-            periodText={`${activityFilterLabel}${
-              searchQuery.trim() ? ` | بحث: ${searchQuery.trim()}` : ''
-            }`}
+            periodText={`${activityFilterLabel} | مستوى التجميع: ${
+              valuationLevel === 'FAMILY' ? 'المجموعة (مشتق من SKU)' : 'SKU فردي'
+            }${searchQuery.trim() ? ` | بحث: ${searchQuery.trim()}` : ''}`}
           />
 
           <div
             className={`grid ${
-              isThermal ? 'grid-cols-1 gap-1.5 text-[10px]' : 'grid-cols-3 gap-3 text-xs'
-            } p-3 rounded-xl border border-slate-200 bg-slate-50 mb-4 doc-break-inside-avoid`}
+              isThermal ? 'grid-cols-1 gap-1.5 text-[10px]' : 'grid-cols-2 md:grid-cols-4 gap-3 text-xs'
+            } p-3 rounded-xl border border-slate-200 bg-slate-50 mb-3 doc-break-inside-avoid`}
           >
             <div>
+              <span className="text-slate-500">مستوى التجميع: </span>
+              <strong className="text-slate-900">
+                {valuationLevel === 'FAMILY' ? 'مجموعة (مشتق)' : 'SKU فردي'}
+              </strong>
+              <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                {stockValuation.summary.totalSkuCount} SKU
+                {stockValuation.summary.familyGroupCount > 0
+                  ? ` • ${stockValuation.summary.familyGroupCount} مجموعة`
+                  : ''}
+              </div>
+            </div>
+            <div>
               <span className="text-slate-500">إجمالي الكميات: </span>
-              <strong className="font-mono text-slate-900">{stockValuation.totalQty}</strong>
+              <strong className="font-mono text-slate-900">{stockValuation.summary.totalQty}</strong>
             </div>
             <div>
               <span className="text-slate-500">قيمة التكلفة الدفترية: </span>
               <strong className="font-mono text-slate-900">
-                {stockValuation.totalCost.toFixed(2)} {currencySymbol}
+                {stockValuation.summary.totalCost.toFixed(2)} {currencySymbol}
               </strong>
             </div>
             <div>
               <span className="text-slate-500">قيمة البيع المتوقعة: </span>
               <strong className="font-mono text-emerald-800">
-                {stockValuation.totalRetail.toFixed(2)} {currencySymbol}
+                {stockValuation.summary.totalRetail.toFixed(2)} {currencySymbol}
               </strong>
             </div>
           </div>
 
+          <div className="mb-4 px-3 py-2 rounded-lg border border-blue-200 bg-blue-50/70 text-[11px] text-blue-900 flex flex-wrap items-center justify-between gap-2">
+            <span>{stockValuation.aggregationNote}</span>
+            <span className="font-mono font-bold text-[10px] text-blue-800">
+              المستوى النشط: {valuationLevel === 'FAMILY' ? 'FAMILY (مشتق من SKU)' : 'SKU'}
+            </span>
+          </div>
+
           {/* Filter Bar (No Print) */}
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-3 mb-4 no-print text-xs">
-            <div className="flex items-center gap-2 w-full sm:w-auto">
+          <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3 mb-4 no-print text-xs">
+            <div className="flex flex-wrap items-center gap-2">
               <span className="font-bold text-slate-700">تصفية النشاط:</span>
               <select
                 value={activityFilter}
                 onChange={(e) => setActivityFilter(e.target.value)}
+                aria-label="تصفية النشاط في تقرير جرد المخزون"
                 className="px-3 py-1.5 border border-slate-300 rounded-lg text-slate-900 font-semibold focus:outline-none"
               >
                 <option value="ALL">جميع الأنشطة الأربعة</option>
@@ -1539,15 +1584,45 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                   </option>
                 ))}
               </select>
+
+              <div
+                className="inline-flex rounded-lg border border-slate-300 bg-slate-100 p-0.5"
+                role="group"
+                aria-label="مستوى التجميع في تقرير المخزون"
+              >
+                <button
+                  type="button"
+                  onClick={() => setValuationLevel('SKU')}
+                  className={`px-2.5 py-1 rounded-md font-bold transition-colors ${
+                    valuationLevel === 'SKU'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  SKU فردي
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setValuationLevel('FAMILY')}
+                  className={`px-2.5 py-1 rounded-md font-bold transition-colors ${
+                    valuationLevel === 'FAMILY'
+                      ? 'bg-slate-900 text-white shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  تجميع حسب المجموعة
+                </button>
+              </div>
             </div>
 
-            <div className="relative w-full sm:w-64">
+            <div className="relative w-full lg:w-72">
               <Search className="w-4 h-4 absolute right-3 top-2.5 text-slate-400" />
               <input
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="بحث بالصنف، الباركود، OEM..."
+                placeholder="بحث بالصنف، المجموعة، العلامة، الباركود، OEM..."
+                aria-label="بحث في تقرير تقييم المخزون"
                 className="w-full pr-9 pl-3 py-1.5 border border-slate-300 rounded-lg focus:outline-none"
               />
             </div>
@@ -1555,31 +1630,82 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
 
           {isThermal ? (
             <div className="space-y-1.5 text-[9.5px]">
-              {stockValuation.filtered.length === 0 ? (
+              {stockValuation.skuRows.length === 0 ? (
                 <div className="py-4 text-center text-slate-400">لا توجد أصناف مطابقة</div>
-              ) : (
-                stockValuation.filtered.map((prod) => {
-                  const totalCost = getProductCostValue(prod);
-                  return (
+              ) : valuationLevel === 'FAMILY' ? (
+                <>
+                  {stockValuation.familyGroups.map((group) => (
                     <div
-                      key={prod.id}
+                      key={group.family.id}
+                      className="p-2 border border-slate-300 bg-slate-50 rounded space-y-1 doc-break-inside-avoid"
+                    >
+                      <div className="flex justify-between font-bold text-slate-900">
+                        <span>مجموعة: {group.family.nameAr}</span>
+                        <span className="font-mono text-slate-600">{group.skuCount} SKU</span>
+                      </div>
+                      <div className="flex justify-between font-mono tabular-nums">
+                        <span>إجمالي الكمية: {group.totalQty}</span>
+                        <span className="font-bold">
+                          التكلفة: {group.totalCost.toFixed(2)} {currencySymbol}
+                        </span>
+                      </div>
+                      <div className="pt-1 border-t border-slate-200 space-y-0.5 text-[9px] text-slate-700">
+                        {group.skuRows.map((row) => (
+                          <div key={row.product.id} className="flex justify-between">
+                            <span>
+                              ↳ {row.variantLabel || row.product.nameAr}
+                            </span>
+                            <span className="font-mono">
+                              {row.qty} {row.product.unit} • {row.costValue.toFixed(2)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {stockValuation.standaloneRows.map((row) => (
+                    <div
+                      key={row.product.id}
                       className="p-1.5 border border-slate-200 rounded space-y-0.5 doc-break-inside-avoid"
                     >
                       <div className="flex justify-between font-bold text-slate-900">
-                        <span>{prod.nameAr}</span>
-                        <span className="font-mono text-slate-500">{prod.code}</span>
+                        <span>{row.product.nameAr}</span>
+                        <span className="font-mono text-slate-500">{row.product.code}</span>
                       </div>
                       <div className="flex justify-between font-mono tabular-nums">
                         <span>
-                          الرصيد: {prod.currentStock} {prod.unit}
+                          الرصيد: {row.qty} {row.product.unit}
                         </span>
                         <span className="font-bold">
-                          التكلفة: {totalCost.toFixed(2)} {currencySymbol}
+                          التكلفة: {row.costValue.toFixed(2)} {currencySymbol}
                         </span>
                       </div>
                     </div>
-                  );
-                })
+                  ))}
+                </>
+              ) : (
+                stockValuation.skuRows.map((row) => (
+                  <div
+                    key={row.product.id}
+                    className="p-1.5 border border-slate-200 rounded space-y-0.5 doc-break-inside-avoid"
+                  >
+                    <div className="flex justify-between font-bold text-slate-900">
+                      <span>{row.product.nameAr}</span>
+                      <span className="font-mono text-slate-500">{row.product.code}</span>
+                    </div>
+                    {row.variantLabel && (
+                      <div className="text-[8.5px] text-slate-600">{row.variantLabel}</div>
+                    )}
+                    <div className="flex justify-between font-mono tabular-nums">
+                      <span>
+                        الرصيد: {row.qty} {row.product.unit}
+                      </span>
+                      <span className="font-bold">
+                        التكلفة: {row.costValue.toFixed(2)} {currencySymbol}
+                      </span>
+                    </div>
+                  </div>
+                ))
               )}
             </div>
           ) : (
@@ -1588,7 +1714,7 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                 <thead>
                   <tr className="border-b border-slate-300 bg-slate-900 text-white font-extrabold">
                     <th className="py-2.5 px-3">النشاط</th>
-                    <th className="py-2.5 px-3">كود الصنف</th>
+                    <th className="py-2.5 px-3">كود الصنف / المستوى</th>
                     <th className="py-2.5 px-3">اسم الصنف والمواصفات</th>
                     <th className="py-2.5 px-3 text-center">الرصيد المتاح</th>
                     <th className="py-2.5 px-3 text-center">التشغيلات والصلاحية (FEFO)</th>
@@ -1598,16 +1724,185 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
-                  {stockValuation.filtered.length === 0 ? (
+                  {stockValuation.skuRows.length === 0 ? (
                     <tr>
                       <td colSpan={8} className="py-8 text-center text-slate-400">
                         لا توجد أصناف مطابقة للبحث
                       </td>
                     </tr>
+                  ) : valuationLevel === 'FAMILY' ? (
+                    <>
+                      {stockValuation.familyGroups.map((group) => (
+                        <React.Fragment key={group.family.id}>
+                          <tr className="bg-slate-100/90 border-t border-slate-300 font-bold">
+                            <td className="py-2.5 px-3 text-slate-700">
+                              {activities.find((a) => a.id === group.family.activityId)?.nameAr ||
+                                group.family.activityId}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono text-[11px] text-slate-700">
+                              <span className="inline-block whitespace-nowrap rounded bg-slate-800 text-white px-1.5 py-0.5 text-[10px]">
+                                مجموعة ({group.skuCount} SKU)
+                              </span>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-extrabold text-slate-900">
+                                {group.family.nameAr}
+                              </div>
+                              <div className="text-[10px] text-slate-600 mt-0.5">
+                                {group.brand ? `العلامة: ${group.brand.nameAr} • ` : ''}
+                                تجميع اشتقاقي من متغيرات SKU التابعة (لا يُضاف فوق إجمالياتها)
+                              </div>
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono font-extrabold text-slate-900">
+                              {group.totalQty}
+                            </td>
+                            <td className="py-2.5 px-3 text-center text-[11px] text-slate-500">
+                              {group.activeSkuCount} نشط
+                              {group.archivedSkuCount > 0 ? ` • ${group.archivedSkuCount} مؤرشف` : ''}
+                            </td>
+                            <td className="py-2.5 px-3 text-center text-slate-400">-</td>
+                            <td className="py-2.5 px-3 text-center font-mono text-emerald-800">
+                              {group.totalRetail.toFixed(2)}
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono tabular-nums font-extrabold text-slate-900">
+                              {group.totalCost.toFixed(2)} {currencySymbol}
+                            </td>
+                          </tr>
+                          {group.skuRows.map((row) => {
+                            const prod = row.product;
+                            return (
+                              <tr key={prod.id} className="hover:bg-slate-50 bg-white">
+                                <td className="py-2 px-3 text-[11px] text-slate-400 pr-6">↳ SKU</td>
+                                <td className="py-2 px-3 font-mono font-bold text-slate-800">
+                                  {prod.code}
+                                </td>
+                                <td className="py-2 px-3">
+                                  <div className="font-semibold text-slate-900 flex flex-wrap items-center gap-1.5">
+                                    <span>{prod.nameAr}</span>
+                                    {prod.isActive === false && (
+                                      <span className="rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 text-[10px] font-bold">
+                                        مؤرشف
+                                      </span>
+                                    )}
+                                  </div>
+                                  {row.variantLabel && (
+                                    <div className="text-[10px] text-slate-600 mt-0.5">
+                                      {row.variantLabel}
+                                    </div>
+                                  )}
+                                  {prod.oemNumber && (
+                                    <div className="text-[10px] text-blue-700 font-mono">
+                                      OEM: {prod.oemNumber}
+                                    </div>
+                                  )}
+                                </td>
+                                <td className="py-2 px-3 text-center font-mono text-slate-900">
+                                  {row.qty} {prod.unit}
+                                </td>
+                                <td className="py-2 px-3 text-center">
+                                  {prod.batches && prod.batches.length > 0 ? (
+                                    <div className="space-y-0.5">
+                                      {prod.batches.map((b) => {
+                                        const isExpired = b.expiryDate < todayLocal;
+                                        return (
+                                          <div
+                                            key={b.id}
+                                            className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                                              isExpired
+                                                ? 'bg-rose-100 text-rose-800 font-bold'
+                                                : 'bg-emerald-50 text-emerald-800'
+                                            }`}
+                                          >
+                                            {b.batchNumber}: {b.quantity} {prod.unit} (ينتهي: {b.expiryDate})
+                                          </div>
+                                        );
+                                      })}
+                                    </div>
+                                  ) : (
+                                    <span className="text-slate-400 text-[11px]">-</span>
+                                  )}
+                                </td>
+                                <td className="py-2 px-3 text-center font-mono tabular-nums">
+                                  {prod.purchasePrice.toFixed(2)}
+                                </td>
+                                <td className="py-2 px-3 text-center font-mono tabular-nums">
+                                  {prod.sellPrice.toFixed(2)}
+                                </td>
+                                <td className="py-2 px-3 text-center font-mono tabular-nums font-semibold text-slate-800">
+                                  {row.costValue.toFixed(2)} {currencySymbol}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </React.Fragment>
+                      ))}
+                      {stockValuation.standaloneRows.map((row) => {
+                        const prod = row.product;
+                        return (
+                          <tr key={prod.id} className="hover:bg-slate-50">
+                            <td className="py-2.5 px-3 font-semibold text-slate-600">
+                              {activities.find((a) => a.id === prod.activityId)?.nameAr ||
+                                prod.activityId}
+                            </td>
+                            <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
+                              <div>{prod.code}</div>
+                              <div className="text-[10px] text-slate-500 font-sans">SKU مستقل</div>
+                            </td>
+                            <td className="py-2.5 px-3">
+                              <div className="font-bold text-slate-900">{prod.nameAr}</div>
+                              {row.brand && (
+                                <div className="text-[10px] text-slate-600">
+                                  العلامة: {row.brand.nameAr}
+                                </div>
+                              )}
+                              {prod.oemNumber && (
+                                <div className="text-[10px] text-blue-700 font-mono">
+                                  OEM: {prod.oemNumber}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-900">
+                              {row.qty} {prod.unit}
+                            </td>
+                            <td className="py-2.5 px-3 text-center">
+                              {prod.batches && prod.batches.length > 0 ? (
+                                <div className="space-y-0.5">
+                                  {prod.batches.map((b) => {
+                                    const isExpired = b.expiryDate < todayLocal;
+                                    return (
+                                      <div
+                                        key={b.id}
+                                        className={`text-[10px] font-mono px-1.5 py-0.5 rounded ${
+                                          isExpired
+                                            ? 'bg-rose-100 text-rose-800 font-bold'
+                                            : 'bg-emerald-50 text-emerald-800'
+                                        }`}
+                                      >
+                                        {b.batchNumber}: {b.quantity} {prod.unit} (ينتهي: {b.expiryDate})
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 text-[11px]">-</span>
+                              )}
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono tabular-nums">
+                              {prod.purchasePrice.toFixed(2)}
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono tabular-nums">
+                              {prod.sellPrice.toFixed(2)}
+                            </td>
+                            <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
+                              {row.costValue.toFixed(2)} {currencySymbol}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </>
                   ) : (
-                    stockValuation.filtered.map((prod) => {
-                      const totalCost = getProductCostValue(prod);
-
+                    stockValuation.skuRows.map((row) => {
+                      const prod = row.product;
                       return (
                         <tr key={prod.id} className="hover:bg-slate-50">
                           <td className="py-2.5 px-3 font-semibold text-slate-600">
@@ -1615,10 +1910,32 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                               prod.activityId}
                           </td>
                           <td className="py-2.5 px-3 font-mono font-bold text-slate-900">
-                            {prod.code}
+                            <div>{prod.code}</div>
+                            <div className="text-[10px] font-sans text-slate-500">
+                              {row.family ? 'SKU ضمن مجموعة' : 'SKU مستقل'}
+                            </div>
                           </td>
                           <td className="py-2.5 px-3">
-                            <div className="font-bold text-slate-900">{prod.nameAr}</div>
+                            <div className="font-bold text-slate-900 flex flex-wrap items-center gap-1.5">
+                              <span>{prod.nameAr}</span>
+                              {prod.isActive === false && (
+                                <span className="rounded bg-amber-100 text-amber-800 px-1.5 py-0.5 text-[10px] font-bold">
+                                  مؤرشف
+                                </span>
+                              )}
+                            </div>
+                            {(row.family || row.brand) && (
+                              <div className="text-[10px] text-slate-600 mt-0.5">
+                                {row.family ? `المجموعة: ${row.family.nameAr}` : ''}
+                                {row.family && row.brand ? ' • ' : ''}
+                                {row.brand ? `العلامة: ${row.brand.nameAr}` : ''}
+                              </div>
+                            )}
+                            {row.variantLabel && (
+                              <div className="text-[10px] text-indigo-700 font-medium mt-0.5">
+                                {row.variantLabel}
+                              </div>
+                            )}
                             {prod.oemNumber && (
                               <div className="text-[10px] text-blue-700 font-mono">
                                 OEM: {prod.oemNumber}
@@ -1626,7 +1943,7 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                             )}
                           </td>
                           <td className="py-2.5 px-3 text-center font-mono font-bold text-slate-900">
-                            {prod.currentStock} {prod.unit}
+                            {row.qty} {prod.unit}
                           </td>
                           <td className="py-2.5 px-3 text-center">
                             {prod.batches && prod.batches.length > 0 ? (
@@ -1642,7 +1959,7 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                                           : 'bg-emerald-50 text-emerald-800'
                                       }`}
                                     >
-                                      {b.batchNumber}: {b.quantity} حبة (ينتهي: {b.expiryDate})
+                                      {b.batchNumber}: {b.quantity} {prod.unit} (ينتهي: {b.expiryDate})
                                     </div>
                                   );
                                 })}
@@ -1658,7 +1975,7 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                             {prod.sellPrice.toFixed(2)}
                           </td>
                           <td className="py-2.5 px-3 text-center font-mono tabular-nums font-bold text-slate-900">
-                            {totalCost.toFixed(2)} {currencySymbol}
+                            {row.costValue.toFixed(2)} {currencySymbol}
                           </td>
                         </tr>
                       );
@@ -1668,14 +1985,14 @@ export const ReportsManager: React.FC<ReportsManagerProps> = ({ selectedActivity
                 <tfoot>
                   <tr className="border-t-2 border-slate-800 bg-slate-50 font-black text-xs">
                     <td colSpan={3} className="py-3 px-3">
-                      إجمالي قيمة المخزون الدفتري:
+                      إجمالي قيمة المخزون الدفتري (محسوب على مستوى SKU دون احتساب مزدوج):
                     </td>
                     <td className="py-3 px-3 text-center font-mono tabular-nums">
-                      {stockValuation.totalQty}
+                      {stockValuation.summary.totalQty}
                     </td>
                     <td colSpan={3}></td>
                     <td className="py-3 px-3 text-center font-mono tabular-nums text-sm text-slate-900 font-extrabold">
-                      {stockValuation.totalCost.toFixed(2)} {currencySymbol}
+                      {stockValuation.summary.totalCost.toFixed(2)} {currencySymbol}
                     </td>
                   </tr>
                 </tfoot>

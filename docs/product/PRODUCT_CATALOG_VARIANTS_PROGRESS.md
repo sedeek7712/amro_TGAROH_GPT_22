@@ -7,22 +7,23 @@
 
 - **معرّف المبادرة:** TOOFAN-PRODUCT-001
 - **آخر تحديث:** 2026-11-28
-- **الالتزام المرجعي على `main` في GitHub:** `f6e1fdfab0a16af7c611a49b6c17dbe6250db062` (`feat(inventory): implement product catalog and variants`).
+- **الالتزام المرجعي على `main` في GitHub:** `1b288cb6b9499ae3d75f85557dbfd3a2ddbce8fe` (`feat(inventory): expand product metadata and media handling` — `2026-11-28T05:12:57Z`).
 - **الحالة العامة:**
-  - اكتملت ودُمجت مراحل `PVAR-001` حتى `PVAR-004B-2` (`#27`، `#29`، `#32`، `#33`)، ورُفع لاحقًا إلى `main` مباشرة تنفيذ `PVAR-005` و`PVAR-006` و`PVAR-007` في الالتزام `f6e1fdfab0a16af7c611a49b6c17dbe6250db062`.
-  - فشل CI على `main` (`run 46105824689`) بسبب تعارض اختبارين قديمين مع قاعدة منع بيع الصنف المؤرشف؛ تم إصلاح الاختبارين محليًا بموافقة المالك (`DEC-2026-009`) واجتازت حزمة التحقق كاملة محليًا.
-- **البرمجة:** منتج بسيط + علامات تجارية + مجموعات متغيرات + وحدات بديلة + اختيار المتغيرات وباركودها في POS ومنع بيع الصنف المؤرشف، إضافةً إلى تنفيذ **`PVAR-008`** محليًا بالكامل (محرك التحويل الدقيق، الفواتير والمشتريات والمرتجعات بوحدات بديلة ولقطات تاريخية، وتكافؤ Dexie/SQLite وواجهات POS والمشتريات والمطبوعات).
-- **قاعدة البيانات:** Migrations حتى `006_invoice_unit_snapshots.sql` وDexie مضافة محليًا (مع إبقاء `base_quantity_decimal` و`invoice_item_id` فارغين `NULL` للصفوف التاريخية دون backfill صامت).
-- **المحاسبة والمخزون:** تم التحقق من بقاء موازنة القيد المزدوج، معادلات التكلفة/FEFO/COGS، وحساب تكلفة الوحدة الأساسية بدقة `BigInt` (`QTY_SCALE`) دون تعديل صامت للأرصدة التاريخية.
-- **حالة Git المحلية:** مجلد `.git` غير متاح في بيئة العمل الحالية المستوردة؛ التعديلات محلية بانتظار رفعها إلى فرع مستقل وPR على GitHub.
+  - اكتملت ودُمجت مراحل `PVAR-001` حتى `PVAR-004B-2` عبر PRs (`#27`، `#29`، `#32`، `#33`)، ثم رُفعت مباشرة إلى `main` مراحل `PVAR-005` و`PVAR-006` و`PVAR-007` (`f6e1fdfa`) و`PVAR-008` (`d81f2c15fd`، واجتاز CI الثلاثي في run `46110281168`) و`PVAR-009` (`1b288cb6b9`).
+  - فشل CI على `1b288cb6b9` (`run 46111077360`) في اختبار واحد فقط ضمن `scripts/tests/pvar_009_specialized_batches_media.test.mjs` بسبب تمرير `payload:` بدل `params:` إلى `backend.createSalesInvoiceAtomic`؛ تم إصلاح الاختبار محليًا بموافقة المالك (`DEC-2026-010`) واجتازت حزمة `npm run verify` وفحوص SQLite الأربعة كاملة محليًا.
+- **البرمجة:** منتج بسيط + علامات تجارية + مجموعات متغيرات + وحدات بديلة + اختيار المتغيرات وباركودها في POS ومنع بيع الصنف المؤرشف + تحويل الوحدات الدقيق ولقطات الفواتير (`PVAR-008`) + الخصائص المتخصصة المعزولة والدفعات لكل SKU ومنع بيع المنتهي والصور المعزولة (`PVAR-009`) موجودة الآن على `main`.
+- **قاعدة البيانات:** Migrations حتى `006_invoice_unit_snapshots.sql` وDexie مطبقة على `main` (مع إبقاء `base_quantity_decimal` و`invoice_item_id` فارغين `NULL` للصفوف التاريخية دون backfill صامت).
+- **المحاسبة والمخزون:** لم يطرأ أي تغيير على المعادلات المحاسبية أو التقييم أو قواعد البيانات ضمن مهمة الإصلاح الاختباري `DEC-2026-010`.
+- **حالة Git المحلية:** مجلد `.git` غير متاح في بيئة العمل الحالية المستوردة؛ التعديلات محلية بانتظار رفعها من بيئة المطور إلى فرع مستقل وPR على GitHub.
 
 ## 2. آخر خط أساس تم التحقق منه
 
 - المستودع: `sedeek7712/amro_TGAROH_GPT_22`
-- الفرع المرجعي على GitHub: `main`
-- آخر SHA على `main` عند الفحص: `f6e1fdfab0a16af7c611a49b6c17dbe6250db062` (تاريخ `2026-11-28T04:04:29Z`)
+- الفرع المرجعي على GitHub: `main` (غير محمي: `Protected: false`)
+- آخر SHA على `main` عند الفحص: `1b288cb6b9499ae3d75f85557dbfd3a2ddbce8fe` (تاريخ `2026-11-28T05:12:57Z`)
+- الالتزام السابق له مباشرة: `d81f2c15fd` (`feat(db): implement invoice unit snapshots (v6)` — `2026-11-28T05:02:37Z`، run `46110281168` ناجح بالكامل)
 - طلبات الدمج المفتوحة وقت الفحص: `#31` (Draft)، `#30` (Draft)، `#11` (Open)، `#10` (Open)، `#2` (Draft)
-- طلبات الدمج المدمجة منذ خط الأساس السابق: `#28` (`4d23d08`)، `#29` (`2cdad79`)، `#32` (`d5f0eea`)، `#33` (`5751205`)
+- طلبات الدمج المدمجة سابقًا على `main`: `#25`، `#26`، `#27` (`b3def57`)، `#28` (`4d23d08`)، `#29` (`2cdad79`)، `#32` (`d5f0eea`)، `#33` (`5751205`)
 
 هذا السجل يعكس أحدث واقع تم التحقق منه؛ قبل أي مهمة جديدة على GitHub أعد فحص HEAD الحالي وPRs المفتوحة.
 
@@ -36,24 +37,24 @@
 | PVAR-004A | نموذج البيانات للعلامات والمجموعات وDexie/SQLite (Migration 004) | مكتملة ومُدمجة | PR #29؛ دمج إلى `main` بالالتزام `2cdad7995fa8f439b08ddd56998117475ed133f4` |
 | PVAR-004B-1 | تخزين الوحدات البديلة في SQLite وDexie (Migration 005) | مكتملة ومُدمجة | PR #32؛ دمج إلى `main` بالالتزام `d5f0eeae077c44cb467d2d4383744e6a182c7ba0` |
 | PVAR-004B-2 | واجهة إدارة الوحدات البديلة (`DEC-2026-008`) | مكتملة ومُدمجة | PR #33؛ دمج إلى `main` بالالتزام `57512053ba2362ac6db9097db78186f2de61b161` |
-| PVAR-005 | خدمات المجال والتحقق والصلاحيات وتكافؤ Dexie/SQLite | موجود على `main` + تم إصلاح تعارض CI محليًا | دخل `main` في `f6e1fdfa`؛ `product-catalog-service.mjs` و`dexieDataService.ts` و`sqliteDataService.ts` والاختبارات |
+| PVAR-005 | خدمات المجال والتحقق والصلاحيات وتكافؤ Dexie/SQLite | موجود على `main` | دخل `main` في `f6e1fdfa`؛ `product-catalog-service.mjs` و`dexieDataService.ts` و`sqliteDataService.ts` والاختبارات |
 | PVAR-006 | واجهة إدارة المنتج البسيط ومجموعات المتغيرات والعلامات | موجود على `main` | دخل `main` في `f6e1fdfa`؛ `BrandManagerModal.tsx` و`ProductFamilyModal.tsx` و`InventoryManager.tsx` و`product_catalog_ui.test.ts` |
-| PVAR-007 | البحث والباركود ونقطة البيع ومنع بيع الصنف المؤرشف | موجود على `main` + إصلاح تعارض اختبارين قديمين (`DEC-2026-009`) | دخل `main` في `f6e1fdfa`؛ `PosVariantPickerModal.tsx` و`posCatalog.ts` و`PointOfSale.tsx` و`SalesInvoiceDocument.tsx` و`pos_catalog_variants.test.ts`؛ أصلح `inventory_valuation.test.ts` و`batch_b_inventory_parties.test.mjs` محليًا |
-| PVAR-008 | وحدات القياس والتحويل والمشتريات والمرتجعات | مكتمل محليًا بانتظار المراجعة والرفع | `unit-conversion.mjs` و`006_invoice_unit_snapshots.sql` و`financial-service.mjs` و`dexieDataService.ts` و`PointOfSale.tsx` و`PurchasesManager.tsx` و`SalesInvoiceDocument.tsx` و`documentService.ts` واختبارات التكافؤ + فحص Chromium حقيقي |
-| PVAR-009 | الخصائص المتخصصة والدفعات والصور | لم تبدأ | لا تغييرات |
-| PVAR-010 | التقارير والتصدير والاستيراد والنسخ الاحتياطي | لم تبدأ | لا تغييرات |
+| PVAR-007 | البحث والباركود ونقطة البيع ومنع بيع الصنف المؤرشف | موجود على `main` + إصلاح تعارض اختبارين قديمين (`DEC-2026-009`) | دخل `main` في `f6e1fdfa`؛ أُصلحت الاختبارات ودخلت `main` في `d81f2c15fd` |
+| PVAR-008 | وحدات القياس والتحويل والمشتريات والمرتجعات | موجود على `main` + اجتاز CI | دخل `main` في `d81f2c15fd`؛ اجتاز CI في run `46110281168` (`verify` + `sqlite-electron-runtime` + `windows-exe-preview`) |
+| PVAR-009 | الخصائص المتخصصة والدفعات والصور | موجود على `main` + إصلاح اختبار SQLite محليًا (`DEC-2026-010`) | دخل `main` في `1b288cb6b9`؛ `pvar_009_specialized_batches_media.test.ts` و`pvar_009_specialized_batches_media.test.mjs` (أُصلح محليًا واجتاز `31/31`) |
+| PVAR-010 | التقارير والتصدير والاستيراد والنسخ الاحتياطي | لم تبدأ | بانتظار رفع إصلاح `DEC-2026-010` وإغلاق CI ثم موافقة المالك |
 | PVAR-011 | اختبارات الانحدار والأمان والتوافق | لم تبدأ | لا تغييرات |
 | PVAR-012 | قبول المالك والإصدار | لم تبدأ | لا إصدار أو اختبار Windows يدوي مكتمل |
 
 ## 4. نقطة التوقف الحالية
 
-**آخر عمل مكتمل:** تنفيذ **`PVAR-008`** بالكامل (وحدات القياس البديلة والتحويل الدقيق `BigInt` واللقطات التاريخية على سطور فواتير البيع والشراء والمرتجعات عبر SQLite وDexie وواجهات React والمستندات) واجتياز كامل حزمة `npm run verify` وفحوص SQLite والمتصفح الحقيقي.
+**آخر عمل مكتمل:** إصلاح اختبار SQLite الخاص بـ `PVAR-009` (`scripts/tests/pvar_009_specialized_batches_media.test.mjs`) ومواءمة دفتر التقدم وسجل القرارات (`DEC-2026-010`) مع واقع `main` عند `1b288cb6b9499ae3d75f85557dbfd3a2ddbce8fe`، واجتياز حزمة التحقق كاملة محليًا.
 
-**المهمة الحالية:** `PVAR-008` مكتمل محليًا وجاهز للمراجعة والرفع على فرع مستقل وفتح PR إلى `main`.
+**المهمة الحالية:** `DEC-2026-010` مكتمل محليًا وجاهز للرفع على فرع مستقل وفتح PR إلى `main` (لا يتوفر `.git` في هذه الحاوية).
 
 **الخطوة التالية:**
-1. مراجعة التغييرات محليًا ورفعها إلى فرع مستقل وPR على GitHub للتحقق من تشغيل CI السحابي (بما فيه Node 24 وبناء Windows EXE).
-2. بعد الاعتماد والدمج، الانتقال عند طلب المالك إلى **`PVAR-009`** (الخصائص المتخصصة والدفعات والصور).
+1. رفع تعديلات `DEC-2026-010` (3 ملفات فقط) إلى فرع مستقل وPR إلى `main` والتحقق من نجاح CI السحابي (بما فيه Node 24 وبناء Windows EXE).
+2. بعد موافقة المالك والدمج، البدء عند الطلب في **`PVAR-010`** (التقارير والتصدير والاستيراد والنسخ الاحتياطي) أو حسم PRs المفتوحة (`#31`, `#30`, `#11`, `#10`, `#2`).
 
 **ما تم إنجازه ضمن PVAR-002:**
 1. فحص HEAD في main والفرع وطلب المراجعة.
@@ -461,3 +462,71 @@
   - فحص المتصفح الحقيقي (`playwright-cli` على Chromium، `1440x900` و`390x844`، 0 أخطاء Console، 0 تحذيرات): تهيئة المدير، إضافة مورد، إضافة صنف ووحدة بديلة `كرتون = 24 حبة`، شراء `2 كرتون` (`48 حبة`) ومعاينة مستند A4، مسح باركود الوحدة في POS + إضافة سطر بالوحدة الأساسية + إتمام بيع نقدي ومعاينة إيصال `80mm`، تنفيذ مرتجع مبيعات `1 كرتون` ومرتجع مشتريات `1 كرتون`، والتحقق من الرصيد النهائي (`23 حبة`) وتوافق شاشة الهاتف.
 - **حالة Git المحلية:** مجلد `.git` غير متاح في بيئة العمل الحالية؛ يلزم رفع التغييرات إلى فرع مستقل وPR على GitHub ثم التحقق من تشغيل CI السحابي وبناء Windows EXE.
 - **الخطوة التالية الدقيقة:** مراجعة تغييرات `PVAR-008`، ورفعها إلى فرع مستقل وفتح PR إلى `main`، ثم طلب موافقة المالك للبدء في **`PVAR-009`** بعد الدمج.
+
+---
+
+## تحديث الاستمرارية وإصلاح اختبار `PVAR-009` في SQLite — `DEC-2026-010` (2026-11-28)
+
+- **المستودع:** `sedeek7712/amro_TGAROH_GPT_22`
+- **المرجع الحي على GitHub عند الفحص:**
+  - `d81f2c15fd` (`2026-11-28T05:02:37Z` — `feat(db): implement invoice unit snapshots (v6)`) أدخل `PVAR-008` وتحديث `DEC-2026-009` مباشرة إلى `main`، واجتاز وظائف CI الثلاث في run `46110281168`.
+  - `1b288cb6b9499ae3d75f85557dbfd3a2ddbce8fe` (`2026-11-28T05:12:57Z` — `feat(inventory): expand product metadata and media handling`) أدخل `PVAR-009` مباشرة إلى `main` (الخصائص المتخصصة المعزولة لكل نشاط، دفعات FEFO لكل SKU، منع بيع المنتهي، والصور المعزولة لكل SKU مع fallback للعرض).
+- **حالة CI على `1b288cb6b9` قبل الإصلاح:** Run `46111077360` فشل في `verify` و`sqlite-electron-runtime` (نجح في `windows-exe-preview`).
+- **السبب المؤكد:** الاختبار `scripts/tests/pvar_009_specialized_batches_media.test.mjs` مرّر المفتاح `payload:` بدل `params:` إلى `backend.createSalesInvoiceAtomic` (السطرين `224` و`271`)، مما أطلق `FinancialValidationError: بيانات فاتورة المبيعات غير مكتملة.`.
+- **التغييرات المنفذة في هذه المهمة (`DEC-2026-010`):**
+  - `scripts/tests/pvar_009_specialized_batches_media.test.mjs` — تصحيح المفتاح من `payload:` إلى `params:` في استدعاءَي `backend.createSalesInvoiceAtomic`.
+  - `docs/ai/07-decision-log.md` و`docs/product/PRODUCT_CATALOG_VARIANTS_PROGRESS.md` — توثيق `DEC-2026-010` ومواءمة حالة `main` و`PVAR-008` و`PVAR-009`.
+- **ما لم يتغير صراحةً:**
+  - لم تُعدّل أي شيفرة إنتاجية في `src/` أو `electron/`.
+  - لم تُضف أي Migration جديدة أو تعديلات Schema أو تغييرات محاسبية أو مخزنية أو صلاحيات أو بيانات حقيقية.
+  - لم تبدأ `PVAR-010` بعد، ولم يُدمج أو يُغلق أي PR مفتوح (`#31`، `#30`، `#11`، `#10`، `#2`).
+- **الاختبارات والتحقق المنفذ بعد آخر تعديل (محليًا في حاوية Linux / Node 22):**
+  - `npm run verify` — نجاح كامل (exit code `0`):
+    - `npm run lint` (`tsc --noEmit`) — نجاح (`0` أخطاء).
+    - `npm run verify:architecture` — نجاح.
+    - `npm test` — نجاح **101 / 101** في `9` مجموعات (بما فيها `pvar_009_specialized_batches_media.test.ts`).
+    - `npm run test:sqlite` — نجاح **31 / 31** (بما فيها `pvar_009_specialized_batches_media.test.mjs`).
+    - `npm run test:legacy` — نجاح (**Phase 5: 10/10**، **Phase 6: 10/10**).
+    - `npm run build` (`vite build` + PWA) — نجاح.
+  - `python3 scripts/verify_sqlite_schema.py` — نجاح.
+  - `node scripts/verify_sqlite_runtime.mjs` — نجاح.
+  - `node scripts/verify_sqlite_auth.mjs` — نجاح.
+  - `node scripts/verify_sqlite_import.mjs` — نجاح.
+  - `node --check electron/main.mjs && node --check electron/preload.cjs && node --check electron/security/authentication.mjs` — نجاح.
+- **حالة Git المحلية:** لا يتوفر مجلد `.git` أو بيانات اعتماد GitHub داخل حاوية البيئة الحالية؛ يلزم رفع التغييرات الثلاثة من بيئة المطور إلى فرع مستقل وفتح PR إلى `main` (ثم التحقق من CI السحابي على Node 22/24 وبناء Windows EXE).
+- **الخطوة التالية الدقيقة:** رفع هذه التعديلات إلى فرع مستقل وPR إلى `main`، وبعد نجاح CI والموافقة والدمج، طلب موافقة المالك الصريحة لبدء **`PVAR-010`** (التقارير والتصدير والاستيراد والنسخ الاحتياطي) أو مراجعة PRs المفتوحة.
+
+---
+
+## PVAR-010 — التقارير والتصدير والاستيراد والنسخ الاحتياطي والتحقق من الصور (`DEC-2026-011`) (مكتمل محليًا بانتظار المراجعة والرفع)
+
+- **التاريخ:** 2026-11-28
+- **الحالة:** مكتمل محليًا بانتظار المراجعة والرفع على فرع مستقل وPR (لا يوجد `.git` في حاوية AI Studio المستوردة).
+- **هدف المرحلة:**
+  1. تجميع تقارير تقييم المخزون حسب مجموعة المنتج (`ProductFamily`) من الـ SKUs التابعة لها دون أي احتساب مزدوج.
+  2. إظهار مستوى التجميع (`SKU` مقابل `FAMILY`) بوضوح في واجهة التقرير (الرأس والشريط والجدول) وفي لقطة المستند المطبوع/المُصدّر (`DocumentSnapshot`).
+  3. دعم تصدير واستيراد ونسخ واستعادة الدليل والوحدات ولقطات التحويل وصور الأصناف عبر مساري Dexie JSON وSQLite/Electron، مع الحفاظ التام على التوافق مع النسخ القديمة (legacy) والتحقق من الصور وبصماتها (`SHA-256`) ومراجعها بعد الاستعادة.
+- **الملفات البرمجية والاختبارية المتأثرة:**
+  - `src/utils/productCatalogReports.ts` (جديد) — دوال تجميع تقرير تقييم المخزون (`StockValuationAggregationLevel`, `getStockValuationLevelLabel`, `buildStockValuationReport`) مع إزالة التكرار حسب `product.id`، الحفاظ على `getProductCostValue` على مستوى الدفعات، اشتقاق `familyGroups` من الـ SKUs التابعة (`derivedFromSkus: true`)، وحساب الإجماليات مرة واحدة فقط فوق الـ SKUs الفريدة.
+  - `src/hooks/useLiveDexie.ts` — إضافة `useLiveBrands` و`useLiveProductFamilies` و`useLiveProductCatalog` لمساري Dexie `liveQuery` وElectron IPC (`window.amroDesktop`).
+  - `src/components/reports/ReportsManager.tsx` — ربط مبدّل `مستوى التجميع` (`SKU فردي` / `تجميع حسب المجموعة`) في عرض A4 والحراري ولقطة `buildActiveReportSnapshot('stock_valuation')` مع توحيد وحدة الصنف الفعلية ومنع التفاف شارة `مجموعة (N SKU)`.
+  - `src/services/dexieDataService.ts` — تضمين `db.productImages` و`mediaManifest` في `exportBackupJSON()`، والتحقق في `importBackupJSON()` من MIME والتوقيع السحري للملف وبصمة `SHA-256` والربط مع `productId`/`tenantId`/`activityId` مع تفريغ `db.productImages` ذريًا لاستيعاب النسخ القديمة بأمان، وإضافة `verifyProductImagesIntegrity()`.
+  - `electron/sqlite/modules/product-media-service.mjs` و`electron/sqlite/desktop-backend.mjs` و`electron/main.mjs` و`electron/sqlite/modules/backup-sync-service.mjs` و`src/types/desktop.d.ts` — تصدير `verifyProductMediaIntegrity` وفحص كل الصور النشطة وملفاتها في `.media` وبصماتها وارتباطاتها بعد الاستعادة داخل حدود rollback في `performSqliteRestore`، وإضافة `hasMediaSidecar` إلى `listNativeBackups`.
+  - `src/tests/pvar_010_reports_backup.test.ts` (جديد) — اختبارات وحدة لتقرير تقييم المخزون (`SKU` مقابل `FAMILY` بدون احتساب مزدوج)، لقطة المستند، ودورة النسخ/الاستعادة والصور والتوافق مع legacy v2.0 في Dexie (2/2).
+  - `scripts/tests/pvar_010_backup_media_restore.test.mjs` (جديد) — اختبارات SQLite للنسخ الأصلي والاستعادة مع `.media` والتحقق من `SHA-256` والمراجع وكشف التلف والتراجع، واستيراد JSON الحديث وlegacy v2.0 (2/2).
+- **ما لم يتغير صراحةً:**
+  - لم تتغير معادلات المحاسبة أو القيود اليومية أو حسابات COGS أو FEFO أو `getProductCostValue`.
+  - لم يُجرَ أي backfill على الفواتير التاريخية السابقة، ولم تُضف أي Migration جديدة.
+- **الاختبارات والتحقق المنفذ (محليًا في حاوية Linux / Node 22):**
+  - `npm run verify`:
+    - `npm run lint` (`tsc --noEmit`) — نجاح (`0` أخطاء).
+    - `npm run verify:architecture` — نجاح.
+    - `npm test` — نجاح **103 / 103** (`68` حالة في `9` مجموعات، بما فيها `pvar_010_reports_backup.test.ts`).
+    - `npm run test:sqlite` — نجاح **33 / 33** (بما فيها `pvar_010_backup_media_restore.test.mjs`).
+    - `npm run test:legacy` — نجاح (**Phase 5: 10/10**، **Phase 6: 10/10**).
+    - `npm run build` (`vite build` + PWA) — نجاح.
+  - `python3 scripts/verify_sqlite_schema.py` و`node scripts/verify_sqlite_runtime.mjs` و`node scripts/verify_sqlite_auth.mjs` و`node scripts/verify_sqlite_import.mjs` و`node --check electron/main.mjs electron/preload.cjs electron/security/authentication.mjs` — نجاح كامل.
+  - فحص المتصفح الحقيقي (`playwright-cli` على Chromium، `1440x900` و`390x844`، 0 أخطاء Console، 0 تحذيرات): تهيئة المدير، إضافة بيانات اصطناعية لمجموعة ومتغيري SKU وصنف مستقل، التحقق من تقرير `جرد المخزون وصلاحيات FEFO` في وضعي `SKU فردي` و`تجميع حسب المجموعة` (ثبات الإجماليات `20` و`1370.00 ر.س` دون احتساب مزدوج)، والتحقق من شاشة `المزامنة والنسخ الاحتياطي`.
+- **حالة Git المحلية:** لا يتوفر مجلد `.git` في حاوية البيئة الحالية؛ يلزم رفع تغييرات `DEC-2026-010` و`PVAR-010` إلى فرع مستقل وفتح PR إلى `main` (ثم التحقق من CI السحابي وبناء Windows EXE).
+- **الخطوة التالية الدقيقة:** رفع هذه التعديلات إلى فرع مستقل وفتح PR إلى `main` دون دمج تلقائي، ثم مراجعة والبدء في **`PVAR-011` (اختبارات الانحدار والأمان والتوافق)** وفق `docs/product/PRODUCT_CATALOG_VARIANTS_PLAN.md` بعد التأكد من حالة CI.
+

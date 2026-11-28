@@ -3,7 +3,7 @@ import { createInventoryPartiesService } from './modules/inventory-parties-servi
 import { createFinancialService } from './modules/financial-service.mjs';
 import { createBackupSyncService } from './modules/backup-sync-service.mjs';
 import { createProductMediaStorage } from '../product-media-storage.mjs';
-import { createProductMediaService } from './modules/product-media-service.mjs';
+import { createProductMediaService, verifyProductMediaIntegrity } from './modules/product-media-service.mjs';
 import { createProductUnitsService } from './modules/product-units-service.mjs';
 import { createProductCatalogService } from './modules/product-catalog-service.mjs';
 import { importLegacyBackup, previewLegacyBackup } from './legacy-backup-importer.mjs';
@@ -58,6 +58,10 @@ export function createDesktopBackend({
         schemaVersion: latest.version,
         sqliteVersion: sqliteVersion.version,
       };
+    },
+
+    verifyProductMediaIntegrity() {
+      return verifyProductMediaIntegrity(database, mediaStorage);
     },
 
     // --- Legacy Dexie JSON Import (Allowed on fresh unconfigured DB OR authenticated ADMIN) ---

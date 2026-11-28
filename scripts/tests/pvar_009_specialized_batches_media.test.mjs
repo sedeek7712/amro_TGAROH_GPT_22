@@ -221,7 +221,7 @@ test('PVAR-009 SQLite parity: specialized fields, per-SKU FEFO batches, expired 
     // 3. Auto FEFO deduction deducts SQ-SOON first then SQ-LATER, without touching SKU-2
     backend.createSalesInvoiceAtomic({
       token,
-      payload: {
+      params: {
         invoice: {
           id: 'sq-inv-fefo',
           invoiceNumber: '',
@@ -268,7 +268,7 @@ test('PVAR-009 SQLite parity: specialized fields, per-SKU FEFO batches, expired 
       () =>
         backend.createSalesInvoiceAtomic({
           token,
-          payload: {
+          params: {
             invoice: {
               id: 'sq-inv-exp-fail',
               invoiceNumber: '',

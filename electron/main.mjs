@@ -245,7 +245,7 @@ if (!hasSingleInstance) {
       try {
         const restoredMediaFound = desktopBackend.productMediaStorage.restoreFrom(sourceBackupPath + '.media');
         const productImageCount = databaseRuntime.database.prepare(
-          'SELECT COUNT(*) AS count FROM product_images'
+          'SELECT COUNT(*) AS count FROM product_images WHERE is_deleted = 0'
         ).get().count;
         if (!restoredMediaFound && productImageCount > 0) {
           throw new Error('النسخة الاحتياطية تحتوي على سجلات صور، لكن مجلد الصور المرفق (.media) غير موجود.');
@@ -256,6 +256,7 @@ if (!hasSingleInstance) {
             restoredFrom: path.basename(sourceBackupPath),
           });
         }
+        desktopBackend.verifyProductMediaIntegrity();
       } catch (mediaRestoreError) {
         try {
           const rollback = await restoreSqliteBackupFile({

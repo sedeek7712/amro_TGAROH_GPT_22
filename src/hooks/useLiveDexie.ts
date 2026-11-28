@@ -37,6 +37,10 @@ import {
   PaymentAllocation,
   PartyAdvanceTransaction,
   AllocationAudit,
+  Brand,
+  ProductFamily,
+  ProductCatalogEntry,
+  ProductUnit,
 } from '../types/erp';
 
 function currentActorKey(actor: SystemUser | null): string {
@@ -533,3 +537,139 @@ export function useLiveAllocationAudits(voucherId?: string): AllocationAudit[] {
     }
   );
 }
+
+export function useLiveBrands(includeInactive = true): Brand[] {
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => {
+      if (!hasPermission(actor, 'inventory:view')) return [];
+      const tenantId = actor?.tenantId?.trim() || '';
+      if (!tenantId) return [];
+      const rows = await db.brands.where('tenantId').equals(tenantId).toArray();
+      const filtered = includeInactive ? rows : rows.filter((b) => b.isActive !== false);
+      return filtered.sort((a, b) => a.nameAr.localeCompare(b.nameAr, 'ar'));
+    },
+    [],
+    [includeInactive, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'inventory:view')) return [];
+      return await window.amroDesktop!.getBrands({ token, includeInactive });
+    }
+  );
+}
+
+export function useLiveProductFamilies(
+  activityId?: CommercialActivityId | 'all',
+  includeInactive = true
+): ProductFamily[] {
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => {
+      if (!hasPermission(actor, 'inventory:view')) return [];
+      const tenantId = actor?.tenantId?.trim() || '';
+      if (!tenantId) return [];
+      const rows =
+        activityId && activityId !== 'all'
+          ? await db.productFamilies
+              .where('[tenantId+activityId]')
+              .equals([tenantId, activityId])
+              .toArray()
+          : await db.productFamilies.where('tenantId').equals(tenantId).toArray();
+      const activeFiltered = includeInactive ? rows : rows.filter((f) => f.isActive !== false);
+      return filterRecordsByActivityScope(activeFiltered, actor).sort((a, b) =>
+        a.createdAt.localeCompare(b.createdAt)
+      );
+    },
+    [],
+    [activityId, includeInactive, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'inventory:view')) return [];
+      return await window.amroDesktop!.getProductFamilies({
+        token,
+        activityId: activityId === 'all' ? undefined : activityId,
+        includeInactive,
+      });
+    }
+  );
+}
+
+export function useLiveProductCatalog(
+  activityId?: CommercialActivityId | 'all'
+): ProductCatalogEntry[] {
+  const actor = authService.getCurrentActorSync();
+  return useLiveDexie(
+    async () => {
+      if (!hasPermission(actor, 'inventory:view')) return [];
+      const tenantId = actor?.tenantId?.trim() || '';
+      const rawProducts =
+        activityId && activityId !== 'all'
+          ? await db.products.where('activityId').equals(activityId).toArray()
+          : await db.products.toArray();
+      const scopedProducts = filterRecordsByActivityScope(rawProducts, actor);
+      if (scopedProducts.length === 0) return [];
+
+      const [batches, metas, families, brands, units] = await Promise.all([
+        db.productBatches.toArray(),
+        tenantId ? db.productCatalogMeta.where('tenantId').equals(tenantId).toArray() : Promise.resolve([]),
+        tenantId ? db.productFamilies.where('tenantId').equals(tenantId).toArray() : Promise.resolve([]),
+        tenantId ? db.brands.where('tenantId').equals(tenantId).toArray() : Promise.resolve([]),
+        tenantId ? db.productUnits.where('tenantId').equals(tenantId).toArray() : Promise.resolve([]),
+      ]);
+
+      const batchesByProduct = new Map<string, Product['batches']>();
+      for (const batch of batches) {
+        const list = batchesByProduct.get(batch.productId) || [];
+        list.push(batch);
+        batchesByProduct.set(batch.productId, list);
+      }
+
+      const metaByProduct = new Map(metas.map((m) => [m.productId, m]));
+      const familyById = new Map(families.map((f) => [f.id, f]));
+      const brandById = new Map(brands.map((b) => [b.id, b]));
+      const unitsByProduct = new Map<string, ProductUnit[]>();
+      for (const unit of units) {
+        const list = unitsByProduct.get(unit.productId) || [];
+        list.push(unit);
+        unitsByProduct.set(unit.productId, list);
+      }
+
+      return scopedProducts.map((p) => {
+        const product: Product = {
+          ...p,
+          batches: batchesByProduct.get(p.id) || p.batches || [],
+        };
+        const meta = metaByProduct.get(product.id);
+        const family = meta?.familyId ? familyById.get(meta.familyId) : undefined;
+        const resolvedBrandId = meta?.brandId || family?.brandId;
+        const brand = resolvedBrandId ? brandById.get(resolvedBrandId) : undefined;
+        const productUnits = (unitsByProduct.get(product.id) || []).sort((a, b) =>
+          a.createdAt.localeCompare(b.createdAt)
+        );
+        return {
+          product,
+          ...(meta ? { meta } : {}),
+          ...(family ? { family } : {}),
+          ...(brand ? { brand } : {}),
+          variantAttributes: meta?.variantAttributes || {},
+          units: productUnits,
+        };
+      });
+    },
+    [],
+    [activityId, currentActorKey(actor)],
+    async () => {
+      const token = desktopSession.getToken();
+      const current = desktopSession.getActor();
+      if (!token || !hasPermission(current, 'inventory:view')) return [];
+      return await window.amroDesktop!.getProductCatalog({
+        token,
+        activityId: activityId === 'all' ? undefined : activityId,
+      });
+    }
+  );
+}
+

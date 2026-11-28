@@ -85,6 +85,7 @@ export interface DesktopNativeBackupInfo {
   sizeBytes: number;
   modifiedAt: string;
   location?: 'default' | 'custom';
+  hasMediaSidecar?: boolean;
 }
 
 export interface DesktopBackupSettings {

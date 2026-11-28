@@ -20,6 +20,8 @@ import {
   ProductBatch,
   ProductUnit,
   SaveProductUnitInput,
+  ProductImage,
+  ProductImageLocalAsset,
   Brand,
   ProductFamily,
   ProductCatalogMeta,
@@ -313,6 +315,208 @@ function validateCatalogBackupData(data: Record<string, unknown>): void {
     unitIds.add(idKey);
     unitCodes.add(codeKey);
   }
+}
+
+const BACKUP_IMAGE_MAX_ORIGINAL_BYTES = 10 * 1024 * 1024;
+const BACKUP_IMAGE_MAX_THUMB_BYTES = 1024 * 1024;
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  if (typeof Buffer !== 'undefined') {
+    return Buffer.from(bytes).toString('base64');
+  }
+  let binary = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(binary);
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  if (typeof Buffer !== 'undefined') {
+    return new Uint8Array(Buffer.from(base64, 'base64'));
+  }
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function assertBackupImageSignature(bytes: Uint8Array, mimeType: string): void {
+  const valid =
+    mimeType === 'image/jpeg'
+      ? bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
+      : mimeType === 'image/png'
+        ? bytes.length >= 8 &&
+          bytes[0] === 137 &&
+          bytes[1] === 80 &&
+          bytes[2] === 78 &&
+          bytes[3] === 71 &&
+          bytes[4] === 13 &&
+          bytes[5] === 10 &&
+          bytes[6] === 26 &&
+          bytes[7] === 10
+        : mimeType === 'image/webp'
+          ? bytes.length >= 12 &&
+            bytes[0] === 82 &&
+            bytes[1] === 73 &&
+            bytes[2] === 70 &&
+            bytes[3] === 70 &&
+            bytes[8] === 87 &&
+            bytes[9] === 69 &&
+            bytes[10] === 66 &&
+            bytes[11] === 80
+          : false;
+  if (!valid) {
+    throw new Error('محتوى ملف الصورة في النسخة الاحتياطية لا يطابق صيغة الصورة المعلنة.');
+  }
+}
+
+async function computeBlobSha256(blob: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+}
+
+async function blobToDataUrlSafe(blob: Blob, expectedMime: string): Promise<string> {
+  const bytes = new Uint8Array(await blob.arrayBuffer());
+  assertBackupImageSignature(bytes, expectedMime);
+  return `data:${expectedMime};base64,${uint8ArrayToBase64(bytes)}`;
+}
+
+function dataUrlToValidatedBlobSafe(
+  dataUrl: unknown,
+  expectedMime: string,
+  maxBytes: number
+): Blob {
+  if (typeof dataUrl !== 'string') {
+    throw new Error('بيانات الصورة المرفقة داخل النسخة الاحتياطية غير صالحة.');
+  }
+  const match = /^data:(image\/(?:webp|jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!match || match[1] !== expectedMime) {
+    throw new Error('صيغة الصورة المرفقة داخل النسخة الاحتياطية غير مطابقة أو غير مدعومة.');
+  }
+  const bytes = base64ToUint8Array(match[2]);
+  if (!bytes.length || bytes.length > maxBytes) {
+    throw new Error('حجم الصورة داخل النسخة الاحتياطية غير صالح أو يتجاوز الحد المسموح.');
+  }
+  assertBackupImageSignature(bytes, expectedMime);
+  return new Blob([bytes.slice()], { type: expectedMime });
+}
+
+interface ExportedBackupProductImage extends ProductImage {
+  originalDataUrl: string;
+  thumbnailDataUrl: string;
+}
+
+async function validateAndRehydrateBackupProductImages(
+  d: Record<string, unknown>
+): Promise<ProductImageLocalAsset[]> {
+  const manifest =
+    d.mediaManifest && typeof d.mediaManifest === 'object' && !Array.isArray(d.mediaManifest)
+      ? (d.mediaManifest as { productImageCount?: number; mediaIncluded?: boolean })
+      : undefined;
+  const rawImages = d.productImages;
+
+  if (
+    manifest &&
+    Number(manifest.productImageCount || 0) > 0 &&
+    manifest.mediaIncluded === false &&
+    (!Array.isArray(rawImages) || rawImages.length === 0)
+  ) {
+    throw new Error(
+      'هذه النسخة الاحتياطية تشير إلى وجود صور أصناف لم تُدرج ملفاتها داخل JSON؛ استخدم النسخة الأصلية المرفقة بالوسائط.'
+    );
+  }
+
+  if (rawImages === undefined) return [];
+  if (!Array.isArray(rawImages)) {
+    throw new Error('قائمة صور الأصناف (productImages) داخل النسخة الاحتياطية غير صالحة.');
+  }
+  if (
+    manifest &&
+    manifest.mediaIncluded === true &&
+    Number.isSafeInteger(manifest.productImageCount) &&
+    Number(manifest.productImageCount) !== rawImages.length
+  ) {
+    throw new Error('عدد صور الأصناف لا يطابق بيان الوسائط (mediaManifest) في النسخة الاحتياطية.');
+  }
+
+  const productById = new Map<string, Record<string, unknown>>();
+  for (const row of Array.isArray(d.products) ? (d.products as Array<Record<string, unknown>>) : []) {
+    if (row && typeof row.id === 'string') {
+      productById.set(row.id, row);
+    }
+  }
+
+  const seenIds = new Set<string>();
+  const restored: ProductImageLocalAsset[] = [];
+  for (const entry of rawImages) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      throw new Error('يوجد سجل صورة صنف غير صالح داخل النسخة الاحتياطية.');
+    }
+    const raw = entry as Record<string, unknown>;
+    const id = String(raw.id || '').trim();
+    const tenantId = String(raw.tenantId || '').trim();
+    const productId = String(raw.productId || '').trim();
+    const activityId = String(raw.activityId || '').trim() as CommercialActivityId;
+    const mimeType = String(raw.mimeType || '').trim() as ProductImage['mimeType'];
+    const checksumSha256 = String(raw.checksumSha256 || '').trim();
+    const product = productById.get(productId);
+    if (!id || !tenantId || !productId || !product || !checksumSha256) {
+      throw new Error('توجد صورة صنف ناقصة البيانات أو مرتبطة بصنف غير موجود في النسخة الاحتياطية.');
+    }
+    if (seenIds.has(`${tenantId}:${id}`)) {
+      throw new Error('يوجد معرّف صورة صنف مكرر داخل النسخة الاحتياطية.');
+    }
+    seenIds.add(`${tenantId}:${id}`);
+    if (product.tenantId && String(product.tenantId) !== tenantId) {
+      throw new Error('مؤسسة صورة الصنف لا تطابق مؤسسة الصنف المرتبط.');
+    }
+    if (String(product.activityId || '') !== activityId) {
+      throw new Error('نشاط صورة الصنف لا يطابق نشاط الصنف المرتبط.');
+    }
+    if (!['image/webp', 'image/jpeg', 'image/png'].includes(mimeType)) {
+      throw new Error('نوع ملف صورة الصنف غير مدعوم في النسخة الاحتياطية.');
+    }
+
+    const originalBlob = dataUrlToValidatedBlobSafe(
+      raw.originalDataUrl,
+      mimeType,
+      BACKUP_IMAGE_MAX_ORIGINAL_BYTES
+    );
+    const thumbnailBlob = dataUrlToValidatedBlobSafe(
+      raw.thumbnailDataUrl,
+      mimeType,
+      BACKUP_IMAGE_MAX_THUMB_BYTES
+    );
+    const computedSha = await computeBlobSha256(originalBlob);
+    if (computedSha !== checksumSha256) {
+      throw new Error(
+        `فشل التحقق من بصمة SHA-256 لصورة الصنف (${id})؛ بيانات الصورة تالفة أو معدّلة.`
+      );
+    }
+
+    const { originalDataUrl: _orig, thumbnailDataUrl: _thumb, ...cleanMeta } = raw;
+    restored.push({
+      ...(cleanMeta as unknown as ProductImage),
+      id,
+      tenantId,
+      productId,
+      activityId,
+      mimeType,
+      sizeBytes: originalBlob.size,
+      thumbnailSizeBytes: thumbnailBlob.size,
+      checksumSha256,
+      isPrimary: Boolean(raw.isPrimary),
+      sortOrder: Number.isFinite(Number(raw.sortOrder)) ? Number(raw.sortOrder) : 0,
+      isDeleted: false,
+      originalBlob,
+      thumbnailBlob,
+    });
+  }
+  return restored;
 }
 
 function accountBalanceDeltaByType(type: AccountType, debit: number, credit: number): number {
@@ -1135,6 +1339,21 @@ export class DexieDataService implements IDataService {
         .equals([tenantId, productId, code])
         .first();
       if (duplicate && duplicate.id !== id) throw new Error('رمز الوحدة مستخدم بالفعل لهذا الصنف.');
+      if (barcode) {
+        const dupUnitBarcode = await db.productUnits
+          .where('[tenantId+normalizedBarcode]')
+          .equals([tenantId, barcode])
+          .filter((u) => u.id !== id)
+          .first();
+        const dupProductBarcode = (await db.products.toArray()).find(
+          (p) =>
+            (!p.tenantId || p.tenantId === tenantId) &&
+            String(p.barcode || '').trim() === barcode
+        );
+        if (dupUnitBarcode || dupProductBarcode) {
+          throw new Error(`الباركود (${barcode}) مستخدم بالفعل لصنف أو وحدة أخرى.`);
+        }
+      }
       const unit: ProductUnit = {
         id,
         tenantId,
@@ -1224,6 +1443,22 @@ export class DexieDataService implements IDataService {
         if (alternateUnitCount > 0) {
           throw new Error('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة لهذا الصنف.');
         }
+      }
+    }
+    const cleanBarcode = product.barcode ? String(product.barcode).trim() : '';
+    if (cleanBarcode) {
+      const dupProductBarcode = (await db.products.toArray()).find(
+        (p) =>
+          p.id !== product.id &&
+          (!p.tenantId || p.tenantId === tenantId) &&
+          String(p.barcode || '').trim() === cleanBarcode
+      );
+      const dupUnitBarcode = await db.productUnits
+        .where('[tenantId+normalizedBarcode]')
+        .equals([tenantId, cleanBarcode])
+        .first();
+      if (dupProductBarcode || dupUnitBarcode) {
+        throw new FinancialValidationError(`الباركود (${cleanBarcode}) مستخدم بالفعل لصنف أو وحدة أخرى.`);
       }
     }
     await db.products.put(product);
@@ -4455,6 +4690,24 @@ export class DexieDataService implements IDataService {
     await this.ensureReady();
     this.requireAuthorizedActor('backup:manage');
 
+    const rawImages = (await db.productImages.toArray()).filter((img) => !img.isDeleted);
+    const exportedImages: ExportedBackupProductImage[] = [];
+    for (const img of rawImages) {
+      if (!img.originalBlob || !img.thumbnailBlob) {
+        throw new Error(`تعذر تصدير صورة الصنف (${img.id}) لعدم توفر الملف المحلي.`);
+      }
+      const { originalBlob, thumbnailBlob, ...meta } = img;
+      const [originalDataUrl, thumbnailDataUrl] = await Promise.all([
+        blobToDataUrlSafe(originalBlob, img.mimeType),
+        blobToDataUrlSafe(thumbnailBlob, img.mimeType),
+      ]);
+      exportedImages.push({
+        ...meta,
+        originalDataUrl,
+        thumbnailDataUrl,
+      });
+    }
+
     const payload = {
       branches: await db.branches.toArray(),
       accounts: await db.accounts.toArray(),
@@ -4465,6 +4718,11 @@ export class DexieDataService implements IDataService {
       productFamilies: await db.productFamilies.toArray(),
       productCatalogMeta: await db.productCatalogMeta.toArray(),
       productUnits: await db.productUnits.toArray(),
+      productImages: exportedImages,
+      mediaManifest: {
+        productImageCount: exportedImages.length,
+        mediaIncluded: true,
+      },
       parties: await db.parties.toArray(),
       invoices: await db.invoices.toArray(),
       journalEntries: await db.journalEntries.toArray(),
@@ -4497,6 +4755,38 @@ export class DexieDataService implements IDataService {
     };
 
     return JSON.stringify(backup, null, 2);
+  }
+
+  public async verifyProductImagesIntegrity(): Promise<{ checkedCount: number; valid: boolean }> {
+    await this.ensureReady();
+    this.requireAuthorizedActor('inventory:view');
+    const [images, products] = await Promise.all([
+      db.productImages.toArray(),
+      db.products.toArray(),
+    ]);
+    const productById = new Map(products.map((p) => [p.id, p]));
+    let checkedCount = 0;
+    for (const img of images) {
+      if (img.isDeleted) continue;
+      checkedCount += 1;
+      const product = productById.get(img.productId);
+      if (!product) {
+        throw new Error(`صورة الصنف (${img.id}) تشير إلى صنف غير موجود (${img.productId}).`);
+      }
+      if (product.activityId !== img.activityId) {
+        throw new Error(`نشاط صورة الصنف (${img.id}) لا يطابق الصنف المرتبط.`);
+      }
+      if (!img.originalBlob || !img.thumbnailBlob) {
+        throw new Error(`ملفات صورة الصنف (${img.id}) غير موجودة في التخزين المحلي.`);
+      }
+      assertBackupImageSignature(new Uint8Array(await img.originalBlob.arrayBuffer()), img.mimeType);
+      assertBackupImageSignature(new Uint8Array(await img.thumbnailBlob.arrayBuffer()), img.mimeType);
+      const actualSha = await computeBlobSha256(img.originalBlob);
+      if (actualSha !== img.checksumSha256) {
+        throw new Error(`بصمة SHA-256 لصورة الصنف (${img.id}) غير مطابقة بعد الاستعادة.`);
+      }
+    }
+    return { checkedCount, valid: true };
   }
 
   public async importBackupJSON(jsonContent: string): Promise<{ success: boolean; error?: string }> {
@@ -4564,6 +4854,8 @@ export class DexieDataService implements IDataService {
           };
         }
       }
+      const restoredProductImages = await validateAndRehydrateBackupProductImages(d);
+
       const batchMap = new Map<string, ProductBatch>();
       if (Array.isArray(d.productBatches)) {
         for (const b of d.productBatches as ProductBatch[]) {
@@ -4595,6 +4887,7 @@ export class DexieDataService implements IDataService {
           db.productFamilies,
           db.productCatalogMeta,
           db.productUnits,
+          db.productImages,
           db.parties,
           db.invoices,
           db.journalEntries,
@@ -4657,6 +4950,11 @@ export class DexieDataService implements IDataService {
           await db.brands.clear();
           if (Array.isArray(d.brands) && d.brands.length > 0) {
             await db.brands.bulkPut(d.brands);
+          }
+          // Always clear stale local images; restore only validated images from the backup.
+          await db.productImages.clear();
+          if (restoredProductImages.length > 0) {
+            await db.productImages.bulkPut(restoredProductImages);
           }
           if (Array.isArray(d.parties)) {
             await db.parties.clear();

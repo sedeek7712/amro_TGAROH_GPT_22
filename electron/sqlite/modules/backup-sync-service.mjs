@@ -223,14 +223,14 @@ export function createBackupSyncService(database, backupDirectory) {
 
       for (const entry of listSqliteBackups(backupDirectory)) {
         seen.add(path.resolve(entry.path));
-        items.push({ ...entry, location: 'default' });
+        items.push({ ...entry, location: 'default', hasMediaSidecar: existsSync(entry.path + '.media') });
       }
       if (settings.customBackupDirectory && existsSync(settings.customBackupDirectory)) {
         for (const entry of listSqliteBackups(settings.customBackupDirectory)) {
           const resolved = path.resolve(entry.path);
           if (!seen.has(resolved)) {
             seen.add(resolved);
-            items.push({ ...entry, location: 'custom' });
+            items.push({ ...entry, location: 'custom', hasMediaSidecar: existsSync(entry.path + '.media') });
           }
         }
       }

@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { assertActivityAccess, assertPermission } from '../rbac.mjs';
 import { enqueueOutboxTx, writeAuditLogTx } from './core-service.mjs';
 
@@ -392,5 +392,55 @@ export function createProductMediaService(database, mediaStorage) {
       ).run(actor.tenantId, imageId);
       return updated;
     },
+
+    verifyIntegrity() {
+      return verifyProductMediaIntegrity(database, mediaStorage);
+    },
   };
 }
+
+export function verifyProductMediaIntegrity(database, mediaStorage) {
+  if (!database || !mediaStorage) {
+    throw new TypeError('database and mediaStorage are required');
+  }
+  const rows = database.prepare(
+    `SELECT pm.tenant_id, pm.id, pm.product_id, pm.activity_id,
+            pm.storage_key, pm.thumbnail_storage_key, pm.mime_type,
+            pm.checksum_sha256,
+            p.id AS existing_product_id, p.activity_id AS product_activity_id
+       FROM product_images pm
+       LEFT JOIN products p ON p.tenant_id = pm.tenant_id AND p.id = pm.product_id
+      WHERE pm.is_deleted = 0`
+  ).all();
+
+  let checkedCount = 0;
+  for (const row of rows) {
+    checkedCount += 1;
+    if (!row.existing_product_id) {
+      throw new Error(`صورة الصنف (${row.id}) تشير إلى صنف غير موجود (${row.product_id}).`);
+    }
+    if (row.product_activity_id !== row.activity_id) {
+      throw new Error(`نشاط صورة الصنف (${row.id}) لا يطابق الصنف المرتبط.`);
+    }
+    const originalDataUrl = mediaStorage.read(row.storage_key);
+    if (!originalDataUrl) {
+      throw new Error(`ملف الصورة الأصلية مفقود في مجلد الوسائط (.media): ${row.storage_key}`);
+    }
+    const match = /^data:(image\/(?:webp|jpeg|png));base64,([A-Za-z0-9+/=]+)$/.exec(originalDataUrl);
+    if (!match || match[1] !== row.mime_type) {
+      throw new Error(`صيغة الصورة المستعادة (${row.id}) لا تطابق السجل المرجعي.`);
+    }
+    const originalBytes = Buffer.from(match[2], 'base64');
+    const actualSha = createHash('sha256').update(originalBytes).digest('hex');
+    if (actualSha !== row.checksum_sha256) {
+      throw new Error(`بصمة SHA-256 لصورة الصنف (${row.id}) غير مطابقة؛ ملف الصورة تالف.`);
+    }
+    const thumbnailDataUrl = mediaStorage.read(row.thumbnail_storage_key);
+    if (!thumbnailDataUrl) {
+      throw new Error(`ملف الصورة المصغرة مفقود في مجلد الوسائط (.media): ${row.thumbnail_storage_key}`);
+    }
+  }
+
+  return { checkedCount, valid: true };
+}
+

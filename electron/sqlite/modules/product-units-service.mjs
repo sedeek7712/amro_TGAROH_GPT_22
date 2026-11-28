@@ -106,6 +106,18 @@ export function createProductUnitsService(database) {
         ).get(actor.tenantId, productId, code, id);
         if (duplicate) throw new Error('رمز الوحدة مستخدم بالفعل لهذا الصنف.');
 
+        if (barcode) {
+          const dupUnitBarcode = database.prepare(
+            'SELECT 1 AS found FROM product_units WHERE tenant_id = ? AND normalized_barcode = ? AND id <> ? LIMIT 1'
+          ).get(actor.tenantId, barcode, id);
+          const dupProductBarcode = database.prepare(
+            'SELECT 1 AS found FROM products WHERE tenant_id = ? AND TRIM(barcode) = ? LIMIT 1'
+          ).get(actor.tenantId, barcode);
+          if (dupUnitBarcode || dupProductBarcode) {
+            throw new Error(`الباركود (${barcode}) مستخدم بالفعل لصنف أو وحدة أخرى.`);
+          }
+        }
+
         const unit = {
           id,
           tenantId: actor.tenantId,

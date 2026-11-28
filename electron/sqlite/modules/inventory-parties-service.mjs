@@ -273,6 +273,18 @@ export function persistProductWithinTx(database, core, actor, normalizedInput, o
       }
     }
   }
+  const cleanBarcode = normalizedInput.barcode ? String(normalizedInput.barcode).trim() : '';
+  if (cleanBarcode) {
+    const dupProdBarcode = database.prepare(
+      'SELECT 1 AS found FROM products WHERE tenant_id = ? AND TRIM(barcode) = ? AND id <> ? LIMIT 1'
+    ).get(actor.tenantId, cleanBarcode, normalizedInput.id);
+    const dupUnitBarcode = database.prepare(
+      'SELECT 1 AS found FROM product_units WHERE tenant_id = ? AND normalized_barcode = ? LIMIT 1'
+    ).get(actor.tenantId, cleanBarcode);
+    if (dupProdBarcode || dupUnitBarcode) {
+      throw new Error(`الباركود (${cleanBarcode}) مستخدم بالفعل لصنف أو وحدة أخرى.`);
+    }
+  }
   const persisted = syncProductAndBatchesTx(database, actor.tenantId, normalizedInput);
   enqueueOutboxTx(database, actor, {
     entityType: 'PRODUCT',

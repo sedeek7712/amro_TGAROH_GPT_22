@@ -80,6 +80,46 @@ export interface Product {
   updatedAt?: string;          // تاريخ آخر تحديث ISO
 }
 
+export interface Brand {
+  id: string;
+  tenantId: string;
+  nameAr: string;
+  normalizedName: string;
+  isActive: boolean;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ProductFamilyOption {
+  key: string;
+  labelAr: string;
+  values: string[];
+  required: boolean;
+  sortOrder: number;
+}
+
+export interface ProductFamily {
+  id: string;
+  tenantId: string;
+  activityId: CommercialActivityId;
+  nameAr: string;
+  categorySnapshot: string;
+  brandId?: string;
+  optionSchema: ProductFamilyOption[];
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ProductCatalogMeta {
+  productId: string;
+  tenantId: string;
+  familyId?: string;
+  brandId?: string;
+  variantKey?: string;
+  variantAttributes: Record<string, string>;
+}
+
 export type ProductImageSyncStatus = 'LOCAL_ONLY' | 'PENDING_UPLOAD' | 'UPLOADING' | 'SYNCED' | 'FAILED';
 
 export interface ProductImage {

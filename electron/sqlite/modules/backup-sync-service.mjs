@@ -374,6 +374,45 @@ export function createBackupSyncService(database, backupDirectory) {
         batches: batchesByProduct.get(row.id) || [],
       }));
 
+      const brands = database.prepare(
+        'SELECT id, name_ar, normalized_name, is_active, data_json FROM brands WHERE tenant_id = ? ORDER BY name_ar'
+      ).all(tenantId).map((row) => ({
+        ...parseRowJson(row),
+        id: row.id,
+        tenantId,
+        nameAr: row.name_ar,
+        normalizedName: row.normalized_name,
+        isActive: row.is_active === 1,
+      }));
+
+      const productFamilies = database.prepare(
+        'SELECT id, activity_id, name_ar, category_snapshot, brand_id, option_schema_json, is_active, created_at, updated_at, data_json FROM product_families WHERE tenant_id = ? ORDER BY name_ar'
+      ).all(tenantId).map((row) => ({
+        ...parseRowJson(row),
+        id: row.id,
+        tenantId,
+        activityId: row.activity_id,
+        nameAr: row.name_ar,
+        categorySnapshot: row.category_snapshot || '',
+        brandId: row.brand_id || undefined,
+        optionSchema: JSON.parse(row.option_schema_json || '[]'),
+        isActive: row.is_active === 1,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+
+      const productCatalogMeta = database.prepare(
+        'SELECT product_id, family_id, brand_id, variant_key, variant_attributes_json, data_json FROM product_catalog_meta WHERE tenant_id = ? ORDER BY product_id'
+      ).all(tenantId).map((row) => ({
+        ...parseRowJson(row),
+        tenantId,
+        productId: row.product_id,
+        familyId: row.family_id || undefined,
+        brandId: row.brand_id || undefined,
+        variantKey: row.variant_key || undefined,
+        variantAttributes: JSON.parse(row.variant_attributes_json || '{}'),
+      }));
+
       const parties = database.prepare(
         'SELECT id, party_type, name_ar, phone, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? ORDER BY name_ar'
       ).all(tenantId).map((row) => ({
@@ -589,6 +628,9 @@ export function createBackupSyncService(database, backupDirectory) {
         activities,
         products,
         productBatches,
+        brands,
+        productFamilies,
+        productCatalogMeta,
         parties,
         invoices,
         journalEntries,
@@ -698,7 +740,10 @@ export function createBackupSyncService(database, backupDirectory) {
           database.prepare('DELETE FROM vouchers WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM amanat_records WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM product_batches WHERE tenant_id = ?').run(tenantId);
+          database.prepare('DELETE FROM product_catalog_meta WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM products WHERE tenant_id = ?').run(tenantId);
+          database.prepare('DELETE FROM product_families WHERE tenant_id = ?').run(tenantId);
+          database.prepare('DELETE FROM brands WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM cash_boxes WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM parties WHERE tenant_id = ?').run(tenantId);
           database.prepare('UPDATE accounts SET parent_code = NULL WHERE tenant_id = ?').run(tenantId);

@@ -71,6 +71,126 @@ import {
   toCents,
 } from '../../electron/sqlite/payment-allocation-engine.mjs';
 
+function validateCatalogBackupData(data: Record<string, unknown>): void {
+  const readRows = (key: string): Array<Record<string, unknown>> => {
+    const value = data[key] ?? [];
+    if (!Array.isArray(value) || !value.every((row) => Boolean(row) && typeof row === 'object' && !Array.isArray(row))) {
+      throw new Error(`بيانات الكتالوج غير صالحة في النسخة الاحتياطية: ${key}.`);
+    }
+    return value as Array<Record<string, unknown>>;
+  };
+
+  const brands = readRows('brands');
+  const families = readRows('productFamilies');
+  const metadata = readRows('productCatalogMeta');
+  const products = readRows('products');
+  const brandByKey = new Map<string, Record<string, unknown>>();
+  const familyByKey = new Map<string, Record<string, unknown>>();
+  const productById = new Map<string, Record<string, unknown>>();
+  const normalizedBrandNames = new Set<string>();
+
+  for (const brand of brands) {
+    const tenantId = String(brand.tenantId || '');
+    const id = String(brand.id || '');
+    const normalizedName = String(brand.normalizedName || '').trim();
+    if (!tenantId || !id || !normalizedName) throw new Error('توجد علامة تجارية ناقصة البيانات في النسخة الاحتياطية.');
+    const key = `${tenantId}:${id}`;
+    const normalizedKey = `${tenantId}:${normalizedName}`;
+    if (brandByKey.has(key) || normalizedBrandNames.has(normalizedKey)) {
+      throw new Error('توجد علامة تجارية مكررة في النسخة الاحتياطية.');
+    }
+    brandByKey.set(key, brand);
+    normalizedBrandNames.add(normalizedKey);
+  }
+
+  for (const family of families) {
+    const tenantId = String(family.tenantId || '');
+    const id = String(family.id || '');
+    if (!tenantId || !id || !String(family.activityId || '') || !String(family.nameAr || '').trim()) {
+      throw new Error('توجد مجموعة منتجات ناقصة البيانات في النسخة الاحتياطية.');
+    }
+    if (!Array.isArray(family.optionSchema)) throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
+    const optionKeys = new Set<string>();
+    for (const option of family.optionSchema as Array<Record<string, unknown>>) {
+      const optionKey = String(option.key || '').trim();
+      if (!optionKey || optionKeys.has(optionKey) || !Array.isArray(option.values) || option.values.length === 0) {
+        throw new Error('مخطط خيارات مجموعة المنتج يحتوي تعريفاً مكرراً أو بلا قيم.');
+      }
+      optionKeys.add(optionKey);
+    }
+    const key = `${tenantId}:${id}`;
+    if (familyByKey.has(key)) throw new Error('معرّف مجموعة المنتجات مكرر في النسخة الاحتياطية.');
+    if (family.brandId && !brandByKey.has(`${tenantId}:${String(family.brandId)}`)) {
+      throw new Error('العلامة التجارية المرتبطة بمجموعة المنتجات غير موجودة في النسخة الاحتياطية.');
+    }
+    familyByKey.set(key, family);
+  }
+
+  for (const product of products) {
+    const id = String(product.id || '');
+    if (id) productById.set(id, product);
+  }
+
+  const variantKeys = new Set<string>();
+  const metadataProducts = new Set<string>();
+  for (const meta of metadata) {
+    const tenantId = String(meta.tenantId || '');
+    const productId = String(meta.productId || '');
+    const product = productById.get(productId);
+    if (!tenantId || !product) throw new Error('بيانات كتالوج تشير إلى صنف غير موجود في النسخة الاحتياطية.');
+    const metadataProductKey = `${tenantId}:${productId}`;
+    if (metadataProducts.has(metadataProductKey)) throw new Error('يوجد أكثر من سجل كتالوج للصنف نفسه.');
+    metadataProducts.add(metadataProductKey);
+    if (product.tenantId && String(product.tenantId) !== tenantId) {
+      throw new Error('بيانات كتالوج الصنف لا تطابق المؤسسة التابعة له.');
+    }
+
+    if (meta.familyId) {
+      const family = familyByKey.get(`${tenantId}:${String(meta.familyId)}`);
+      const variantKey = String(meta.variantKey || '').trim();
+      if (!family || !variantKey || meta.brandId) {
+        throw new Error('بيانات متغير SKU أو مجموعة المنتج غير مكتملة.');
+      }
+      if (String(product.activityId || '') !== String(family.activityId || '')) {
+        throw new Error('نشاط الصنف لا يطابق نشاط مجموعة المنتج.');
+      }
+      const optionSchema = Array.isArray(family.optionSchema)
+        ? family.optionSchema as Array<Record<string, unknown>>
+        : [];
+      const attributes = meta.variantAttributes && typeof meta.variantAttributes === 'object' && !Array.isArray(meta.variantAttributes)
+        ? meta.variantAttributes as Record<string, unknown>
+        : null;
+      if (!attributes) throw new Error('خصائص متغير SKU غير صالحة.');
+      const allowedKeys = new Set<string>();
+      for (const option of optionSchema) {
+        const key = String(option.key || '').trim();
+        const values = Array.isArray(option.values) ? option.values.map(String) : [];
+        if (!key || allowedKeys.has(key) || values.length === 0) {
+          throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
+        }
+        allowedKeys.add(key);
+        const value = attributes[key];
+        if (option.required === true && (typeof value !== 'string' || !value.trim())) {
+          throw new Error('قيمة خيار مطلوبة مفقودة في متغير SKU.');
+        }
+        if (value !== undefined && (typeof value !== 'string' || !values.includes(value))) {
+          throw new Error('قيمة متغير SKU غير موجودة ضمن خيارات المجموعة.');
+        }
+      }
+      if (Object.keys(attributes).some((key) => !allowedKeys.has(key))) {
+        throw new Error('متغير SKU يحتوي خيارًا غير معرّف في المجموعة.');
+      }
+      const uniqueKey = `${tenantId}:${String(meta.familyId)}:${variantKey}`;
+      if (variantKeys.has(uniqueKey)) throw new Error('توجد تركيبة متغير مكررة داخل مجموعة المنتج.');
+      variantKeys.add(uniqueKey);
+    } else {
+      if (!meta.brandId || !brandByKey.has(`${tenantId}:${String(meta.brandId)}`) || meta.variantKey) {
+        throw new Error('بيانات العلامة التجارية للمنتج المستقل غير صالحة.');
+      }
+    }
+  }
+}
+
 function accountBalanceDeltaByType(type: AccountType, debit: number, credit: number): number {
   if (type === 'LIABILITY' || type === 'EQUITY' || type === 'REVENUE') {
     return roundMoney(credit - debit);
@@ -3468,6 +3588,9 @@ export class DexieDataService implements IDataService {
       activities: await db.activities.toArray(),
       products: await db.products.toArray(),
       productBatches: await db.productBatches.toArray(),
+      brands: await db.brands.toArray(),
+      productFamilies: await db.productFamilies.toArray(),
+      productCatalogMeta: await db.productCatalogMeta.toArray(),
       parties: await db.parties.toArray(),
       invoices: await db.invoices.toArray(),
       journalEntries: await db.journalEntries.toArray(),
@@ -3542,6 +3665,7 @@ export class DexieDataService implements IDataService {
       }
 
       const d = parsed.data;
+      validateCatalogBackupData(d);
       const requiredKeys = [
         'accounts',
         'products',
@@ -3593,6 +3717,9 @@ export class DexieDataService implements IDataService {
           db.activities,
           db.products,
           db.productBatches,
+          db.brands,
+          db.productFamilies,
+          db.productCatalogMeta,
           db.parties,
           db.invoices,
           db.journalEntries,
@@ -3635,6 +3762,20 @@ export class DexieDataService implements IDataService {
           await db.productBatches.clear();
           if (normalizedBatches.length > 0) {
             await db.productBatches.bulkPut(normalizedBatches);
+          }
+
+          // Older backups do not contain catalog metadata; treat them as empty lists.
+          await db.productCatalogMeta.clear();
+          if (Array.isArray(d.productCatalogMeta) && d.productCatalogMeta.length > 0) {
+            await db.productCatalogMeta.bulkPut(d.productCatalogMeta);
+          }
+          await db.productFamilies.clear();
+          if (Array.isArray(d.productFamilies) && d.productFamilies.length > 0) {
+            await db.productFamilies.bulkPut(d.productFamilies);
+          }
+          await db.brands.clear();
+          if (Array.isArray(d.brands) && d.brands.length > 0) {
+            await db.brands.bulkPut(d.brands);
           }
           if (Array.isArray(d.parties)) {
             await db.parties.clear();

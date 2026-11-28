@@ -38,6 +38,32 @@ function safeJson(value) {
   return JSON.stringify(value);
 }
 
+function validateCatalogVariantAttributes(optionSchema, attributes) {
+  if (!Array.isArray(optionSchema) || !isObject(attributes)) {
+    throw new Error('مخطط خيارات مجموعة المنتج أو خصائص المتغير غير صالح.');
+  }
+  const allowedKeys = new Set();
+  for (const option of optionSchema) {
+    if (!isObject(option)) throw new Error('يوجد خيار غير صالح في مجموعة المنتج.');
+    const key = requiredString(option.key, 'productFamily.option.key');
+    const values = Array.isArray(option.values) ? option.values.map(String) : [];
+    if (allowedKeys.has(key) || values.length === 0) {
+      throw new Error('مخطط خيارات مجموعة المنتج يحتوي تعريفاً مكرراً أو بلا قيم.');
+    }
+    allowedKeys.add(key);
+    const value = attributes[key];
+    if (option.required === true && (typeof value !== 'string' || !value.trim())) {
+      throw new Error('قيمة خيار مطلوبة مفقودة في متغير SKU: ' + key);
+    }
+    if (value !== undefined && (typeof value !== 'string' || !values.includes(value))) {
+      throw new Error('قيمة متغير SKU غير موجودة ضمن خيارات المجموعة: ' + key);
+    }
+  }
+  if (Object.keys(attributes).some((key) => !allowedKeys.has(key))) {
+    throw new Error('متغير SKU يحتوي خياراً غير معرّف في المجموعة.');
+  }
+}
+
 function stripPasswordHash(user) {
   const copy = { ...user };
   delete copy.passwordHash;
@@ -168,6 +194,14 @@ export function parseLegacyBackup(rawBackup) {
     data.activities = OFFICIAL_ACTIVITIES.map((a) => ({ ...a }));
   }
 
+  for (const key of ['brands', 'productFamilies', 'productCatalogMeta']) {
+    const rows = backup.data[key] ?? [];
+    if (!Array.isArray(rows) || !rows.every(isObject)) {
+      throw new Error('توجد سجلات غير صالحة في القائمة: ' + key);
+    }
+    data[key] = rows;
+  }
+
   data.productBatches = Array.isArray(backup.data.productBatches)
     ? backup.data.productBatches
     : [];
@@ -227,6 +261,7 @@ export function parseLegacyBackup(rawBackup) {
 function countRows(database, table, tenantId) {
   const allowedTables = new Set([
     'branches', 'accounts', 'activities', 'products', 'product_batches',
+    'brands', 'product_families', 'product_catalog_meta',
     'parties', 'invoices', 'journal_entries', 'cash_boxes', 'vouchers',
     'payment_allocations', 'party_advance_transactions', 'allocation_audits',
     'amanat_records', 'users', 'audit_logs', 'outbox_queue', 'sync_conflicts',
@@ -239,7 +274,7 @@ function countRows(database, table, tenantId) {
 
 function assertEmptyDestination(database, tenantIds) {
   const protectedTables = [
-    'accounts', 'activities', 'products', 'product_batches', 'parties',
+    'accounts', 'activities', 'products', 'product_batches', 'product_catalog_meta', 'product_families', 'brands', 'parties',
     'invoices', 'invoice_items', 'invoice_stock_deductions',
     'journal_entries', 'journal_entry_lines', 'cash_boxes', 'vouchers',
     'payment_allocations', 'party_advance_transactions', 'allocation_audits',
@@ -278,6 +313,9 @@ export function sourceCounts(data) {
     activities: data.activities.length,
     products: data.products.length,
     productBatches: data.productBatches.length,
+    brands: (data.brands || []).length,
+    productFamilies: (data.productFamilies || []).length,
+    productCatalogMeta: (data.productCatalogMeta || []).length,
     parties: data.parties.length,
     invoices: data.invoices.length,
     invoiceItems: data.invoices.reduce((n, row) => n + (Array.isArray(row.items) ? row.items.length : 0), 0),
@@ -400,6 +438,64 @@ export function insertRows(database, data, options = {}) {
       [tenantIdOf(row), requiredString(row.id,'product.id'), requiredString(row.activityId,'product.activityId'),
        requiredString(row.code,'product.code'), row.barcode || null, String(row.category || ''),
        decimal(row.currentStock,'product.currentStock'), safeJson(normalizedProduct)]
+    );
+  }
+
+  for (const row of data.brands || []) {
+    run(
+      'INSERT INTO brands (tenant_id,id,name_ar,normalized_name,is_active,data_json) VALUES (?,?,?,?,?,?)',
+      [tenantIdOf(row), requiredString(row.id,'brand.id'), requiredString(row.nameAr,'brand.nameAr'),
+       requiredString(row.normalizedName,'brand.normalizedName'), boolInt(row.isActive), safeJson(row)]
+    );
+  }
+
+  for (const row of data.productFamilies || []) {
+    if (!Array.isArray(row.optionSchema) || !row.optionSchema.every(isObject)) {
+      throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
+    }
+    const optionKeys = new Set();
+    for (const option of row.optionSchema) {
+      const key = requiredString(option.key, 'productFamily.option.key');
+      if (optionKeys.has(key) || !Array.isArray(option.values) || option.values.length === 0) {
+        throw new Error('مخطط خيارات مجموعة المنتج يحتوي تعريفاً مكرراً أو بلا قيم.');
+      }
+      optionKeys.add(key);
+    }
+    run(
+      'INSERT INTO product_families (tenant_id,id,activity_id,name_ar,category_snapshot,brand_id,option_schema_json,is_active,created_at,updated_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
+      [tenantIdOf(row), requiredString(row.id,'productFamily.id'), requiredString(row.activityId,'productFamily.activityId'),
+       requiredString(row.nameAr,'productFamily.nameAr'), String(row.categorySnapshot || ''), row.brandId || null,
+       safeJson(row.optionSchema), boolInt(row.isActive),
+       requiredString(row.createdAt,'productFamily.createdAt'), requiredString(row.updatedAt,'productFamily.updatedAt'), safeJson(row)]
+    );
+  }
+
+  for (const row of data.productCatalogMeta || []) {
+    const tenantId = tenantIdOf(row);
+    const productId = requiredString(row.productId,'productCatalogMeta.productId');
+    const familyId = row.familyId || null;
+    const brandId = row.brandId || null;
+    const variantKey = row.variantKey || null;
+    const attributes = row.variantAttributes || {};
+    if (familyId) {
+      const product = data.products.find((item) => tenantIdOf(item) === tenantId && String(item.id) === productId);
+      const family = (data.productFamilies || []).find((item) => tenantIdOf(item) === tenantId && String(item.id) === String(familyId));
+      if (!product || !family || brandId || !variantKey) {
+        throw new Error('بيانات ربط SKU بمجموعة المنتج غير مكتملة.');
+      }
+      if (String(product.activityId) !== String(family.activityId)) {
+        throw new Error('نشاط الصنف لا يطابق نشاط مجموعة المنتج.');
+      }
+      validateCatalogVariantAttributes(family.optionSchema, attributes);
+    } else {
+      if (!brandId || variantKey || !isObject(attributes) || Object.keys(attributes).length > 0) {
+        throw new Error('بيانات العلامة التجارية للمنتج المستقل غير صالحة.');
+      }
+    }
+    run(
+      'INSERT INTO product_catalog_meta (tenant_id,product_id,family_id,brand_id,variant_key,variant_attributes_json,data_json) VALUES (?,?,?,?,?,?,?)',
+      [tenantId, productId, familyId, brandId, variantKey,
+       safeJson(attributes), safeJson(row)]
     );
   }
 
@@ -632,6 +728,9 @@ export function actualCounts(database, tenantIds) {
     activities: 'activities',
     products: 'products',
     productBatches: 'product_batches',
+    brands: 'brands',
+    productFamilies: 'product_families',
+    productCatalogMeta: 'product_catalog_meta',
     parties: 'parties',
     invoices: 'invoices',
     journalEntries: 'journal_entries',

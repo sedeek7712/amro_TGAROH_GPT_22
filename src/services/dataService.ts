@@ -12,6 +12,14 @@ import {
   Product,
   ProductUnit,
   SaveProductUnitInput,
+  Brand,
+  ProductFamily,
+  ProductCatalogMeta,
+  ProductCatalogEntry,
+  SaveBrandInput,
+  CreateProductFamilyWithSkusInput,
+  UpdateProductFamilyInput,
+  AssignProductBrandInput,
   Party,
   Invoice,
   JournalEntry,
@@ -52,6 +60,19 @@ export interface IDataService {
   getProductById(id: string): Promise<Product | undefined>;
   getProductUnits(productId: string): Promise<ProductUnit[]>;
   saveProductUnit(input: SaveProductUnitInput): Promise<ProductUnit>;
+  getBrands(includeInactive?: boolean): Promise<Brand[]>;
+  saveBrandAtomic(input: SaveBrandInput): Promise<Brand>;
+  archiveBrandAtomic(brandId: string): Promise<Brand>;
+  getProductFamilies(activityId?: CommercialActivityId, includeInactive?: boolean): Promise<ProductFamily[]>;
+  getProductFamilyById(familyId: string): Promise<ProductFamily | undefined>;
+  createProductFamilyWithSkusAtomic(
+    input: CreateProductFamilyWithSkusInput
+  ): Promise<{ family: ProductFamily; skus: ProductCatalogEntry[] }>;
+  updateProductFamilyAtomic(input: UpdateProductFamilyInput): Promise<ProductFamily>;
+  archiveProductFamilyAtomic(familyId: string): Promise<ProductFamily>;
+  assignProductBrandAtomic(input: AssignProductBrandInput): Promise<ProductCatalogMeta | undefined>;
+  getProductCatalog(activityId?: CommercialActivityId): Promise<ProductCatalogEntry[]>;
+  getProductCatalogEntry(productId: string): Promise<ProductCatalogEntry | undefined>;
   addProduct(product: Product): Promise<void>;
   updateProduct(product: Product): Promise<void>;
   deleteProduct(productId: string): Promise<void>;

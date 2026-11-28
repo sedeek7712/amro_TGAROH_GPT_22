@@ -153,13 +153,23 @@ export const SalesInvoiceDocument: React.FC<SalesInvoiceDocumentProps> = ({
                 )}
                 <td className={isThermal ? 'py-1.5 px-1.5' : 'py-2 px-3'}>
                   <div className="font-bold text-slate-900">{item.productName}</div>
+                  {(item.variantSummary || item.brandNameSnapshot) && (
+                    <div
+                      className={`text-slate-600 ${
+                        isThermal ? 'text-[8.5px]' : 'text-[10.5px]'
+                      }`}
+                    >
+                      {[item.variantSummary, item.brandNameSnapshot].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
                   {(item.batchNumber || item.oemNumber || item.productCode) && (
                     <div
                       className={`text-slate-500 font-mono ${
                         isThermal ? 'text-[8.5px]' : 'text-[10px]'
                       }`}
                     >
-                      {item.batchNumber ? `تشغيلة: ${item.batchNumber}` : ''}
+                      {item.productCode ? `${item.productCode}` : ''}
+                      {item.batchNumber ? `${item.productCode ? ' | ' : ''}تشغيلة: ${item.batchNumber}` : ''}
                       {item.expiryDate ? ` | انتهاء: ${item.expiryDate}` : ''}
                       {item.oemNumber ? ` | OEM: ${item.oemNumber}` : ''}
                     </div>

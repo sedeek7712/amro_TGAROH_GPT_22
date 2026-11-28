@@ -18,6 +18,14 @@ import {
   Product,
   ProductUnit,
   SaveProductUnitInput,
+  Brand,
+  ProductFamily,
+  ProductCatalogMeta,
+  ProductCatalogEntry,
+  SaveBrandInput,
+  CreateProductFamilyWithSkusInput,
+  UpdateProductFamilyInput,
+  AssignProductBrandInput,
   SystemAuditLog,
   SystemUser,
   VoucherManualAllocationInput,
@@ -82,6 +90,58 @@ export class SqliteDataService implements IDataService {
     const saved = await bridge().saveProductUnit({ token: token(), unit: input });
     desktopSession.notifyChanged(['productUnits', 'auditLogs']);
     return saved;
+  }
+  public async getBrands(includeInactive = false): Promise<Brand[]> {
+    return await bridge().getBrands({ token: token(), includeInactive });
+  }
+  public async saveBrandAtomic(input: SaveBrandInput): Promise<Brand> {
+    const saved = await bridge().saveBrandAtomic({ token: token(), input });
+    desktopSession.notifyChanged(['brands', 'auditLogs']);
+    return saved;
+  }
+  public async archiveBrandAtomic(brandId: string): Promise<Brand> {
+    const archived = await bridge().archiveBrandAtomic({ token: token(), brandId });
+    desktopSession.notifyChanged(['brands', 'auditLogs']);
+    return archived;
+  }
+  public async getProductFamilies(
+    activityId?: CommercialActivityId,
+    includeInactive = false
+  ): Promise<ProductFamily[]> {
+    return await bridge().getProductFamilies({ token: token(), activityId, includeInactive });
+  }
+  public async getProductFamilyById(familyId: string): Promise<ProductFamily | undefined> {
+    return await bridge().getProductFamilyById({ token: token(), familyId });
+  }
+  public async createProductFamilyWithSkusAtomic(
+    input: CreateProductFamilyWithSkusInput
+  ): Promise<{ family: ProductFamily; skus: ProductCatalogEntry[] }> {
+    const created = await bridge().createProductFamilyWithSkusAtomic({ token: token(), input });
+    desktopSession.notifyChanged(['productFamilies', 'products', 'outbox', 'auditLogs']);
+    return created;
+  }
+  public async updateProductFamilyAtomic(input: UpdateProductFamilyInput): Promise<ProductFamily> {
+    const updated = await bridge().updateProductFamilyAtomic({ token: token(), input });
+    desktopSession.notifyChanged(['productFamilies', 'auditLogs']);
+    return updated;
+  }
+  public async archiveProductFamilyAtomic(familyId: string): Promise<ProductFamily> {
+    const archived = await bridge().archiveProductFamilyAtomic({ token: token(), familyId });
+    desktopSession.notifyChanged(['productFamilies', 'auditLogs']);
+    return archived;
+  }
+  public async assignProductBrandAtomic(
+    input: AssignProductBrandInput
+  ): Promise<ProductCatalogMeta | undefined> {
+    const assigned = await bridge().assignProductBrandAtomic({ token: token(), input });
+    desktopSession.notifyChanged(['products', 'auditLogs']);
+    return assigned;
+  }
+  public async getProductCatalog(activityId?: CommercialActivityId): Promise<ProductCatalogEntry[]> {
+    return await bridge().getProductCatalog({ token: token(), activityId });
+  }
+  public async getProductCatalogEntry(productId: string): Promise<ProductCatalogEntry | undefined> {
+    return await bridge().getProductCatalogEntry({ token: token(), productId });
   }
   public async addProduct(product: Product): Promise<void> {
     await this.saveProductAtomic(product, false);

@@ -553,6 +553,65 @@ if (!hasSingleInstance) {
       return desktopBackend.saveProductUnit({ token: input?.token, unit: input?.unit });
     });
 
+    ipcMain.handle('erp:inventory:get-brands', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getBrands({ token: input?.token, includeInactive: input?.includeInactive });
+    });
+
+    ipcMain.handle('erp:inventory:save-brand', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.saveBrandAtomic({ token: input?.token, input: input?.input });
+    });
+
+    ipcMain.handle('erp:inventory:archive-brand', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.archiveBrandAtomic({ token: input?.token, brandId: input?.brandId });
+    });
+
+    ipcMain.handle('erp:inventory:get-product-families', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductFamilies({
+        token: input?.token,
+        activityId: input?.activityId,
+        includeInactive: input?.includeInactive,
+      });
+    });
+
+    ipcMain.handle('erp:inventory:get-product-family', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductFamilyById({ token: input?.token, familyId: input?.familyId });
+    });
+
+    ipcMain.handle('erp:inventory:create-product-family-with-skus', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.createProductFamilyWithSkusAtomic({ token: input?.token, input: input?.input });
+    });
+
+    ipcMain.handle('erp:inventory:update-product-family', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.updateProductFamilyAtomic({ token: input?.token, input: input?.input });
+    });
+
+    ipcMain.handle('erp:inventory:archive-product-family', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.archiveProductFamilyAtomic({ token: input?.token, familyId: input?.familyId });
+    });
+
+    ipcMain.handle('erp:inventory:assign-product-brand', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.assignProductBrandAtomic({ token: input?.token, input: input?.input });
+    });
+
+    ipcMain.handle('erp:inventory:get-product-catalog', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductCatalog({ token: input?.token, activityId: input?.activityId });
+    });
+
+    ipcMain.handle('erp:inventory:get-product-catalog-entry', (event, input) => {
+      assertTrustedMainFrame(event);
+      return desktopBackend.getProductCatalogEntry({ token: input?.token, productId: input?.productId });
+    });
+
     ipcMain.handle('erp:inventory:get-product-images', (event, input) => {
       assertTrustedMainFrame(event);
       return desktopBackend.getProductImages({ token: input?.token, productId: input?.productId });

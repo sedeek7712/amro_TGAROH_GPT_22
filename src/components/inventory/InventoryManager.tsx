@@ -26,18 +26,34 @@ import {
   Archive,
   RotateCcw,
   Images,
+  FolderTree,
 } from 'lucide-react';
 import { storage } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
 import { dataService } from '../../services/dataService';
 import { authService } from '../../services/authService';
-import { getAuthorizedActivityIds } from '../../config/rbac';
+import { getAuthorizedActivityIds, hasPermission } from '../../config/rbac';
 import { getActiveCurrencyConfig } from '../../config/currency';
 import { useLiveProducts } from '../../hooks/useLiveDexie';
-import { Product, ProductBatch, ProductUnit, ActivityId } from '../../types/erp';
+import {
+  Product,
+  ProductBatch,
+  ProductUnit,
+  ActivityId,
+  Brand,
+  ProductFamily,
+  ProductCatalogEntry,
+} from '../../types/erp';
 import { formatLocalDate } from '../../utils/localDate';
+import {
+  formatVariantAttributesPairs,
+  groupCatalogEntriesByFamily,
+  matchesCatalogEntrySearch,
+} from '../../utils/productCatalogUi';
 import { ProductMediaManager } from './ProductMediaManager';
 import { ProductPrimaryImage } from './ProductPrimaryImage';
+import { BrandManagerModal } from './BrandManagerModal';
+import { ProductFamilyModal } from './ProductFamilyModal';
 
 interface InventoryManagerProps {
   selectedActivity: ActivityId | 'all';
@@ -75,10 +91,16 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     }
   }, [selectedActivity, firstAllowedActivity]);
 
+  const canWriteInventory = hasPermission(actor, 'inventory:write');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterType, setFilterType] = useState<'all' | 'low_stock' | 'expiring'>('all');
+  const [viewMode, setViewMode] = useState<'skus' | 'families'>('skus');
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isBrandModalOpen, setIsBrandModalOpen] = useState(false);
+  const [isFamilyModalOpen, setIsFamilyModalOpen] = useState(false);
+  const [editingFamily, setEditingFamily] = useState<ProductFamily | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
+  const [editingCatalogEntry, setEditingCatalogEntry] = useState<ProductCatalogEntry | null>(null);
   const [managingImagesProduct, setManagingImagesProduct] = useState<Product | null>(null);
   const [productUnits, setProductUnits] = useState<ProductUnit[]>([]);
   const [unitDraft, setUnitDraft] = useState({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
@@ -86,11 +108,17 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [isSavingUnit, setIsSavingUnit] = useState(false);
   const [isLoadingUnits, setIsLoadingUnits] = useState(false);
 
+  const [catalogEntries, setCatalogEntries] = useState<ProductCatalogEntry[]>([]);
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [families, setFamilies] = useState<ProductFamily[]>([]);
+  const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0);
 
   // حقول نموذج الإضافة والتعديل
   const [formNameAr, setFormNameAr] = useState('');
   const [formBarcode, setFormBarcode] = useState('');
   const [formCategory, setFormCategory] = useState('');
+  const [formBrandId, setFormBrandId] = useState('');
+  const [initialFormBrandId, setInitialFormBrandId] = useState('');
   const [formUnit, setFormUnit] = useState('حبة');
   const [formPurchasePrice, setFormPurchasePrice] = useState<string>('');
   const [formSellPrice, setFormSellPrice] = useState<string>('');
@@ -122,48 +150,79 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
   const currencySymbol = getActiveCurrencyConfig().symbol;
   const products = useLiveProducts(activeTab);
-  const expiringAlerts = products.flatMap((p) =>
-    (p.batches || [])
-      .filter((b) => {
-        const diff = Math.ceil((new Date(b.expiryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-        return diff <= 60 && b.quantity > 0;
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      dataService.getProductCatalog(activeTab),
+      dataService.getBrands(true),
+      dataService.getProductFamilies(activeTab, true),
+    ])
+      .then(([entries, brandList, familyList]) => {
+        if (cancelled) return;
+        setCatalogEntries(entries);
+        setBrands(brandList);
+        setFamilies(familyList);
       })
-      .map((b) => ({
+      .catch((err) => {
+        if (cancelled) return;
+        setTableError(err instanceof Error ? err.message : 'تعذر تحميل بيانات دليل المنتجات.');
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, products, catalogRefreshNonce]);
+
+  const triggerCatalogRefresh = () => {
+    setCatalogRefreshNonce((n) => n + 1);
+    onRefresh();
+  };
+
+  // دمج reactive products مع بيانات الكتالوج (المجموعات والعلامات والمتغيرات)
+  const effectiveCatalogEntries: ProductCatalogEntry[] = (() => {
+    const entryByProductId = new Map(catalogEntries.map((e) => [e.product.id, e]));
+    return products.map((p) => {
+      const existing = entryByProductId.get(p.id);
+      if (existing) {
+        return { ...existing, product: p };
+      }
+      return {
         product: p,
-        batch: b,
-        daysRemaining: Math.ceil((new Date(b.expiryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)),
-      }))
-  );
+        variantAttributes: {},
+        units: [],
+      };
+    });
+  })();
 
   // تصفية الأصناف
-  const filteredProducts = products.filter((p) => {
-    const q = searchQuery.toLowerCase();
-    const matchesSearch =
-      !searchQuery.trim() ||
-      p.nameAr.toLowerCase().includes(q) ||
-      p.code.toLowerCase().includes(q) ||
-      (p.barcode && p.barcode.toLowerCase().includes(q)) ||
-      (p.oemNumber && p.oemNumber.toLowerCase().includes(q));
-
-    if (!matchesSearch) return false;
+  const filteredEntries = effectiveCatalogEntries.filter((entry) => {
+    const p = entry.product;
+    if (!matchesCatalogEntrySearch(entry, searchQuery)) return false;
 
     if (filterType === 'low_stock') {
       return p.currentStock <= p.minStockAlert;
     }
     if (filterType === 'expiring') {
-      return p.batches && p.batches.some((b) => {
-        const diff = Math.ceil((new Date(b.expiryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-        return diff <= 60 && b.quantity > 0;
-      });
+      return (
+        p.batches &&
+        p.batches.some((b) => {
+          const diff = Math.ceil((new Date(b.expiryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
+          return diff <= 60 && b.quantity > 0;
+        })
+      );
     }
 
     return true;
   });
 
+  const groupedCatalog = groupCatalogEntriesByFamily(filteredEntries, families, brands);
+
   const resetForm = () => {
     setFormNameAr('');
     setFormBarcode('');
     setFormCategory('');
+    setFormBrandId('');
+    setInitialFormBrandId('');
     setFormUnit('حبة');
     setFormPurchasePrice('');
     setFormSellPrice('');
@@ -181,6 +240,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setFormInitialQty('0');
     setFormError(null);
     setEditingProduct(null);
+    setEditingCatalogEntry(null);
     setProductUnits([]);
     setUnitDraft({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
     setUnitError(null);
@@ -276,11 +336,16 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     }
   };
 
-  const openEditModal = (product: Product) => {
+  const openEditModal = (entry: ProductCatalogEntry) => {
+    const product = entry.product;
     setProductUnits([]);
     setUnitDraft({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
     void loadProductUnits(product.id);
     setEditingProduct(product);
+    setEditingCatalogEntry(entry);
+    const currentStandaloneBrandId = entry.family ? '' : entry.meta?.brandId || '';
+    setFormBrandId(currentStandaloneBrandId);
+    setInitialFormBrandId(currentStandaloneBrandId);
     setFormNameAr(product.nameAr);
     setFormBarcode(product.barcode || '');
     setFormCategory(product.category || '');
@@ -296,6 +361,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setFormSerialNumber(product.serialNumber || '');
     setFormScientificName(product.scientificName || '');
     setFormTrackExpiry(Boolean(product.trackExpiry));
+    setFormError(null);
     setIsAddModalOpen(true);
   };
 
@@ -360,7 +426,13 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           scientificName: formScientificName.trim() || undefined,
           trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
         };
-        await dataService.saveProductAtomic(updated, true);
+        const saved = await dataService.saveProductAtomic(updated, true);
+        if (!editingCatalogEntry?.family && formBrandId !== initialFormBrandId) {
+          await dataService.assignProductBrandAtomic({
+            productId: saved.id,
+            brandId: formBrandId ? formBrandId : null,
+          });
+        }
       } else {
         const newProductId = storage.generateUUID();
         const batches: ProductBatch[] = [];
@@ -402,12 +474,18 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
           batches: batches.length > 0 ? batches : undefined,
         };
-        await dataService.saveProductAtomic(newProduct, false);
+        const saved = await dataService.saveProductAtomic(newProduct, false);
+        if (formBrandId) {
+          await dataService.assignProductBrandAtomic({
+            productId: saved.id,
+            brandId: formBrandId,
+          });
+        }
       }
 
       setIsAddModalOpen(false);
       resetForm();
-      onRefresh();
+      triggerCatalogRefresh();
     } catch (err: unknown) {
       setFormError(err instanceof Error ? err.message : 'تعذر حفظ الصنف.');
     } finally {
@@ -422,7 +500,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     try {
       await dataService.deleteProductAtomic(deleteConfirmProduct.id);
       setDeleteConfirmProduct(null);
-      onRefresh();
+      triggerCatalogRefresh();
     } catch (err: unknown) {
       setTableError(err instanceof Error ? err.message : 'تعذر حذف الصنف.');
       setDeleteConfirmProduct(null);
@@ -444,7 +522,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
         },
         true
       );
-      onRefresh();
+      triggerCatalogRefresh();
     } catch (err: unknown) {
       setTableError(err instanceof Error ? err.message : 'تعذر تحديث حالة أرشفة الصنف.');
     } finally {
@@ -477,7 +555,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
       setAdjustReason('');
       setAdjustBatch('');
       setAdjustExpiry('');
-      onRefresh();
+      triggerCatalogRefresh();
     } catch (err: unknown) {
       setAdjustError(err instanceof Error ? err.message : 'تعذر تنفيذ التسوية الجردية.');
     } finally {
@@ -496,22 +574,188 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
       ? allActivities
       : allActivities.filter((act) => authorizedActivityIds.has(act.id));
 
+  const activeActivityLabel =
+    allActivities.find((a) => a.id === activeTab)?.name || 'النشاط';
+
+  const renderProductRow = (
+    entry: ProductCatalogEntry,
+    options?: { hideFamilyAndBrandMeta?: boolean }
+  ) => {
+    const p = entry.product;
+    const isLow = p.currentStock <= p.minStockAlert;
+    const isArchived = p.isActive === false;
+    const variantPairs = formatVariantAttributesPairs(
+      entry.variantAttributes,
+      entry.family?.optionSchema
+    );
+    const metaParts: string[] = [];
+    if (entry.family && !options?.hideFamilyAndBrandMeta) {
+      metaParts.push(
+        `المجموعة: ${entry.family.nameAr}${entry.family.isActive === false ? ' (مؤرشفة)' : ''}`
+      );
+    }
+    for (const pair of variantPairs) {
+      metaParts.push(`${pair.label}: ${pair.value}`);
+    }
+    if (entry.brand && !options?.hideFamilyAndBrandMeta) {
+      metaParts.push(`العلامة: ${entry.brand.nameAr}`);
+    }
+    if (p.barcode) {
+      metaParts.push(`باركود: ${p.barcode}`);
+    }
+    if (p.storageLocation) {
+      metaParts.push(`موقع: ${p.storageLocation}`);
+    }
+
+    return (
+      <tr
+        key={p.id}
+        className={`transition-colors ${
+          isArchived ? 'bg-slate-50/80 opacity-75 hover:bg-slate-100/70' : 'hover:bg-slate-50/80'
+        }`}
+      >
+        <td className="py-2 px-3 text-center">
+          <ProductPrimaryImage productId={p.id} productName={p.nameAr} />
+        </td>
+        <td className="py-3 px-4 font-mono font-bold text-slate-900 tabular-nums whitespace-nowrap">
+          {p.code}
+        </td>
+        <td className="py-3 px-4 min-w-[210px]">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-slate-900">{p.nameAr}</span>
+            {isArchived && (
+              <span className="text-[11px] font-semibold text-amber-700">· مؤرشف</span>
+            )}
+          </div>
+          {metaParts.length > 0 && (
+            <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1.5 flex-wrap">
+              {metaParts.map((part, idx) => (
+                <React.Fragment key={`${p.id}-meta-${idx}`}>
+                  {idx > 0 && <span aria-hidden="true">·</span>}
+                  <span>{part}</span>
+                </React.Fragment>
+              ))}
+            </div>
+          )}
+        </td>
+        <td className="py-3 px-4 text-slate-600">
+          {p.category || entry.family?.categorySnapshot || '-'}
+        </td>
+        <td className="py-3 px-4 text-center">
+          <span
+            className={`inline-block px-2 py-0.5 rounded-md font-mono font-bold tabular-nums whitespace-nowrap ${
+              isLow ? 'bg-rose-50 text-rose-800 border border-rose-200' : 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+            }`}
+          >
+            {p.currentStock} {p.unit}
+          </span>
+        </td>
+        <td className="py-3 px-4 text-center font-mono tabular-nums text-slate-700 whitespace-nowrap">
+          {p.purchasePrice.toFixed(2)} {currencySymbol}
+        </td>
+        <td className="py-3 px-4 text-center font-mono tabular-nums font-bold text-emerald-700 whitespace-nowrap">
+          {p.sellPrice.toFixed(2)} {currencySymbol}
+        </td>
+        <td className="py-3 px-4 text-center">
+          {p.batches && p.batches.length > 0 ? (
+            <div className="text-[11px] text-slate-600 tabular-nums">
+              {p.batches.map((b, i) => (
+                <div key={i} className="font-mono text-[10px]">
+                  {b.batchNumber}: {b.quantity} (انتهاء: {b.expiryDate})
+                </div>
+              ))}
+            </div>
+          ) : p.oemNumber ? (
+            <div className="text-[10px] text-slate-600">
+              <span className="font-mono font-semibold">OEM: {p.oemNumber}</span>
+              {p.compatibleModels && <div>{p.compatibleModels}</div>}
+            </div>
+          ) : (
+            <span className="text-slate-400">-</span>
+          )}
+        </td>
+        <td className="py-3 px-4 text-center">
+          <div className="flex items-center justify-center gap-1">
+            <button
+              type="button"
+              onClick={() => {
+                setAdjustError(null);
+                setAdjustDelta('');
+                setAdjustReason('');
+                setAdjustBatch(p.batches?.[0]?.batchNumber || '');
+                setAdjustExpiry('');
+                setAdjustProduct(p);
+              }}
+              aria-label={`تسوية جردية للصنف ${p.nameAr}`}
+              className="p-1.5 text-slate-500 hover:text-blue-700 hover:bg-blue-50 rounded-md transition-colors"
+              title="تسوية جردية"
+            >
+              <ArrowUpDown className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => openEditModal(entry)}
+              aria-label={`تعديل الصنف ${p.nameAr}`}
+              className="p-1.5 text-slate-500 hover:text-emerald-700 hover:bg-slate-100 rounded-md transition-colors"
+              title="تعديل بيانات الصنف"
+            >
+              <Edit2 className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setManagingImagesProduct(p)}
+              aria-label={`إدارة صور الصنف ${p.nameAr}`}
+              className="p-1.5 text-slate-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-colors"
+              title="إدارة صور الصنف"
+            >
+              <Images className="w-3.5 h-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleToggleArchiveProduct(p)}
+              disabled={isSubmitting}
+              aria-label={isArchived ? `إعادة تفعيل الصنف ${p.nameAr}` : `أرشفة الصنف ${p.nameAr}`}
+              className={`p-1.5 rounded-md transition-colors ${
+                isArchived
+                  ? 'text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50'
+                  : 'text-slate-500 hover:text-amber-700 hover:bg-amber-50'
+              }`}
+              title={isArchived ? 'إعادة تفعيل الصنف' : 'أرشفة الصنف وتعطيله'}
+            >
+              {isArchived ? <RotateCcw className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDeleteConfirmProduct(p)}
+              aria-label={`حذف الصنف ${p.nameAr}`}
+              className="p-1.5 text-slate-500 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors"
+              title="حذف الصنف"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </td>
+      </tr>
+    );
+  };
+
   return (
     <div className="p-3.5 sm:p-5 lg:p-6 space-y-4 sm:space-y-6 max-w-7xl mx-auto">
-      {/* Activity Navigation Tabs */}
-      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between bg-white p-2.5 sm:p-3 rounded-xl border border-slate-200 gap-3">
-        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 sm:pb-0">
+      {/* Activity Navigation Tabs & Primary Catalog Actions */}
+      <div className="flex flex-col lg:flex-row items-stretch lg:items-center justify-between bg-white p-2.5 sm:p-3 rounded-xl border border-slate-200 gap-3">
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-1 lg:pb-0">
           {activities.map((act) => {
             const Icon = act.icon;
             const isActive = activeTab === act.id;
             return (
               <button
                 key={act.id}
+                type="button"
                 onClick={() => {
                   setActiveTab(act.id);
                   setSelectedActivity(act.id);
                 }}
-                className={`flex items-center gap-1.5 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap ${
+                className={`flex items-center gap-1.5 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs font-bold transition-all whitespace-nowrap shrink-0 ${
                   isActive
                     ? 'bg-slate-900 text-white shadow-sm'
                     : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
@@ -524,61 +768,120 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           })}
         </div>
 
-        <button
-          onClick={openAddModal}
-          className="flex items-center justify-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors shrink-0"
-        >
-          <Plus className="w-4 h-4" />
-          <span>إضافة صنف جديد</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={() => setIsBrandModalOpen(true)}
+            className="flex items-center justify-center gap-1.5 px-3 py-2 border border-slate-200 bg-white hover:bg-slate-50 text-slate-700 rounded-lg text-xs font-bold transition-colors whitespace-nowrap shrink-0"
+          >
+            <Tag className="w-3.5 h-3.5 text-slate-500" />
+            <span>العلامات التجارية</span>
+          </button>
+          {canWriteInventory && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditingFamily(null);
+                  setIsFamilyModalOpen(true);
+                }}
+                className="flex items-center justify-center gap-1.5 px-3.5 py-2 bg-slate-900 hover:bg-slate-800 text-white rounded-lg text-xs font-bold shadow-sm transition-colors whitespace-nowrap shrink-0"
+              >
+                <Layers className="w-3.5 h-3.5 text-emerald-400" />
+                <span>مجموعة بمتغيرات</span>
+              </button>
+              <button
+                type="button"
+                onClick={openAddModal}
+                className="flex items-center justify-center gap-1.5 px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-bold shadow-sm transition-colors whitespace-nowrap shrink-0"
+              >
+                <Plus className="w-4 h-4" />
+                <span>إضافة صنف بسيط</span>
+              </button>
+            </>
+          )}
+        </div>
       </div>
 
-      {/* Search & Filter Toolbar */}
-      <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col sm:flex-row items-center justify-between gap-4">
-        <div className="relative w-full sm:w-80">
+      {/* Search, Filter & View Mode Toolbar */}
+      <div className="bg-white p-4 rounded-xl border border-slate-200 flex flex-col lg:flex-row items-stretch lg:items-center justify-between gap-3">
+        <div className="relative w-full lg:w-96">
           <Search className="w-4 h-4 text-slate-400 absolute right-3 top-2.5" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="بحث بالاسم، الباركود، أو رقم القطعة..."
+            placeholder="بحث بالاسم، الكود، الباركود، العلامة، المجموعة، أو رقم القطعة..."
+            aria-label="بحث في دليل المنتجات"
             className="w-full pl-3 pr-9 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
           />
         </div>
 
-        <div className="flex items-center gap-2 w-full sm:w-auto overflow-x-auto">
-          <button
-            onClick={() => setFilterType('all')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              filterType === 'all'
-                ? 'bg-slate-800 text-white'
-                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
-            }`}
-          >
-            كافة الأصناف ({products.length})
-          </button>
-          <button
-            onClick={() => setFilterType('low_stock')}
-            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-              filterType === 'low_stock'
-                ? 'bg-rose-700 text-white'
-                : 'bg-rose-50 text-rose-800 hover:bg-rose-100'
-            }`}
-          >
-            منخفض الرصيد
-          </button>
-          {(activeTab === 'pharmacy' || activeTab === 'grocery') && (
+        <div className="flex flex-wrap items-center justify-between lg:justify-end gap-2">
+          <div className="flex items-center gap-1.5 overflow-x-auto">
             <button
-              onClick={() => setFilterType('expiring')}
-              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all ${
-                filterType === 'expiring'
-                  ? 'bg-amber-700 text-white'
-                  : 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+              type="button"
+              onClick={() => setFilterType('all')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
+                filterType === 'all'
+                  ? 'bg-slate-800 text-white'
+                  : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
               }`}
             >
-              قريب الانتهاء
+              كافة الأصناف ({products.length})
             </button>
-          )}
+            <button
+              type="button"
+              onClick={() => setFilterType('low_stock')}
+              className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
+                filterType === 'low_stock'
+                  ? 'bg-rose-700 text-white'
+                  : 'bg-rose-50 text-rose-800 hover:bg-rose-100'
+              }`}
+            >
+              منخفض الرصيد
+            </button>
+            {(activeTab === 'pharmacy' || activeTab === 'grocery') && (
+              <button
+                type="button"
+                onClick={() => setFilterType('expiring')}
+                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition-all whitespace-nowrap shrink-0 ${
+                  filterType === 'expiring'
+                    ? 'bg-amber-700 text-white'
+                    : 'bg-amber-50 text-amber-800 hover:bg-amber-100'
+                }`}
+              >
+                قريب الانتهاء
+              </button>
+            )}
+          </div>
+
+          {/* Segmented View Mode Toggle: Flat SKU List vs Family Grouping */}
+          <div className="flex items-center gap-1 p-1 bg-slate-100 rounded-lg shrink-0">
+            <button
+              type="button"
+              onClick={() => setViewMode('skus')}
+              className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                viewMode === 'skus'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              عرض كل SKU
+            </button>
+            <button
+              type="button"
+              onClick={() => setViewMode('families')}
+              className={`flex items-center gap-1 px-2.5 py-1 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 ${
+                viewMode === 'families'
+                  ? 'bg-white text-slate-900 shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              <FolderTree className="w-3.5 h-3.5" />
+              <span>تجميع حسب المجموعة</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -588,160 +891,172 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
             <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
             <span>{tableError}</span>
           </div>
-          <button onClick={() => setTableError(null)} className="text-rose-600 hover:text-rose-900">
+          <button type="button" onClick={() => setTableError(null)} className="text-rose-600 hover:text-rose-900">
             <X className="w-4 h-4" />
           </button>
         </div>
       )}
 
-      {/* Products Table */}
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
-        <div className="overflow-x-auto">
-          <table className="w-full text-right text-xs">
-            <thead>
-              <tr className="border-b border-slate-200 text-slate-500 bg-slate-50">
-                <th className="py-3 px-3 text-center">الصورة</th>
-                <th className="py-3 px-4">كود الصنف</th>
-                <th className="py-3 px-4">اسم الصنف والتفاصيل</th>
-                <th className="py-3 px-4">التصنيف</th>
-                <th className="py-3 px-4 text-center">الرصيد المتاح</th>
-                <th className="py-3 px-4 text-center">سعر الشراء</th>
-                <th className="py-3 px-4 text-center">سعر البيع</th>
-                <th className="py-3 px-4 text-center">التشغيلات / التوافق</th>
-                <th className="py-3 px-4 text-center">الإجراءات</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100">
-              {filteredProducts.length === 0 ? (
-                <tr>
-                  <td colSpan={9} className="py-12 text-center text-slate-400">
-                    <Package className="w-8 h-8 mx-auto mb-2 text-slate-300 stroke-1" />
-                    <p className="font-medium">لا توجد أصناف مسجلة في هذا القسم بعد</p>
-                    <p className="text-[11px] text-slate-400 mt-1">اضغط على «إضافة صنف جديد» لتسجيل بضائع حقيقية</p>
-                  </td>
+      {/* Products Table / Grouped Families View */}
+      {viewMode === 'skus' ? (
+        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[860px] text-right text-xs">
+              <thead>
+                <tr className="border-b border-slate-200 text-slate-500 bg-slate-50">
+                  <th className="py-3 px-3 text-center">الصورة</th>
+                  <th className="py-3 px-4">كود الصنف (SKU)</th>
+                  <th className="py-3 px-4">اسم الصنف والتفاصيل</th>
+                  <th className="py-3 px-4">التصنيف</th>
+                  <th className="py-3 px-4 text-center">الرصيد المتاح</th>
+                  <th className="py-3 px-4 text-center">سعر الشراء</th>
+                  <th className="py-3 px-4 text-center">سعر البيع</th>
+                  <th className="py-3 px-4 text-center">التشغيلات / التوافق</th>
+                  <th className="py-3 px-4 text-center">الإجراءات</th>
                 </tr>
-              ) : (
-                filteredProducts.map((p) => {
-                  const isLow = p.currentStock <= p.minStockAlert;
-                  const isArchived = p.isActive === false;
-                  return (
-                    <tr
-                      key={p.id}
-                      className={`transition-colors ${
-                        isArchived ? 'bg-slate-50/80 opacity-70 hover:bg-slate-100/70' : 'hover:bg-slate-50/80'
-                      }`}
-                    >
-                      <td className="py-2 px-3 text-center"><ProductPrimaryImage productId={p.id} productName={p.nameAr} /></td>
-                      <td className="py-3 px-4 font-mono font-bold text-slate-900">{p.code}</td>
-                      <td className="py-3 px-4">
-                        <div className="flex items-center gap-1.5 flex-wrap">
-                          <span className="font-bold text-slate-900">{p.nameAr}</span>
-                          {isArchived && (
-                            <span className="px-1.5 py-0.5 text-[10px] font-bold bg-slate-200 text-slate-700 rounded">
-                              مؤرشف
-                            </span>
-                          )}
-                        </div>
-                        {p.barcode && (
-                          <div className="text-[10px] text-slate-400 font-mono">باركود: {p.barcode}</div>
-                        )}
-                        {p.storageLocation && (
-                          <div className="text-[10px] text-slate-500">موقع: {p.storageLocation}</div>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-slate-600">{p.category || '-'}</td>
-                      <td className="py-3 px-4 text-center">
-                        <span
-                          className={`inline-block px-2 py-0.5 rounded-full font-mono font-bold tabular-nums ${
-                            isLow ? 'bg-rose-100 text-rose-800' : 'bg-emerald-100 text-emerald-800'
-                          }`}
-                        >
-                          {p.currentStock} {p.unit}
-                        </span>
-                      </td>
-                      <td className="py-3 px-4 text-center font-mono tabular-nums text-slate-700">
-                        {p.purchasePrice.toFixed(2)} {currencySymbol}
-                      </td>
-                      <td className="py-3 px-4 text-center font-mono tabular-nums font-bold text-emerald-700">
-                        {p.sellPrice.toFixed(2)} {currencySymbol}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        {p.batches && p.batches.length > 0 ? (
-                          <div className="text-[11px] text-slate-600">
-                            {p.batches.map((b, i) => (
-                              <div key={i} className="font-mono text-[10px]">
-                                {b.batchNumber}: {b.quantity} (انتهاء: {b.expiryDate})
-                              </div>
-                            ))}
-                          </div>
-                        ) : p.oemNumber ? (
-                          <div className="text-[10px] text-slate-600">
-                            <span className="font-mono font-semibold">OEM: {p.oemNumber}</span>
-                            {p.compatibleModels && <div>{p.compatibleModels}</div>}
-                          </div>
-                        ) : (
-                          <span className="text-slate-400">-</span>
-                        )}
-                      </td>
-                      <td className="py-3 px-4 text-center">
-                        <div className="flex items-center justify-center gap-1.5">
-                          <button
-                            onClick={() => {
-                              setAdjustError(null);
-                              setAdjustDelta('');
-                              setAdjustReason('');
-                              setAdjustBatch(p.batches?.[0]?.batchNumber || '');
-                              setAdjustExpiry('');
-                              setAdjustProduct(p);
-                            }}
-                            className="p-1.5 text-slate-500 hover:text-blue-700 hover:bg-blue-50 rounded-md transition-colors"
-                            title="تسوية جردية"
-                          >
-                            <ArrowUpDown className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => openEditModal(p)}
-                            className="p-1.5 text-slate-500 hover:text-emerald-700 hover:bg-slate-100 rounded-md transition-colors"
-                            title="تعديل بيانات الصنف"
-                          >
-                            <Edit2 className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => setManagingImagesProduct(p)}
-                            className="p-1.5 text-slate-500 hover:text-indigo-700 hover:bg-indigo-50 rounded-md transition-colors"
-                            title="إدارة صور الصنف"
-                          >
-                            <Images className="w-3.5 h-3.5" />
-                          </button>
-                          <button
-                            onClick={() => handleToggleArchiveProduct(p)}
-                            disabled={isSubmitting}
-                            className={`p-1.5 rounded-md transition-colors ${
-                              isArchived
-                                ? 'text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50'
-                                : 'text-slate-500 hover:text-amber-700 hover:bg-amber-50'
-                            }`}
-                            title={isArchived ? 'إعادة تفعيل الصنف' : 'أرشفة الصنف وتعطيله'}
-                          >
-                            {isArchived ? <RotateCcw className="w-3.5 h-3.5" /> : <Archive className="w-3.5 h-3.5" />}
-                          </button>
-                          <button
-                            onClick={() => setDeleteConfirmProduct(p)}
-                            className="p-1.5 text-slate-500 hover:text-rose-700 hover:bg-rose-50 rounded-md transition-colors"
-                            title="حذف الصنف"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })
-              )}
-            </tbody>
-          </table>
+              </thead>
+              <tbody className="divide-y divide-slate-100">
+                {filteredEntries.length === 0 ? (
+                  <tr>
+                    <td colSpan={9} className="py-12 text-center text-slate-400">
+                      <Package className="w-8 h-8 mx-auto mb-2 text-slate-300 stroke-1" />
+                      <p className="font-medium">لا توجد أصناف مسجلة في هذا القسم بعد</p>
+                      <p className="text-[11px] text-slate-400 mt-1">
+                        اضغط على «إضافة صنف بسيط» لصنف مستقل أو «مجموعة بمتغيرات» لصنف متعدد الخيارات
+                      </p>
+                    </td>
+                  </tr>
+                ) : (
+                  filteredEntries.map((entry) => renderProductRow(entry))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="space-y-4">
+          {groupedCatalog.familyGroups.length === 0 && groupedCatalog.standaloneEntries.length === 0 ? (
+            <div className="bg-white rounded-xl border border-slate-200 py-12 text-center text-slate-400 text-xs">
+              <Package className="w-8 h-8 mx-auto mb-2 text-slate-300 stroke-1" />
+              <p className="font-medium">لا توجد مجموعات أو أصناف مطابقة للبحث الحالي</p>
+            </div>
+          ) : (
+            <>
+              {groupedCatalog.familyGroups.map((group) => (
+                <div
+                  key={group.family.id}
+                  className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm"
+                >
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
+                    <div className="space-y-0.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <Layers className="w-4 h-4 text-emerald-700 shrink-0" />
+                        <span className="font-bold text-sm text-slate-900">{group.family.nameAr}</span>
+                        {group.family.isActive === false && (
+                          <span className="text-[11px] font-semibold text-amber-700">· مجموعة مؤرشفة</span>
+                        )}
+                      </div>
+                      <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap">
+                        {group.brand && <span>العلامة: {group.brand.nameAr}</span>}
+                        {group.brand && <span aria-hidden="true">·</span>}
+                        <span>
+                          الخيارات: {group.family.optionSchema.map((o) => o.labelAr).join('، ')}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span className="tabular-nums">
+                          {group.activeSkuCount} متغير نشط
+                          {group.archivedSkuCount > 0 ? ` (${group.archivedSkuCount} مؤرشف)` : ''}
+                        </span>
+                        <span aria-hidden="true">·</span>
+                        <span className="font-semibold text-slate-700 tabular-nums">
+                          مجموع أرصدة المتغيرات (مشتق للعرض): {group.derivedTotalStock}
+                        </span>
+                      </div>
+                    </div>
+
+                    {canWriteInventory && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingFamily(group.family);
+                          setIsFamilyModalOpen(true);
+                        }}
+                        className="px-3 py-1.5 border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 rounded-lg text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap shrink-0"
+                      >
+                        <Edit2 className="w-3.5 h-3.5" />
+                        <span>تعديل المجموعة</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {group.entries.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-400">
+                      لا توجد متغيرات (SKU) مطابقة للفلاتر داخل هذه المجموعة.
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full min-w-[860px] text-right text-xs">
+                        <thead>
+                          <tr className="border-b border-slate-100 text-slate-500 bg-white">
+                            <th className="py-2.5 px-3 text-center">الصورة</th>
+                            <th className="py-2.5 px-4">كود SKU</th>
+                            <th className="py-2.5 px-4">المتغير والتفاصيل</th>
+                            <th className="py-2.5 px-4">التصنيف</th>
+                            <th className="py-2.5 px-4 text-center">الرصيد</th>
+                            <th className="py-2.5 px-4 text-center">الشراء</th>
+                            <th className="py-2.5 px-4 text-center">البيع</th>
+                            <th className="py-2.5 px-4 text-center">التشغيلات / التوافق</th>
+                            <th className="py-2.5 px-4 text-center">الإجراءات</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-100">
+                          {group.entries.map((entry) =>
+                            renderProductRow(entry, { hideFamilyAndBrandMeta: true })
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              {groupedCatalog.standaloneEntries.length > 0 && (
+                <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm">
+                  <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <Package className="w-4 h-4 text-slate-600" />
+                      <span className="font-bold text-sm text-slate-900">
+                        الأصناف البسيطة المستقلة ({groupedCatalog.standaloneEntries.length})
+                      </span>
+                    </div>
+                    <span className="text-[11px] text-slate-500">أصناف مستقلة غير تابعة لمجموعة متغيرات</span>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full min-w-[860px] text-right text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-100 text-slate-500 bg-white">
+                          <th className="py-2.5 px-3 text-center">الصورة</th>
+                          <th className="py-2.5 px-4">كود الصنف</th>
+                          <th className="py-2.5 px-4">اسم الصنف والتفاصيل</th>
+                          <th className="py-2.5 px-4">التصنيف</th>
+                          <th className="py-2.5 px-4 text-center">الرصيد المتاح</th>
+                          <th className="py-2.5 px-4 text-center">سعر الشراء</th>
+                          <th className="py-2.5 px-4 text-center">سعر البيع</th>
+                          <th className="py-2.5 px-4 text-center">التشغيلات / التوافق</th>
+                          <th className="py-2.5 px-4 text-center">الإجراءات</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {groupedCatalog.standaloneEntries.map((entry) => renderProductRow(entry))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
 
       {/* Add / Edit Product Modal */}
       {isAddModalOpen && (
@@ -749,21 +1064,68 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           <div className="relative w-full max-w-2xl bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-200">
             <div className="flex items-center justify-between px-6 py-4 bg-slate-900 text-white">
               <h3 className="text-sm font-bold">
-                {editingProduct ? 'تعديل بيانات الصنف' : 'إضافة صنف جديد للمستودع'}
+                {editingProduct
+                  ? editingCatalogEntry?.family
+                    ? `تعديل متغير (SKU): ${editingProduct.nameAr}`
+                    : 'تعديل بيانات الصنف'
+                  : 'إضافة صنف بسيط للمستودع'}
               </h3>
               <button
+                type="button"
                 onClick={() => setIsAddModalOpen(false)}
+                aria-label="إغلاق نافذة الصنف"
                 className="text-slate-400 hover:text-white transition-colors"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveProduct} className="p-6 space-y-4 text-xs">
+            <form onSubmit={handleSaveProduct} className="p-6 space-y-4 text-xs max-h-[85vh] overflow-y-auto">
               {formError && (
                 <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 flex items-center gap-2">
                   <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
                   <span className="font-semibold">{formError}</span>
+                </div>
+              )}
+
+              {editingProduct && editingCatalogEntry?.family && (
+                <div className="p-3 rounded-lg border border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
+                  <div className="space-y-0.5">
+                    <div className="font-bold text-slate-900">
+                      متغير ضمن المجموعة: {editingCatalogEntry.family.nameAr}
+                    </div>
+                    <div className="text-[11px] text-slate-600 flex items-center gap-1.5 flex-wrap">
+                      {formatVariantAttributesPairs(
+                        editingCatalogEntry.variantAttributes,
+                        editingCatalogEntry.family.optionSchema
+                      ).map((pair, idx) => (
+                        <React.Fragment key={pair.key}>
+                          {idx > 0 && <span aria-hidden="true">·</span>}
+                          <span>
+                            {pair.label}: <strong>{pair.value}</strong>
+                          </span>
+                        </React.Fragment>
+                      ))}
+                      {editingCatalogEntry.brand && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span>العلامة (من المجموعة): {editingCatalogEntry.brand.nameAr}</span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const fam = editingCatalogEntry.family!;
+                      setIsAddModalOpen(false);
+                      setEditingFamily(fam);
+                      setIsFamilyModalOpen(true);
+                    }}
+                    className="px-3 py-1.5 border border-slate-200 bg-white hover:bg-slate-100 text-slate-700 rounded-lg font-semibold whitespace-nowrap shrink-0"
+                  >
+                    تعديل المجموعة
+                  </button>
                 </div>
               )}
 
@@ -792,7 +1154,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                 </div>
 
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">التصنيف / العائلة</label>
+                  <label className="block font-semibold text-slate-700 mb-1">التصنيف</label>
                   <input
                     type="text"
                     value={formCategory}
@@ -801,6 +1163,30 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                     className="w-full px-3 py-2 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-emerald-500"
                   />
                 </div>
+
+                {!editingCatalogEntry?.family && (
+                  <div>
+                    <label htmlFor="simple-product-brand" className="block font-semibold text-slate-700 mb-1">
+                      العلامة التجارية (اختياري)
+                    </label>
+                    <select
+                      id="simple-product-brand"
+                      value={formBrandId}
+                      onChange={(e) => setFormBrandId(e.target.value)}
+                      className="w-full px-3 py-2 border border-slate-200 rounded-lg text-slate-900 bg-white focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                    >
+                      <option value="">بدون علامة تجارية</option>
+                      {brands
+                        .filter((b) => b.isActive !== false || b.id === formBrandId)
+                        .map((b) => (
+                          <option key={b.id} value={b.id}>
+                            {b.nameAr}
+                            {b.isActive === false ? ' (مؤرشفة)' : ''}
+                          </option>
+                        ))}
+                    </select>
+                  </div>
+                )}
 
                 <div>
                   <label className="block font-semibold text-slate-700 mb-1">وحدة القياس</label>
@@ -1266,6 +1652,28 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           onClose={() => setManagingImagesProduct(null)}
         />
       )}
+
+      <BrandManagerModal
+        isOpen={isBrandModalOpen}
+        onClose={() => setIsBrandModalOpen(false)}
+        onChanged={triggerCatalogRefresh}
+        canWrite={canWriteInventory}
+      />
+
+      <ProductFamilyModal
+        isOpen={isFamilyModalOpen}
+        activityId={activeTab}
+        activityLabel={activeActivityLabel}
+        editingFamily={editingFamily}
+        brands={brands}
+        existingCodes={products.map((p) => p.code)}
+        onClose={() => {
+          setIsFamilyModalOpen(false);
+          setEditingFamily(null);
+        }}
+        onSaved={triggerCatalogRefresh}
+        onBrandsChanged={triggerCatalogRefresh}
+      />
     </div>
   );
 };

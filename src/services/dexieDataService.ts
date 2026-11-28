@@ -20,6 +20,14 @@ import {
   ProductBatch,
   ProductUnit,
   SaveProductUnitInput,
+  Brand,
+  ProductFamily,
+  ProductCatalogMeta,
+  ProductCatalogEntry,
+  SaveBrandInput,
+  CreateProductFamilyWithSkusInput,
+  UpdateProductFamilyInput,
+  AssignProductBrandInput,
   Party,
   Invoice,
   InvoiceItem,
@@ -44,6 +52,12 @@ import { IDataService } from './dataService';
 import { OFFICIAL_ACTIVITIES, INITIAL_CHART_OF_ACCOUNTS, storage } from './storageService';
 import { syncQueueService } from './syncQueueService';
 import { authService, hashPassword, validatePasswordStrength } from './authService';
+import {
+  normalizeBrandName,
+  normalizeDisplayText,
+  normalizeOptionSchema,
+  computeCanonicalVariantKeyAndAttributes,
+} from '../utils/productCatalog';
 import {
   Permission,
   assertActivityAccess,
@@ -1064,20 +1078,185 @@ export class DexieDataService implements IDataService {
     });
   }
 
-  public async saveProductAtomic(product: Product, isUpdate = false): Promise<Product> {
-    await this.ensureReady();
-    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
-    assertActivityAccess(actor, product.activityId, isUpdate ? 'تعديل صنف' : 'إضافة صنف');
+  private normalizeProductForPersistence(
+    actor: SystemUser,
+    product: Product,
+    isUpdate: boolean
+  ): Product {
+    if (!product || typeof product !== 'object') {
+      throw new FinancialValidationError('بيانات الصنف غير صالحة.');
+    }
+    const nameAr = String(product.nameAr || '').trim();
+    const code = String(product.code || '').trim();
+    const activityId = String(product.activityId || '').trim() as CommercialActivityId;
+    if (!nameAr || !code || !activityId) {
+      throw new FinancialValidationError('اسم الصنف وكوده والنشاط التجاري حقول مطلوبة.');
+    }
+    assertActivityAccess(actor, activityId, isUpdate ? 'تعديل صنف' : 'إضافة صنف');
 
-    if (!product.id) product.id = storage.generateUUID();
-    if (product.batches && product.batches.length > 0 && product.currentStock === 0) {
-      product.currentStock = roundMoney(
-        product.batches.reduce((s, b) => s + (Number(b.quantity) || 0), 0),
+    const purchasePrice = Number(product.purchasePrice ?? 0);
+    const sellPrice = Number(product.sellPrice ?? 0);
+    if (!Number.isFinite(purchasePrice) || purchasePrice < 0 || !Number.isFinite(sellPrice) || sellPrice < 0) {
+      throw new FinancialValidationError('أسعار الشراء والبيع لا يجوز أن تكون سالبة.');
+    }
+
+    const normalized: Product = {
+      ...product,
+      id: String(product.id || '').trim() || storage.generateUUID(),
+      activityId,
+      code,
+      nameAr,
+      purchasePrice,
+      sellPrice,
+      isActive: product.isActive !== false,
+    };
+    if (normalized.batches && normalized.batches.length > 0 && normalized.currentStock === 0) {
+      normalized.currentStock = roundMoney(
+        normalized.batches.reduce((s, b) => s + (Number(b.quantity) || 0), 0),
         4
       );
     }
-    product.isActive = product.isActive !== false;
-    validateProductStockConsistency(product);
+    validateProductStockConsistency(normalized);
+    return normalized;
+  }
+
+  private async persistProductInCurrentTx(params: {
+    actor: SystemUser;
+    tenantId: string;
+    branchId: string;
+    activeBranch: Branch;
+    terminalCode: string;
+    product: Product;
+    isUpdate: boolean;
+    nowIso: string;
+    todayDate: string;
+    skipAuditLog?: boolean;
+  }): Promise<Product> {
+    const { actor, tenantId, branchId, activeBranch, terminalCode, product, isUpdate, nowIso, todayDate, skipAuditLog } = params;
+    const actExists = await db.activities.get(product.activityId);
+    if (!actExists) {
+      throw new FinancialValidationError(`النشاط التجاري (${product.activityId}) غير موجود.`);
+    }
+    const existing = await db.products.get(product.id);
+    if (existing?.activityId) {
+      assertActivityAccess(actor, existing.activityId, 'تعديل صنف');
+      if (existing.unit !== product.unit) {
+        const alternateUnitCount = await db.productUnits
+          .where('[tenantId+productId]')
+          .equals([tenantId, product.id])
+          .count();
+        if (alternateUnitCount > 0) {
+          throw new Error('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة لهذا الصنف.');
+        }
+      }
+    }
+    await db.products.put(product);
+    await syncQueueService.enqueue({
+      tenantId,
+      branchId,
+      entityType: 'PRODUCT',
+      entityId: product.id,
+      action: existing || isUpdate ? 'UPDATE' : 'CREATE',
+      payload: product as unknown as Record<string, unknown>,
+    });
+
+    if (!existing && !isUpdate) {
+      const openingValue = roundMoney(
+        product.batches && product.batches.length > 0
+          ? product.batches.reduce(
+              (sum, b) => sum + (Number(b.quantity) || 0) * (Number(b.costPrice ?? product.purchasePrice) || 0),
+              0
+            )
+          : (Number(product.currentStock) || 0) * (Number(product.purchasePrice) || 0)
+      );
+      if (openingValue > 0) {
+        const invCode = ACTIVITY_INVENTORY_ACCOUNTS[product.activityId] || '11041';
+        const invAcc = await this.ensureCanonicalAccountTx(invCode);
+        const eqAcc = await this.ensureCanonicalAccountTx('3101');
+        const entryNumber = await this.allocateSequenceNumberAtomic(
+          'JV',
+          activeBranch.code || 'BR01',
+          terminalCode,
+          tenantId
+        );
+        const openingJv: JournalEntry = {
+          id: storage.generateUUID(),
+          entryNumber,
+          date: todayDate,
+          description: `قيد رصيد افتتاحي للمخزون - ${product.nameAr} (${product.code})`,
+          costCenterId: product.activityId,
+          branchId: activeBranch.id,
+          lines: [
+            {
+              id: storage.generateUUID(),
+              accountCode: invCode,
+              accountName: invAcc?.nameAr || 'مخزون النشاط',
+              debit: openingValue,
+              credit: 0,
+              costCenterId: product.activityId,
+              memo: `إثبات رصيد افتتاحي: ${product.nameAr}`,
+            },
+            {
+              id: storage.generateUUID(),
+              accountCode: '3101',
+              accountName: eqAcc?.nameAr || 'رأس المال المخصص',
+              debit: 0,
+              credit: openingValue,
+              costCenterId: 'general',
+              memo: `مقابل رصيد مخزون افتتاحي: ${product.nameAr}`,
+            },
+          ],
+          status: 'POSTED',
+          referenceType: 'INVENTORY',
+          referenceId: product.id,
+          isAutoGenerated: true,
+        };
+        if (invAcc) {
+          invAcc.balance = roundMoney(invAcc.balance + accountBalanceDeltaByType(invAcc.type, openingValue, 0));
+          await db.accounts.put(invAcc);
+        }
+        if (eqAcc) {
+          eqAcc.balance = roundMoney(eqAcc.balance + accountBalanceDeltaByType(eqAcc.type, 0, openingValue));
+          await db.accounts.put(eqAcc);
+        }
+        await db.journalEntries.put(openingJv);
+        await db.outbox.put({
+          id: storage.generateUUID(),
+          tenantId,
+          branchId: activeBranch.id,
+          entityType: 'JOURNAL_ENTRY',
+          entityId: openingJv.id,
+          action: 'CREATE',
+          payload: openingJv as unknown as Record<string, unknown>,
+          status: 'PENDING',
+          retryCount: 0,
+          priority: 4,
+          dependsOn: [product.id],
+          createdAt: nowIso,
+          idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${openingJv.id}_CREATE`,
+        });
+      }
+    }
+
+    if (!skipAuditLog) {
+      await db.auditLogs.put({
+        id: storage.generateUUID(),
+        timestamp: nowIso,
+        userId: actor.id,
+        userName: actor.fullName,
+        tenantId,
+        branchId,
+        action: existing || isUpdate ? 'تعديل صنف' : 'إضافة صنف',
+        details: `${existing || isUpdate ? 'تحديث' : 'إضافة'} الصنف ${product.nameAr} بكود ${product.code}`,
+      });
+    }
+    return product;
+  }
+
+  public async saveProductAtomic(product: Product, isUpdate = false): Promise<Product> {
+    await this.ensureReady();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    const normalized = this.normalizeProductForPersistence(actor, product, isUpdate);
 
     const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
     const terminalCode = storage.getTerminalCode();
@@ -1086,107 +1265,329 @@ export class DexieDataService implements IDataService {
 
     return await db.transaction(
       'rw',
-      [db.products, db.productUnits, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
+      [db.activities, db.products, db.productUnits, db.journalEntries, db.accounts, db.branches, db.sequences, db.outbox, db.auditLogs],
       async () => {
-        const existing = await db.products.get(product.id);
-        if (existing?.activityId) {
-          assertActivityAccess(actor, existing.activityId, 'تعديل صنف');
-          if (existing.unit !== product.unit) {
-            const alternateUnitCount = await db.productUnits
-              .where('[tenantId+productId]')
-              .equals([tenantId, product.id])
-              .count();
-            if (alternateUnitCount > 0) {
-              throw new Error('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة لهذا الصنف.');
-            }
-          }
-        }
-        await db.products.put(product);
-        await syncQueueService.enqueue({
+        return await this.persistProductInCurrentTx({
+          actor,
           tenantId,
           branchId,
-          entityType: 'PRODUCT',
-          entityId: product.id,
-          action: existing || isUpdate ? 'UPDATE' : 'CREATE',
-          payload: product as unknown as Record<string, unknown>,
+          activeBranch,
+          terminalCode,
+          product: normalized,
+          isUpdate,
+          nowIso,
+          todayDate,
         });
+      }
+    );
+  }
 
-        if (!existing && !isUpdate) {
-          const openingValue = roundMoney(
-            product.batches && product.batches.length > 0
-              ? product.batches.reduce(
-                  (sum, b) => sum + (Number(b.quantity) || 0) * (Number(b.costPrice ?? product.purchasePrice) || 0),
-                  0
-                )
-              : (Number(product.currentStock) || 0) * (Number(product.purchasePrice) || 0)
-          );
-          if (openingValue > 0) {
-            const invCode = ACTIVITY_INVENTORY_ACCOUNTS[product.activityId] || '11041';
-            const invAcc = await this.ensureCanonicalAccountTx(invCode);
-            const eqAcc = await this.ensureCanonicalAccountTx('3101');
-            const entryNumber = await this.allocateSequenceNumberAtomic(
-              'JV',
-              activeBranch.code || 'BR01',
-              terminalCode,
-              tenantId
-            );
-            const openingJv: JournalEntry = {
-              id: storage.generateUUID(),
-              entryNumber,
-              date: todayDate,
-              description: `قيد رصيد افتتاحي للمخزون - ${product.nameAr} (${product.code})`,
-              costCenterId: product.activityId,
-              branchId: activeBranch.id,
-              lines: [
-                {
-                  id: storage.generateUUID(),
-                  accountCode: invCode,
-                  accountName: invAcc?.nameAr || 'مخزون النشاط',
-                  debit: openingValue,
-                  credit: 0,
-                  costCenterId: product.activityId,
-                  memo: `إثبات رصيد افتتاحي: ${product.nameAr}`,
-                },
-                {
-                  id: storage.generateUUID(),
-                  accountCode: '3101',
-                  accountName: eqAcc?.nameAr || 'رأس المال المخصص',
-                  debit: 0,
-                  credit: openingValue,
-                  costCenterId: 'general',
-                  memo: `مقابل رصيد مخزون افتتاحي: ${product.nameAr}`,
-                },
-              ],
-              status: 'POSTED',
-              referenceType: 'INVENTORY',
-              referenceId: product.id,
-              isAutoGenerated: true,
-            };
-            if (invAcc) {
-              invAcc.balance = roundMoney(invAcc.balance + accountBalanceDeltaByType(invAcc.type, openingValue, 0));
-              await db.accounts.put(invAcc);
-            }
-            if (eqAcc) {
-              eqAcc.balance = roundMoney(eqAcc.balance + accountBalanceDeltaByType(eqAcc.type, 0, openingValue));
-              await db.accounts.put(eqAcc);
-            }
-            await db.journalEntries.put(openingJv);
-            await db.outbox.put({
-              id: storage.generateUUID(),
-              tenantId,
-              branchId: activeBranch.id,
-              entityType: 'JOURNAL_ENTRY',
-              entityId: openingJv.id,
-              action: 'CREATE',
-              payload: openingJv as unknown as Record<string, unknown>,
-              status: 'PENDING',
-              retryCount: 0,
-              priority: 4,
-              dependsOn: [product.id],
-              createdAt: nowIso,
-              idempotencyKey: `${tenantId}_JOURNAL_ENTRY_${openingJv.id}_CREATE`,
-            });
+  public async getBrands(includeInactive = false): Promise<Brand[]> {
+    await this.ensureReady();
+    const { tenantId } = this.requireAuthorizedActor('inventory:view');
+    const rows = await db.brands.where('tenantId').equals(tenantId).toArray();
+    const filtered = includeInactive ? rows : rows.filter((b) => b.isActive !== false);
+    return filtered.sort((a, b) => a.nameAr.localeCompare(b.nameAr, 'ar'));
+  }
+
+  public async saveBrandAtomic(input: SaveBrandInput): Promise<Brand> {
+    await this.ensureReady();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    if (!input || typeof input !== 'object') {
+      throw new FinancialValidationError('بيانات العلامة التجارية غير صالحة.');
+    }
+    if (input.isActive !== undefined && typeof input.isActive !== 'boolean') {
+      throw new FinancialValidationError('حالة العلامة التجارية غير صالحة.');
+    }
+    if (input.id !== undefined && typeof input.id !== 'string') {
+      throw new FinancialValidationError('معرف العلامة التجارية غير صالح.');
+    }
+    const normalizedName = normalizeBrandName(input.nameAr);
+    const nameAr = normalizeDisplayText(input.nameAr);
+    const id = String(input.id || '').trim() || storage.generateUUID();
+    const nowIso = new Date().toISOString();
+
+    return await db.transaction('rw', [db.brands, db.auditLogs], async () => {
+      const existing = await db.brands.get(id);
+      if (existing && existing.tenantId !== tenantId) {
+        throw new FinancialValidationError('العلامة التجارية لا تنتمي إلى المؤسسة الحالية.');
+      }
+      const duplicate = await db.brands
+        .where('[tenantId+normalizedName]')
+        .equals([tenantId, normalizedName])
+        .first();
+      if (duplicate && duplicate.id !== id) {
+        throw new FinancialValidationError('العلامة التجارية مسجلة بالفعل.');
+      }
+      const brand: Brand = {
+        id,
+        tenantId,
+        nameAr,
+        normalizedName,
+        isActive: input.isActive === undefined ? (existing ? existing.isActive !== false : true) : input.isActive !== false,
+        createdAt: existing?.createdAt || nowIso,
+        updatedAt: nowIso,
+      };
+      await db.brands.put(brand);
+      await db.auditLogs.put({
+        id: storage.generateUUID(),
+        timestamp: nowIso,
+        userId: actor.id,
+        userName: actor.fullName,
+        tenantId,
+        branchId,
+        action: existing ? 'تعديل علامة تجارية' : 'إضافة علامة تجارية',
+        details: `تم حفظ العلامة التجارية ${nameAr}`,
+      });
+      return brand;
+    });
+  }
+
+  public async archiveBrandAtomic(brandId: string): Promise<Brand> {
+    await this.ensureReady();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    const id = String(brandId || '').trim();
+    if (!id) {
+      throw new FinancialValidationError('معرف العلامة التجارية مطلوب.');
+    }
+    const nowIso = new Date().toISOString();
+
+    return await db.transaction('rw', [db.brands, db.auditLogs], async () => {
+      const existing = await db.brands.get(id);
+      if (!existing || existing.tenantId !== tenantId) {
+        throw new FinancialValidationError('العلامة التجارية غير موجودة.');
+      }
+      const archived: Brand = {
+        ...existing,
+        isActive: false,
+        updatedAt: nowIso,
+      };
+      await db.brands.put(archived);
+      await db.auditLogs.put({
+        id: storage.generateUUID(),
+        timestamp: nowIso,
+        userId: actor.id,
+        userName: actor.fullName,
+        tenantId,
+        branchId,
+        action: 'أرشفة علامة تجارية',
+        details: `تمت أرشفة العلامة التجارية ${archived.nameAr} (${id})`,
+      });
+      return archived;
+    });
+  }
+
+  public async getProductFamilies(
+    activityId?: CommercialActivityId,
+    includeInactive = false
+  ): Promise<ProductFamily[]> {
+    await this.ensureReady();
+    const { actor, tenantId } = this.requireAuthorizedActor('inventory:view');
+    const rows =
+      activityId && activityId !== ('all' as CommercialActivityId)
+        ? await db.productFamilies.where('[tenantId+activityId]').equals([tenantId, activityId]).toArray()
+        : await db.productFamilies.where('tenantId').equals(tenantId).toArray();
+    const activeFiltered = includeInactive ? rows : rows.filter((f) => f.isActive !== false);
+    const scoped = filterRecordsByActivityScope(activeFiltered, actor);
+    return scoped.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+
+  public async getProductFamilyById(familyId: string): Promise<ProductFamily | undefined> {
+    await this.ensureReady();
+    const { actor, tenantId } = this.requireAuthorizedActor('inventory:view');
+    const id = String(familyId || '').trim();
+    if (!id) return undefined;
+    const family = await db.productFamilies.get(id);
+    if (!family || family.tenantId !== tenantId) return undefined;
+    return filterRecordsByActivityScope([family], actor)[0];
+  }
+
+  public async createProductFamilyWithSkusAtomic(
+    input: CreateProductFamilyWithSkusInput
+  ): Promise<{ family: ProductFamily; skus: ProductCatalogEntry[] }> {
+    await this.ensureReady();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    if (!input || typeof input !== 'object') {
+      throw new FinancialValidationError('بيانات مجموعة المنتجات غير صالحة.');
+    }
+    const activityId = String(input.activityId || '').trim() as CommercialActivityId;
+    if (!activityId) {
+      throw new FinancialValidationError('النشاط التجاري مطلوب لإنشاء مجموعة المنتجات.');
+    }
+    assertActivityAccess(actor, activityId, 'إنشاء مجموعة منتجات');
+
+    const nameAr = normalizeDisplayText(input.nameAr);
+    if (!nameAr) {
+      throw new FinancialValidationError('اسم مجموعة المنتجات مطلوب.');
+    }
+    const categorySnapshot = normalizeDisplayText(input.categorySnapshot || '');
+    const brandId = input.brandId ? String(input.brandId).trim() : undefined;
+    const optionSchema = normalizeOptionSchema(input.optionSchema);
+
+    if (!Array.isArray(input.skus) || input.skus.length === 0) {
+      throw new FinancialValidationError('يجب إضافة متغير واحد (SKU) على الأقل عند إنشاء مجموعة المنتجات.');
+    }
+
+    const familyId = String(input.id || '').trim() || storage.generateUUID();
+    const activeBranch = (await db.branches.get(branchId)) || (await this.getActiveBranch());
+    const terminalCode = storage.getTerminalCode();
+    const nowIso = new Date().toISOString();
+    const todayDate = nowIso.split('T')[0];
+
+    return await db.transaction(
+      'rw',
+      [
+        db.activities,
+        db.brands,
+        db.productFamilies,
+        db.productCatalogMeta,
+        db.products,
+        db.productUnits,
+        db.journalEntries,
+        db.accounts,
+        db.branches,
+        db.sequences,
+        db.outbox,
+        db.auditLogs,
+      ],
+      async () => {
+        const actExists = await db.activities.get(activityId);
+        if (!actExists) {
+          throw new FinancialValidationError(`النشاط التجاري (${activityId}) غير موجود.`);
+        }
+        const existingFamily = await db.productFamilies.get(familyId);
+        if (existingFamily && existingFamily.tenantId === tenantId) {
+          throw new FinancialValidationError(`مجموعة المنتجات (${familyId}) موجودة بالفعل.`);
+        }
+
+        let brand: Brand | undefined;
+        if (brandId) {
+          const foundBrand = await db.brands.get(brandId);
+          if (!foundBrand || foundBrand.tenantId !== tenantId || foundBrand.isActive === false) {
+            throw new FinancialValidationError('العلامة التجارية المحددة غير موجودة أو مؤرشفة.');
           }
+          brand = foundBrand;
+        }
+
+        const family: ProductFamily = {
+          id: familyId,
+          tenantId,
+          activityId,
+          nameAr,
+          categorySnapshot,
+          ...(brandId ? { brandId } : {}),
+          optionSchema,
+          isActive: true,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        };
+        await db.productFamilies.put(family);
+
+        const existingProducts = await db.products.toArray();
+        const existingCodes = new Set(
+          existingProducts.map((p) => String(p.code || '').trim().toLowerCase()).filter(Boolean)
+        );
+        const existingProductBarcodes = new Set(
+          existingProducts.map((p) => String(p.barcode || '').trim()).filter(Boolean)
+        );
+        const existingUnits = await db.productUnits.where('tenantId').equals(tenantId).toArray();
+        const existingUnitBarcodes = new Set(
+          existingUnits.map((u) => String(u.normalizedBarcode || u.barcode || '').trim()).filter(Boolean)
+        );
+
+        const seenProductIds = new Set<string>();
+        const seenCodes = new Set<string>();
+        const seenBarcodes = new Set<string>();
+        const seenVariantKeys = new Set<string>();
+        const createdEntries: ProductCatalogEntry[] = [];
+
+        for (const skuInput of input.skus) {
+          if (!skuInput || !skuInput.product || typeof skuInput.product !== 'object') {
+            throw new FinancialValidationError('بيانات أحد المتغيرات (SKU) غير صالحة.');
+          }
+          const rawSkuActivity = skuInput.product.activityId
+            ? String(skuInput.product.activityId).trim()
+            : activityId;
+          if (rawSkuActivity !== activityId) {
+            throw new FinancialValidationError('نشاط المتغير (SKU) يجب أن يطابق نشاط مجموعة المنتجات.');
+          }
+
+          const normalizedProduct = this.normalizeProductForPersistence(
+            actor,
+            {
+              ...skuInput.product,
+              activityId,
+              category: skuInput.product.category || categorySnapshot,
+            },
+            false
+          );
+          const productWithTenant = {
+            ...normalizedProduct,
+            tenantId,
+          } as Product;
+
+          if (seenProductIds.has(normalizedProduct.id) || (await db.products.get(normalizedProduct.id))) {
+            throw new FinancialValidationError(`معرّف الصنف (${normalizedProduct.id}) مكرر أو موجود مسبقاً.`);
+          }
+          seenProductIds.add(normalizedProduct.id);
+
+          const normalizedCodeKey = normalizedProduct.code.toLowerCase();
+          if (seenCodes.has(normalizedCodeKey) || existingCodes.has(normalizedCodeKey)) {
+            throw new FinancialValidationError(`كود الصنف (${normalizedProduct.code}) مستخدم بالفعل.`);
+          }
+          seenCodes.add(normalizedCodeKey);
+
+          const cleanBarcode = normalizedProduct.barcode ? String(normalizedProduct.barcode).trim() : '';
+          if (cleanBarcode) {
+            if (
+              seenBarcodes.has(cleanBarcode) ||
+              existingProductBarcodes.has(cleanBarcode) ||
+              existingUnitBarcodes.has(cleanBarcode)
+            ) {
+              throw new FinancialValidationError(`الباركود (${cleanBarcode}) مستخدم بالفعل لصنف أو وحدة أخرى.`);
+            }
+            seenBarcodes.add(cleanBarcode);
+          }
+
+          const { variantKey, variantAttributes } = computeCanonicalVariantKeyAndAttributes(
+            optionSchema,
+            skuInput.variantAttributes
+          );
+          if (seenVariantKeys.has(variantKey)) {
+            throw new FinancialValidationError('توجد تركيبة متغير مكررة داخل مجموعة المنتجات.');
+          }
+          seenVariantKeys.add(variantKey);
+
+          const persistedProduct = await this.persistProductInCurrentTx({
+            actor,
+            tenantId,
+            branchId,
+            activeBranch,
+            terminalCode,
+            product: productWithTenant,
+            isUpdate: false,
+            nowIso,
+            todayDate,
+            skipAuditLog: true,
+          });
+
+          const meta: ProductCatalogMeta = {
+            productId: persistedProduct.id,
+            tenantId,
+            familyId: family.id,
+            variantKey,
+            variantAttributes,
+          };
+          await db.productCatalogMeta.put(meta);
+
+          createdEntries.push({
+            product: persistedProduct,
+            meta,
+            family,
+            ...(brand ? { brand } : {}),
+            variantAttributes,
+            units: [],
+          });
         }
 
         await db.auditLogs.put({
@@ -1196,12 +1597,288 @@ export class DexieDataService implements IDataService {
           userName: actor.fullName,
           tenantId,
           branchId,
-          action: existing || isUpdate ? 'تعديل صنف' : 'إضافة صنف',
-          details: `${existing || isUpdate ? 'تحديث' : 'إضافة'} الصنف ${product.nameAr} بكود ${product.code}`,
+          action: 'إنشاء مجموعة منتجات',
+          details: `إنشاء المجموعة ${family.nameAr} بعدد ${createdEntries.length} متغيرات (SKU)`,
         });
-        return product;
+
+        return { family, skus: createdEntries };
       }
     );
+  }
+
+  public async updateProductFamilyAtomic(input: UpdateProductFamilyInput): Promise<ProductFamily> {
+    await this.ensureReady();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    if (!input || typeof input !== 'object') {
+      throw new FinancialValidationError('بيانات تحديث مجموعة المنتجات غير صالحة.');
+    }
+    const id = String(input.id || '').trim();
+    if (!id) {
+      throw new FinancialValidationError('معرف مجموعة المنتجات مطلوب.');
+    }
+    const nameAr = normalizeDisplayText(input.nameAr);
+    if (!nameAr) {
+      throw new FinancialValidationError('اسم مجموعة المنتجات مطلوب.');
+    }
+    if (input.isActive !== undefined && typeof input.isActive !== 'boolean') {
+      throw new FinancialValidationError('حالة مجموعة المنتجات غير صالحة.');
+    }
+    const nowIso = new Date().toISOString();
+
+    return await db.transaction('rw', [db.brands, db.productFamilies, db.productCatalogMeta, db.auditLogs], async () => {
+      const existing = await db.productFamilies.get(id);
+      if (!existing || existing.tenantId !== tenantId) {
+        throw new FinancialValidationError('مجموعة المنتجات غير موجودة.');
+      }
+      assertActivityAccess(actor, existing.activityId, 'تعديل مجموعة منتجات');
+
+      let nextBrandId = existing.brandId;
+      if (input.brandId !== undefined) {
+        if (input.brandId === null || String(input.brandId).trim() === '') {
+          nextBrandId = undefined;
+        } else {
+          const candidateBrandId = String(input.brandId).trim();
+          const brand = await db.brands.get(candidateBrandId);
+          if (!brand || brand.tenantId !== tenantId || (candidateBrandId !== existing.brandId && brand.isActive === false)) {
+            throw new FinancialValidationError('العلامة التجارية المحددة غير موجودة أو مؤرشفة.');
+          }
+          nextBrandId = candidateBrandId;
+        }
+      }
+
+      let nextOptionSchema = existing.optionSchema;
+      if (input.optionSchema !== undefined) {
+        nextOptionSchema = normalizeOptionSchema(input.optionSchema);
+        const linkedMetas = await db.productCatalogMeta
+          .where('familyId')
+          .equals(id)
+          .filter((m) => m.tenantId === tenantId)
+          .toArray();
+        const seenKeys = new Set<string>();
+        for (const meta of linkedMetas) {
+          let recomputed: { variantKey: string; variantAttributes: Record<string, string> };
+          try {
+            recomputed = computeCanonicalVariantKeyAndAttributes(nextOptionSchema, meta.variantAttributes);
+          } catch {
+            throw new FinancialValidationError('لا يمكن حذف أو تعديل خيارات مرتبطة بمتغيرات (SKU) قائمة داخل المجموعة.');
+          }
+          if (recomputed.variantKey !== meta.variantKey || seenKeys.has(recomputed.variantKey)) {
+            throw new FinancialValidationError('لا يمكن تعديل مخطط الخيارات بما يغير أو يكرر مفاتيح المتغيرات القائمة.');
+          }
+          seenKeys.add(recomputed.variantKey);
+        }
+      }
+
+      const nextCategorySnapshot =
+        input.categorySnapshot !== undefined
+          ? normalizeDisplayText(input.categorySnapshot)
+          : existing.categorySnapshot;
+      const nextIsActive = input.isActive === undefined ? existing.isActive !== false : input.isActive !== false;
+
+      const updated: ProductFamily = {
+        id: existing.id,
+        tenantId,
+        activityId: existing.activityId,
+        nameAr,
+        categorySnapshot: nextCategorySnapshot,
+        ...(nextBrandId ? { brandId: nextBrandId } : {}),
+        optionSchema: nextOptionSchema,
+        isActive: nextIsActive,
+        createdAt: existing.createdAt,
+        updatedAt: nowIso,
+      };
+      await db.productFamilies.put(updated);
+      await db.auditLogs.put({
+        id: storage.generateUUID(),
+        timestamp: nowIso,
+        userId: actor.id,
+        userName: actor.fullName,
+        tenantId,
+        branchId,
+        action: 'تعديل مجموعة منتجات',
+        details: `تحديث مجموعة المنتجات ${updated.nameAr} (${updated.id})`,
+      });
+      return updated;
+    });
+  }
+
+  public async archiveProductFamilyAtomic(familyId: string): Promise<ProductFamily> {
+    await this.ensureReady();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    const id = String(familyId || '').trim();
+    if (!id) {
+      throw new FinancialValidationError('معرف مجموعة المنتجات مطلوب.');
+    }
+    const nowIso = new Date().toISOString();
+
+    return await db.transaction('rw', [db.productFamilies, db.auditLogs], async () => {
+      const existing = await db.productFamilies.get(id);
+      if (!existing || existing.tenantId !== tenantId) {
+        throw new FinancialValidationError('مجموعة المنتجات غير موجودة.');
+      }
+      assertActivityAccess(actor, existing.activityId, 'أرشفة مجموعة منتجات');
+      const archived: ProductFamily = {
+        ...existing,
+        isActive: false,
+        updatedAt: nowIso,
+      };
+      await db.productFamilies.put(archived);
+      await db.auditLogs.put({
+        id: storage.generateUUID(),
+        timestamp: nowIso,
+        userId: actor.id,
+        userName: actor.fullName,
+        tenantId,
+        branchId,
+        action: 'أرشفة مجموعة منتجات',
+        details: `تمت أرشفة مجموعة المنتجات ${archived.nameAr} (${id})`,
+      });
+      return archived;
+    });
+  }
+
+  public async assignProductBrandAtomic(
+    input: AssignProductBrandInput
+  ): Promise<ProductCatalogMeta | undefined> {
+    await this.ensureReady();
+    const { actor, tenantId, branchId } = this.requireAuthorizedActor('inventory:write');
+    if (!input || typeof input !== 'object') {
+      throw new FinancialValidationError('بيانات ربط العلامة التجارية غير صالحة.');
+    }
+    const productId = String(input.productId || '').trim();
+    if (!productId) {
+      throw new FinancialValidationError('معرف الصنف مطلوب.');
+    }
+    const brandId =
+      input.brandId === null || input.brandId === undefined || String(input.brandId).trim() === ''
+        ? null
+        : String(input.brandId).trim();
+    const nowIso = new Date().toISOString();
+
+    return await db.transaction('rw', [db.products, db.brands, db.productCatalogMeta, db.auditLogs], async () => {
+      const product = await db.products.get(productId);
+      if (!product) {
+        throw new FinancialValidationError('الصنف غير موجود.');
+      }
+      assertActivityAccess(actor, product.activityId, 'تعيين علامة تجارية للصنف');
+
+      const existingMeta = await db.productCatalogMeta.get([tenantId, productId]);
+      if (existingMeta?.familyId) {
+        throw new FinancialValidationError(
+          'لا يمكن تعيين علامة تجارية مستقلة لصنف تابع لمجموعة منتجات؛ تُدار العلامة من المجموعة نفسها.'
+        );
+      }
+
+      if (!brandId) {
+        await db.productCatalogMeta.delete([tenantId, productId]);
+        await db.auditLogs.put({
+          id: storage.generateUUID(),
+          timestamp: nowIso,
+          userId: actor.id,
+          userName: actor.fullName,
+          tenantId,
+          branchId,
+          action: 'إزالة علامة تجارية لصنف',
+          details: `تمت إزالة العلامة التجارية عن الصنف ${productId}`,
+        });
+        return undefined;
+      }
+
+      const brand = await db.brands.get(brandId);
+      if (!brand || brand.tenantId !== tenantId || brand.isActive === false) {
+        throw new FinancialValidationError('العلامة التجارية المحددة غير موجودة أو مؤرشفة.');
+      }
+
+      const meta: ProductCatalogMeta = {
+        productId,
+        tenantId,
+        brandId,
+        variantAttributes: {},
+      };
+      await db.productCatalogMeta.put(meta);
+      await db.auditLogs.put({
+        id: storage.generateUUID(),
+        timestamp: nowIso,
+        userId: actor.id,
+        userName: actor.fullName,
+        tenantId,
+        branchId,
+        action: 'تعيين علامة تجارية لصنف',
+        details: `تم ربط الصنف ${productId} بالعلامة التجارية ${brand.nameAr}`,
+      });
+      return meta;
+    });
+  }
+
+  public async getProductCatalog(activityId?: CommercialActivityId): Promise<ProductCatalogEntry[]> {
+    await this.ensureReady();
+    const { tenantId } = this.requireAuthorizedActor('inventory:view');
+    const products = await this.getProducts(activityId);
+    if (products.length === 0) return [];
+
+    const [metas, families, brands, units] = await Promise.all([
+      db.productCatalogMeta.where('tenantId').equals(tenantId).toArray(),
+      db.productFamilies.where('tenantId').equals(tenantId).toArray(),
+      db.brands.where('tenantId').equals(tenantId).toArray(),
+      db.productUnits.where('tenantId').equals(tenantId).toArray(),
+    ]);
+
+    const metaByProduct = new Map(metas.map((m) => [m.productId, m]));
+    const familyById = new Map(families.map((f) => [f.id, f]));
+    const brandById = new Map(brands.map((b) => [b.id, b]));
+    const unitsByProduct = new Map<string, ProductUnit[]>();
+    for (const unit of units) {
+      const list = unitsByProduct.get(unit.productId) || [];
+      list.push(unit);
+      unitsByProduct.set(unit.productId, list);
+    }
+    for (const list of unitsByProduct.values()) {
+      list.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+    }
+
+    return products.map((product) => {
+      const meta = metaByProduct.get(product.id);
+      const family = meta?.familyId ? familyById.get(meta.familyId) : undefined;
+      const resolvedBrandId = meta?.brandId || family?.brandId;
+      const brand = resolvedBrandId ? brandById.get(resolvedBrandId) : undefined;
+      return {
+        product,
+        ...(meta ? { meta } : {}),
+        ...(family ? { family } : {}),
+        ...(brand ? { brand } : {}),
+        variantAttributes: meta?.variantAttributes || {},
+        units: unitsByProduct.get(product.id) || [],
+      };
+    });
+  }
+
+  public async getProductCatalogEntry(productId: string): Promise<ProductCatalogEntry | undefined> {
+    await this.ensureReady();
+    const { tenantId } = this.requireAuthorizedActor('inventory:view');
+    const id = String(productId || '').trim();
+    if (!id) return undefined;
+    const product = await this.getProductById(id);
+    if (!product) return undefined;
+
+    const meta = await db.productCatalogMeta.get([tenantId, id]);
+    const family = meta?.familyId ? await db.productFamilies.get(meta.familyId) : undefined;
+    const validFamily = family && family.tenantId === tenantId ? family : undefined;
+    const resolvedBrandId = meta?.brandId || validFamily?.brandId;
+    const brandRaw = resolvedBrandId ? await db.brands.get(resolvedBrandId) : undefined;
+    const brand = brandRaw && brandRaw.tenantId === tenantId ? brandRaw : undefined;
+    const units = await db.productUnits
+      .where('[tenantId+productId]')
+      .equals([tenantId, id])
+      .sortBy('createdAt');
+
+    return {
+      product,
+      ...(meta ? { meta } : {}),
+      ...(validFamily ? { family: validFamily } : {}),
+      ...(brand ? { brand } : {}),
+      variantAttributes: meta?.variantAttributes || {},
+      units,
+    };
   }
 
   /**
@@ -4189,6 +4866,11 @@ export class DexieDataService implements IDataService {
           if (!product) {
             throw new FinancialValidationError(
               `الصنف ذو المعرف ${deduction.productId} غير موجود في المستودع.`
+            );
+          }
+          if (product.isActive === false) {
+            throw new FinancialValidationError(
+              `الصنف (${product.nameAr}) مؤرشف ومعطل ولا يمكن بيعه.`
             );
           }
 

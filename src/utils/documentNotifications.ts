@@ -198,7 +198,12 @@ export function buildInvoiceNotificationPayload(params: {
 }): NotificationPayload {
   const { invoice, activityName, recipientPhone } = params;
   const itemsSummary = invoice.items
-    ? invoice.items.map((i) => `${i.productName} (${i.quantity} ${i.unit})`).join('، ')
+    ? invoice.items
+        .map(
+          (i) =>
+            `${i.productName}${i.variantSummary ? ` [${i.variantSummary}]` : ''} (${i.quantity} ${i.unit})`
+        )
+        .join('، ')
     : undefined;
 
   const isReturn = invoice.type === 'RETURN_SALE' || invoice.type === 'RETURN_PURCHASE';

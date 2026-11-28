@@ -5,6 +5,7 @@ import { createBackupSyncService } from './modules/backup-sync-service.mjs';
 import { createProductMediaStorage } from '../product-media-storage.mjs';
 import { createProductMediaService } from './modules/product-media-service.mjs';
 import { createProductUnitsService } from './modules/product-units-service.mjs';
+import { createProductCatalogService } from './modules/product-catalog-service.mjs';
 import { importLegacyBackup, previewLegacyBackup } from './legacy-backup-importer.mjs';
 import { PermissionError } from './rbac.mjs';
 
@@ -26,6 +27,7 @@ export function createDesktopBackend({
   const mediaStorage = createProductMediaStorage({ rootDirectory: mediaDirectory || `${backupDirectory || process.cwd()}.product-media` });
   const productMedia = createProductMediaService(database, mediaStorage);
   const productUnits = createProductUnitsService(database);
+  const productCatalog = createProductCatalogService(database, core);
 
   function requireActor(token, requestedBranchId) {
     const actor = authenticationService.getActor(token, requestedBranchId);
@@ -42,6 +44,7 @@ export function createDesktopBackend({
     backupSync,
     productMediaStorage: mediaStorage,
     productUnits,
+    productCatalog,
     requireActor,
 
     // --- Runtime & Auth ---
@@ -259,6 +262,62 @@ export function createDesktopBackend({
       const saved = productUnits.saveProductUnit(requireActor(token), unit);
       onDataChanged(['productUnits', 'auditLogs']);
       return saved;
+    },
+
+    getBrands({ token, includeInactive }) {
+      return productCatalog.getBrands(requireActor(token), Boolean(includeInactive));
+    },
+
+    saveBrandAtomic({ token, input }) {
+      const saved = productCatalog.saveBrandAtomic(requireActor(token), input);
+      onDataChanged(['brands', 'auditLogs']);
+      return saved;
+    },
+
+    archiveBrandAtomic({ token, brandId }) {
+      const archived = productCatalog.archiveBrandAtomic(requireActor(token), brandId);
+      onDataChanged(['brands', 'auditLogs']);
+      return archived;
+    },
+
+    getProductFamilies({ token, activityId, includeInactive }) {
+      return productCatalog.getProductFamilies(requireActor(token), activityId, Boolean(includeInactive));
+    },
+
+    getProductFamilyById({ token, familyId }) {
+      return productCatalog.getProductFamilyById(requireActor(token), familyId);
+    },
+
+    createProductFamilyWithSkusAtomic({ token, input }) {
+      const created = productCatalog.createProductFamilyWithSkusAtomic(requireActor(token), input);
+      onDataChanged(['productFamilies', 'products', 'outbox', 'auditLogs']);
+      return created;
+    },
+
+    updateProductFamilyAtomic({ token, input }) {
+      const updated = productCatalog.updateProductFamilyAtomic(requireActor(token), input);
+      onDataChanged(['productFamilies', 'auditLogs']);
+      return updated;
+    },
+
+    archiveProductFamilyAtomic({ token, familyId }) {
+      const archived = productCatalog.archiveProductFamilyAtomic(requireActor(token), familyId);
+      onDataChanged(['productFamilies', 'auditLogs']);
+      return archived;
+    },
+
+    assignProductBrandAtomic({ token, input }) {
+      const assigned = productCatalog.assignProductBrandAtomic(requireActor(token), input);
+      onDataChanged(['products', 'auditLogs']);
+      return assigned;
+    },
+
+    getProductCatalog({ token, activityId }) {
+      return productCatalog.getProductCatalog(requireActor(token), activityId);
+    },
+
+    getProductCatalogEntry({ token, productId }) {
+      return productCatalog.getProductCatalogEntry(requireActor(token), productId);
     },
 
     getProductImages({ token, productId }) {

@@ -18,6 +18,14 @@ import type {
   Product,
   ProductUnit,
   SaveProductUnitInput,
+  Brand,
+  ProductFamily,
+  ProductCatalogMeta,
+  ProductCatalogEntry,
+  SaveBrandInput,
+  CreateProductFamilyWithSkusInput,
+  UpdateProductFamilyInput,
+  AssignProductBrandInput,
   ProductImage,
   SyncConflict,
   SystemAuditLog,
@@ -174,6 +182,30 @@ declare global {
       getProductById(input: { token: string; id: string }): Promise<Product | undefined>;
       getProductUnits(input: { token: string; productId: string }): Promise<ProductUnit[]>;
       saveProductUnit(input: { token: string; unit: SaveProductUnitInput }): Promise<ProductUnit>;
+      getBrands(input: { token: string; includeInactive?: boolean }): Promise<Brand[]>;
+      saveBrandAtomic(input: { token: string; input: SaveBrandInput }): Promise<Brand>;
+      archiveBrandAtomic(input: { token: string; brandId: string }): Promise<Brand>;
+      getProductFamilies(input: {
+        token: string;
+        activityId?: CommercialActivityId | 'all';
+        includeInactive?: boolean;
+      }): Promise<ProductFamily[]>;
+      getProductFamilyById(input: { token: string; familyId: string }): Promise<ProductFamily | undefined>;
+      createProductFamilyWithSkusAtomic(input: {
+        token: string;
+        input: CreateProductFamilyWithSkusInput;
+      }): Promise<{ family: ProductFamily; skus: ProductCatalogEntry[] }>;
+      updateProductFamilyAtomic(input: { token: string; input: UpdateProductFamilyInput }): Promise<ProductFamily>;
+      archiveProductFamilyAtomic(input: { token: string; familyId: string }): Promise<ProductFamily>;
+      assignProductBrandAtomic(input: {
+        token: string;
+        input: AssignProductBrandInput;
+      }): Promise<ProductCatalogMeta | undefined>;
+      getProductCatalog(input: {
+        token: string;
+        activityId?: CommercialActivityId | 'all';
+      }): Promise<ProductCatalogEntry[]>;
+      getProductCatalogEntry(input: { token: string; productId: string }): Promise<ProductCatalogEntry | undefined>;
       getProductImages(input: { token: string; productId: string }): Promise<ProductImage[]>;
       getProductImageRecord(input: { token: string; imageId: string }): Promise<ProductImage | undefined>;
       getProductImageData(input: { token: string; imageId: string; variant?: 'original' | 'thumbnail' }): Promise<string | null>;

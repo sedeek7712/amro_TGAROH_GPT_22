@@ -21,6 +21,7 @@ import {
   Building2,
   X,
   RotateCcw,
+  Layers,
 } from 'lucide-react';
 import { storage, OFFICIAL_ACTIVITIES } from '../../services/storageService';
 import { inventory } from '../../services/inventoryService';
@@ -30,11 +31,31 @@ import { authService } from '../../services/authService';
 import { hasPermission, getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveProducts, useLiveParties, useLiveCashBoxes, useLiveInvoices } from '../../hooks/useLiveDexie';
-import { Product, ProductBatch, Party, ActivityId, Invoice, InvoiceItem, PaymentMethod } from '../../types/erp';
+import {
+  Product,
+  ProductBatch,
+  Party,
+  ActivityId,
+  Invoice,
+  InvoiceItem,
+  PaymentMethod,
+  Brand,
+  ProductFamily,
+  ProductCatalogEntry,
+} from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { ProductPrimaryImage } from '../inventory/ProductPrimaryImage';
+import { PosVariantPickerModal } from './PosVariantPickerModal';
 import { formatLocalDate } from '../../utils/localDate';
 import { searchCustomers } from '../../utils/customerSearch';
+import {
+  buildPosCatalogView,
+  buildVariantInvoiceItemSnapshot,
+  formatVariantSummary,
+  getSkuSaleabilityStatus,
+  PosFamilyCard,
+  resolvePosScanTarget,
+} from '../../utils/posCatalog';
 
 interface POSProps {
   selectedActivity: ActivityId | 'all';
@@ -102,6 +123,10 @@ export const PointOfSale: React.FC<POSProps> = ({
   const [completedInvoice, setCompletedInvoice] = useState<Invoice | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [batchPickerProduct, setBatchPickerProduct] = useState<Product | null>(null);
+  const [activeFamilyCard, setActiveFamilyCard] = useState<PosFamilyCard | null>(null);
+  const [catalogEntries, setCatalogEntries] = useState<ProductCatalogEntry[]>([]);
+  const [families, setFamilies] = useState<ProductFamily[]>([]);
+  const [brands, setBrands] = useState<Brand[]>([]);
   const [mobileTab, setMobileTab] = useState<'catalog' | 'cart'>('catalog');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [clientRequestId, setClientRequestId] = useState<string>(() => storage.generateUUID());
@@ -130,6 +155,28 @@ export const PointOfSale: React.FC<POSProps> = ({
   const allInvoices = useLiveInvoices('all');
   const currencySymbol = getActiveCurrencyConfig().symbol;
 
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      dataService.getProductCatalog(currentActivity),
+      dataService.getProductFamilies(currentActivity, true),
+      dataService.getBrands(true),
+    ])
+      .then(([entries, familyList, brandList]) => {
+        if (cancelled) return;
+        setCatalogEntries(entries);
+        setFamilies(familyList);
+        setBrands(brandList);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setCatalogEntries([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentActivity, products]);
+
   const defaultCashBoxId =
     cashBoxes.find((b) => !b.isCentral && b.isDefault)?.id ||
     cashBoxes.find((b) => !b.isCentral)?.id ||
@@ -147,24 +194,54 @@ export const PointOfSale: React.FC<POSProps> = ({
 
   const activeProducts = products.filter((p) => p.isActive !== false);
 
-  // تصفية المنتجات حسب البحث
-  const filteredProducts = activeProducts.filter((p) => {
-    if (!searchQuery.trim()) return true;
-    const q = searchQuery.toLowerCase();
-    return (
-      p.nameAr.toLowerCase().includes(q) ||
-      p.code.toLowerCase().includes(q) ||
-      (p.barcode && p.barcode.toLowerCase().includes(q)) ||
-      (p.oemNumber && p.oemNumber.toLowerCase().includes(q))
-    );
-  });
+  const effectiveCatalogEntries: ProductCatalogEntry[] = React.useMemo(() => {
+    const byProductId = new Map(catalogEntries.map((entry) => [entry.product.id, entry]));
+    return products.map((product) => {
+      const existing = byProductId.get(product.id);
+      if (existing) {
+        return { ...existing, product };
+      }
+      return {
+        product,
+        variantAttributes: {},
+        units: [],
+      };
+    });
+  }, [products, catalogEntries]);
+
+  const catalogView = React.useMemo(
+    () =>
+      buildPosCatalogView({
+        entries: effectiveCatalogEntries,
+        families,
+        brands,
+        searchQuery,
+      }),
+    [effectiveCatalogEntries, families, brands, searchQuery]
+  );
+
+  const displayedCatalogCount = catalogView.isSearching
+    ? catalogView.directSearchEntries.length
+    : catalogView.familyCards.length + catalogView.standaloneEntries.length;
 
   // إضافة صنف للسلة
-  const addToCart = (product: Product, batch?: ProductBatch) => {
+  const addToCart = (
+    product: Product,
+    batch?: ProductBatch,
+    catalogEntry?: ProductCatalogEntry
+  ) => {
+    if (product.isActive === false) {
+      setErrorMessage(`الصنف (${product.nameAr}) مؤرشف ومعطل ولا يمكن بيعه.`);
+      return;
+    }
     if (product.currentStock <= 0) {
       setErrorMessage(`الصنف (${product.nameAr}) رصيده نافد بالمستودع.`);
       return;
     }
+
+    const resolvedEntry =
+      catalogEntry || effectiveCatalogEntries.find((entry) => entry.product.id === product.id);
+    const variantSnapshot = buildVariantInvoiceItemSnapshot(resolvedEntry);
 
     setErrorMessage(null);
 
@@ -203,6 +280,7 @@ export const PointOfSale: React.FC<POSProps> = ({
         batchNumber: batch?.batchNumber,
         expiryDate: batch?.expiryDate,
         oemNumber: product.oemNumber,
+        ...variantSnapshot,
         unit: product.unit,
         quantity: 1,
         unitPrice: product.sellPrice,
@@ -216,24 +294,52 @@ export const PointOfSale: React.FC<POSProps> = ({
     });
   };
 
-  // معالجة الضغط على Enter في حقل الباركود
+  const handleSelectCatalogEntry = (entry: ProductCatalogEntry) => {
+    const saleability = getSkuSaleabilityStatus(entry);
+    if (!saleability.sellable) {
+      setErrorMessage(saleability.message || `الصنف (${entry.product.nameAr}) غير متاح للبيع.`);
+      return;
+    }
+    const p = entry.product;
+    if (p.batches && p.batches.length > 1) {
+      setErrorMessage(null);
+      setBatchPickerProduct(p);
+      return;
+    }
+    if (p.batches && p.batches.length === 1) {
+      addToCart(p, p.batches[0], entry);
+      return;
+    }
+    addToCart(p, undefined, entry);
+  };
+
+  // معالجة الضغط على Enter أو زر المسح في حقل الباركود
   const handleBarcodeSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!searchQuery.trim()) return;
+    const raw = searchQuery.trim();
+    if (!raw) return;
 
-    // بحث بالمطابقة التامة للباركود أو الكود
-    const match = activeProducts.find(
-      (p) =>
-        (p.barcode && p.barcode.toLowerCase() === searchQuery.trim().toLowerCase()) ||
-        p.code.toLowerCase() === searchQuery.trim().toLowerCase()
-    );
+    const scanMatch = resolvePosScanTarget(effectiveCatalogEntries, raw);
+    if (scanMatch) {
+      if (!scanMatch.saleability.sellable) {
+        setErrorMessage(
+          scanMatch.saleability.message || `الصنف (${scanMatch.entry.product.nameAr}) غير متاح للبيع.`
+        );
+        return;
+      }
+      handleSelectCatalogEntry(scanMatch.entry);
+      setSearchQuery('');
+      return;
+    }
 
-    if (match) {
-      addToCart(match);
+    if (catalogView.directSearchEntries.length === 1) {
+      handleSelectCatalogEntry(catalogView.directSearchEntries[0]);
       setSearchQuery('');
-    } else if (filteredProducts.length === 1) {
-      addToCart(filteredProducts[0]);
-      setSearchQuery('');
+      return;
+    }
+
+    if (catalogView.directSearchEntries.length === 0) {
+      setErrorMessage(`لم يتم العثور على صنف نشط مطابق للباركود أو الكود (${raw}).`);
     }
   };
 
@@ -633,7 +739,7 @@ export const PointOfSale: React.FC<POSProps> = ({
               : 'text-slate-600'
           }`}
         >
-          الأصناف ({filteredProducts.length})
+          الأصناف ({displayedCatalogCount})
         </button>
         <button
           onClick={() => setMobileTab('cart')}
@@ -686,7 +792,8 @@ export const PointOfSale: React.FC<POSProps> = ({
                 type="text"
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder="ابحث بالاسم، الباركود، أو رقم القطعة (اضغط Enter للإضافة السريعة)..."
+                placeholder="ابحث بالاسم، كود SKU، الباركود، العلامة أو خيارات المتغير (Enter للمسح)..."
+                aria-label="البحث بالاسم أو الكود أو الباركود أو المتغيرات"
                 className="w-full min-w-0 pl-3 pr-9 py-3 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-emerald-500"
               />
             </div>
@@ -699,9 +806,29 @@ export const PointOfSale: React.FC<POSProps> = ({
             </button>
           </form>
 
+          {errorMessage && (
+            <div
+              role="alert"
+              className="mx-3 sm:mx-4 mt-3 p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center justify-between gap-2"
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                <span className="font-medium">{errorMessage}</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setErrorMessage(null)}
+                aria-label="إخفاء رسالة التنبيه"
+                className="p-0.5 text-rose-600 hover:text-rose-900 shrink-0"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* Products Grid */}
           <div className="flex-1 overflow-y-auto p-3 sm:p-4">
-            {filteredProducts.length === 0 ? (
+            {displayedCatalogCount === 0 ? (
               <div className="h-full flex flex-col items-center justify-center text-center p-8 text-slate-400">
                 <ShoppingCart className="w-10 h-10 mb-2 stroke-1 text-slate-300" />
                 <p className="text-xs font-medium">لا توجد أصناف مطابقة في هذا النشاط</p>
@@ -711,33 +838,97 @@ export const PointOfSale: React.FC<POSProps> = ({
               </div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
-                {filteredProducts.map((p) => {
-                  const isOutOfStock = p.currentStock <= 0;
+                {!catalogView.isSearching &&
+                  catalogView.familyCards.map((card) => {
+                    const isAllUnavailable = card.sellableEntries.length === 0;
+                    const leadEntry = card.sellableEntries[0] || card.activeEntries[0];
+                    const optionSummary = card.family.optionSchema
+                      .map((opt) => opt.labelAr)
+                      .join(' / ');
+                    const priceText =
+                      card.minSellPrice === card.maxSellPrice
+                        ? `${card.minSellPrice.toFixed(2)} ${currencySymbol}`
+                        : `${card.minSellPrice.toFixed(2)} - ${card.maxSellPrice.toFixed(2)} ${currencySymbol}`;
+
+                    return (
+                      <button
+                        type="button"
+                        key={`family-${card.family.id}`}
+                        onClick={() => setActiveFamilyCard(card)}
+                        aria-label={`اختيار متغير من مجموعة ${card.family.nameAr}`}
+                        className={`group min-w-0 p-3.5 rounded-xl border text-right transition-all flex flex-col justify-between select-none active:scale-[0.99] ${
+                          isAllUnavailable
+                            ? 'bg-slate-50 border-slate-200 opacity-75 hover:border-slate-300'
+                            : 'bg-white border-slate-200 hover:border-emerald-500 hover:shadow-sm cursor-pointer'
+                        }`}
+                      >
+                        <div className="w-full">
+                          <div className="flex items-center justify-between text-[10px] text-slate-500 mb-1 gap-1.5">
+                            <span className="truncate font-semibold text-emerald-700">
+                              {card.brand?.nameAr || 'مجموعة متغيرات'}
+                            </span>
+                            <span className="font-mono tabular-nums font-bold text-slate-700 shrink-0">
+                              مجموع النشط: {card.derivedActiveStock}
+                            </span>
+                          </div>
+                          {leadEntry && (
+                            <ProductPrimaryImage
+                              productId={leadEntry.product.id}
+                              productName={card.family.nameAr}
+                              displaySize="pos"
+                            />
+                          )}
+                          <h4 className="mt-2 font-bold text-xs text-slate-900 group-hover:text-emerald-700 transition-colors line-clamp-2">
+                            {card.family.nameAr}
+                          </h4>
+                          <div className="mt-1 text-[10px] text-slate-500 truncate">
+                            {card.activeEntries.length} متغيرات · {optionSummary}
+                          </div>
+                        </div>
+
+                        <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between w-full">
+                          <span className="font-bold font-mono tabular-nums text-[11px] text-emerald-800 truncate">
+                            {priceText}
+                          </span>
+                          <div className="px-2 h-6 rounded-md bg-slate-100 group-hover:bg-emerald-600 group-hover:text-white flex items-center justify-center gap-1 text-[10px] font-bold text-slate-700 transition-colors shrink-0">
+                            <Layers className="w-3 h-3" />
+                            <span>اختر</span>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+
+                {(catalogView.isSearching
+                  ? catalogView.directSearchEntries
+                  : catalogView.standaloneEntries
+                ).map((entry) => {
+                  const p = entry.product;
+                  const saleability = getSkuSaleabilityStatus(entry);
+                  const isUnavailable = !saleability.sellable;
+                  const variantSummary = formatVariantSummary(
+                    entry.variantAttributes,
+                    entry.family?.optionSchema
+                  );
+
                   return (
-                    <div
+                    <button
+                      type="button"
                       key={p.id}
-                      onClick={() => {
-                        if (isOutOfStock) return;
-                        if (p.batches && p.batches.length > 1) {
-                          setBatchPickerProduct(p);
-                        } else if (p.batches && p.batches.length === 1) {
-                          addToCart(p, p.batches[0]);
-                        } else {
-                          addToCart(p);
-                        }
-                      }}
+                      onClick={() => handleSelectCatalogEntry(entry)}
+                      aria-label={`إضافة ${p.nameAr}`}
                       className={`group min-w-0 p-3.5 rounded-xl border text-right transition-all flex flex-col justify-between select-none active:scale-[0.99] ${
-                        isOutOfStock
-                          ? 'bg-slate-50 border-slate-200 opacity-60 cursor-not-allowed'
+                        isUnavailable
+                          ? 'bg-slate-50 border-slate-200 opacity-65 cursor-not-allowed'
                           : 'bg-white border-slate-200 hover:border-emerald-500 hover:shadow-sm cursor-pointer'
                       }`}
                     >
-                      <div>
-                        <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1">
-                          <span className="font-mono">{p.code}</span>
+                      <div className="w-full">
+                        <div className="flex items-center justify-between text-[10px] text-slate-400 mb-1 gap-1.5">
+                          <span className="font-mono truncate">{p.code}</span>
                           <span
-                            className={`px-1.5 py-0.5 rounded font-mono font-bold ${
-                              isOutOfStock
+                            className={`px-1.5 py-0.5 rounded font-mono tabular-nums font-bold shrink-0 ${
+                              saleability.reason === 'OUT_OF_STOCK' || saleability.reason === 'EXPIRED'
                                 ? 'bg-rose-50 text-rose-700'
                                 : p.currentStock <= p.minStockAlert
                                 ? 'bg-amber-50 text-amber-800'
@@ -756,21 +947,33 @@ export const PointOfSale: React.FC<POSProps> = ({
                           {p.nameAr}
                         </h4>
 
-                        {/* Special Details per activity */}
+                        {(variantSummary || entry.brand?.nameAr) && (
+                          <div className="text-[10px] text-slate-600 mt-1 truncate">
+                            {[variantSummary, entry.brand?.nameAr].filter(Boolean).join(' · ')}
+                          </div>
+                        )}
+
                         {p.oemNumber && (
                           <div className="text-[10px] text-slate-500 mt-1 font-mono truncate">
                             OEM: {p.oemNumber}
                           </div>
                         )}
-                        {p.batches && p.batches.length > 0 && (
-                          <div className="text-[10px] text-emerald-700 mt-1 flex items-center gap-1">
-                            <Clock className="w-3 h-3" />
-                            <span>{p.batches.length} تشغيلة متاحة</span>
+                        {saleability.reason === 'EXPIRED' ? (
+                          <div className="text-[10px] text-rose-700 mt-1 font-semibold">
+                            منتهي الصلاحية - محظور البيع
                           </div>
+                        ) : (
+                          p.batches &&
+                          p.batches.length > 0 && (
+                            <div className="text-[10px] text-emerald-700 mt-1 flex items-center gap-1">
+                              <Clock className="w-3 h-3" />
+                              <span>{p.batches.length} تشغيلة متاحة</span>
+                            </div>
+                          )
                         )}
                       </div>
 
-                      <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between">
+                      <div className="mt-3 pt-2 border-t border-slate-100 flex items-center justify-between w-full">
                         <span className="font-bold font-mono tabular-nums text-xs text-emerald-800">
                           {p.sellPrice.toFixed(2)} {currencySymbol}
                         </span>
@@ -778,7 +981,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                           <Plus className="w-3.5 h-3.5" />
                         </div>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>
@@ -904,8 +1107,13 @@ export const PointOfSale: React.FC<POSProps> = ({
                 <div key={item.id} className="py-2.5 flex items-center justify-between gap-3 text-xs">
                   <div className="flex-1 min-w-0">
                     <div className="font-bold text-slate-900 truncate">{item.productName}</div>
+                    {(item.variantSummary || item.brandNameSnapshot) && (
+                      <div className="text-[10.5px] text-slate-600 truncate">
+                        {[item.variantSummary, item.brandNameSnapshot].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
                     <div className="text-[11px] text-slate-500 font-mono">
-                      {item.unitPrice.toFixed(2)} {currencySymbol} / {item.unit}
+                      {item.productCode} · {item.unitPrice.toFixed(2)} {currencySymbol} / {item.unit}
                       {item.batchNumber && (
                         <span className="text-emerald-700 mr-1.5 font-sans">
                           (تشغيلة: {item.batchNumber})
@@ -917,14 +1125,18 @@ export const PointOfSale: React.FC<POSProps> = ({
                   {/* Quantity Controller */}
                   <div className="flex items-center gap-1.5 shrink-0 bg-slate-100 p-1 rounded-lg">
                     <button
+                      type="button"
                       onClick={() => updateQuantity(index, item.quantity - 1)}
+                      aria-label={`إنقاص كمية ${item.productName}`}
                       className="w-5 h-5 rounded bg-white hover:bg-slate-200 flex items-center justify-center text-slate-700 transition-colors"
                     >
                       <Minus className="w-3 h-3" />
                     </button>
                     <span className="font-mono font-bold w-7 text-center">{item.quantity}</span>
                     <button
+                      type="button"
                       onClick={() => updateQuantity(index, item.quantity + 1)}
+                      aria-label={`زيادة كمية ${item.productName}`}
                       className="w-5 h-5 rounded bg-white hover:bg-slate-200 flex items-center justify-center text-slate-700 transition-colors"
                     >
                       <Plus className="w-3 h-3" />
@@ -937,7 +1149,9 @@ export const PointOfSale: React.FC<POSProps> = ({
                   </div>
 
                   <button
+                    type="button"
                     onClick={() => removeFromCart(index)}
+                    aria-label={`حذف ${item.productName} من السلة`}
                     className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -947,9 +1161,9 @@ export const PointOfSale: React.FC<POSProps> = ({
             )}
           </div>
 
-          {/* Error Message */}
+          {/* Error Message (mobile cart tab only; desktop shows unified banner in catalog panel) */}
           {errorMessage && (
-            <div className="p-2.5 mx-3 mb-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center gap-2">
+            <div className="lg:hidden p-2.5 mx-3 mb-2 bg-rose-50 border border-rose-200 rounded-lg text-rose-800 text-xs flex items-center gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
               <span>{errorMessage}</span>
             </div>
@@ -1107,6 +1321,18 @@ export const PointOfSale: React.FC<POSProps> = ({
         </div>
       </div>
 
+      {/* POS Variant Picker Modal for Product Families */}
+      <PosVariantPickerModal
+        key={activeFamilyCard?.family.id || 'variant-picker-closed'}
+        familyCard={activeFamilyCard}
+        currencySymbol={currencySymbol}
+        onSelectEntry={(entry) => {
+          setActiveFamilyCard(null);
+          handleSelectCatalogEntry(entry);
+        }}
+        onClose={() => setActiveFamilyCard(null)}
+      />
+
       {/* Batch Picker Modal */}
       {batchPickerProduct && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
@@ -1118,6 +1344,7 @@ export const PointOfSale: React.FC<POSProps> = ({
               </div>
               <button
                 onClick={() => setBatchPickerProduct(null)}
+                aria-label="إغلاق نافذة اختيار التشغيلة"
                 className="text-slate-400 hover:text-white"
               >
                 <X className="w-4 h-4" />
@@ -1142,14 +1369,16 @@ export const PointOfSale: React.FC<POSProps> = ({
                 const isExpired = inventory.isBatchExpired(batch.expiryDate);
                 const isOutOfStock = batch.quantity <= 0;
                 return (
-                  <div
+                  <button
+                    type="button"
                     key={batch.id}
+                    disabled={isExpired || isOutOfStock}
                     onClick={() => {
                       if (isExpired || isOutOfStock) return;
                       addToCart(batchPickerProduct, batch);
                       setBatchPickerProduct(null);
                     }}
-                    className={`p-2.5 rounded-lg border text-right transition-all ${
+                    className={`w-full p-2.5 rounded-lg border text-right transition-all ${
                       isExpired
                         ? 'bg-rose-50 border-rose-200 text-rose-900 cursor-not-allowed opacity-75'
                         : isOutOfStock
@@ -1169,7 +1398,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                         {batch.quantity} {batchPickerProduct.unit}
                       </div>
                     </div>
-                  </div>
+                  </button>
                 );
               })}
             </div>

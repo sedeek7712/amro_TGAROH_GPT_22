@@ -140,6 +140,50 @@ export interface ProductCatalogMeta {
   variantAttributes: Record<string, string>;
 }
 
+export interface ProductCatalogEntry {
+  product: Product;
+  meta?: ProductCatalogMeta;
+  family?: ProductFamily;
+  brand?: Brand;
+  variantAttributes: Record<string, string>;
+  units: ProductUnit[];
+}
+
+export interface SaveBrandInput {
+  id?: string;
+  nameAr: string;
+  isActive?: boolean;
+}
+
+export interface CreateProductFamilySkuInput {
+  product: Product;
+  variantAttributes: Record<string, string>;
+}
+
+export interface CreateProductFamilyWithSkusInput {
+  id?: string;
+  activityId: CommercialActivityId;
+  nameAr: string;
+  categorySnapshot?: string;
+  brandId?: string;
+  optionSchema: ProductFamilyOption[];
+  skus: CreateProductFamilySkuInput[];
+}
+
+export interface UpdateProductFamilyInput {
+  id: string;
+  nameAr: string;
+  categorySnapshot?: string;
+  brandId?: string | null;
+  optionSchema?: ProductFamilyOption[];
+  isActive?: boolean;
+}
+
+export interface AssignProductBrandInput {
+  productId: string;
+  brandId: string | null;
+}
+
 export type ProductImageSyncStatus = 'LOCAL_ONLY' | 'PENDING_UPLOAD' | 'UPLOADING' | 'SYNCED' | 'FAILED';
 
 export interface ProductImage {
@@ -240,6 +284,11 @@ export interface InvoiceItem {
   batchNumber?: string;
   expiryDate?: string;
   oemNumber?: string;
+  familyId?: string;
+  familyNameSnapshot?: string;
+  brandNameSnapshot?: string;
+  variantAttributesSnapshot?: Record<string, string>;
+  variantSummary?: string;
   unit: string;
   quantity: number;
   unitPrice: number;

@@ -638,6 +638,9 @@ export function createFinancialService(database, core) {
           if (!product) {
             throw new FinancialValidationError(`الصنف ذو المعرف ${ded.productId} غير موجود في المستودع.`);
           }
+          if (product.isActive === false) {
+            throw new FinancialValidationError(`الصنف (${product.nameAr}) مؤرشف ومعطل ولا يمكن بيعه.`);
+          }
 
           const dedQtyUnits = parseScaledInt(ded.quantity, QTY_SCALE, 'deduction.quantity');
           const productStockUnits = parseScaledInt(product.currentStock, QTY_SCALE, 'product.currentStock');

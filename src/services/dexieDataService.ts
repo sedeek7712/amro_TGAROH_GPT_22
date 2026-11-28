@@ -1345,11 +1345,10 @@ export class DexieDataService implements IDataService {
           .equals([tenantId, barcode])
           .filter((u) => u.id !== id)
           .first();
-        const dupProductBarcode = (await db.products.toArray()).find(
-          (p) =>
-            (!p.tenantId || p.tenantId === tenantId) &&
-            String(p.barcode || '').trim() === barcode
-        );
+        const dupProductBarcode = (await db.products.toArray()).find((p) => {
+          const productTenantId = (p as Product & { tenantId?: string }).tenantId;
+          return (!productTenantId || productTenantId === tenantId) && String(p.barcode || '').trim() === barcode;
+        });
         if (dupUnitBarcode || dupProductBarcode) {
           throw new Error(`الباركود (${barcode}) مستخدم بالفعل لصنف أو وحدة أخرى.`);
         }
@@ -1447,12 +1446,10 @@ export class DexieDataService implements IDataService {
     }
     const cleanBarcode = product.barcode ? String(product.barcode).trim() : '';
     if (cleanBarcode) {
-      const dupProductBarcode = (await db.products.toArray()).find(
-        (p) =>
-          p.id !== product.id &&
-          (!p.tenantId || p.tenantId === tenantId) &&
-          String(p.barcode || '').trim() === cleanBarcode
-      );
+      const dupProductBarcode = (await db.products.toArray()).find((p) => {
+        const productTenantId = (p as Product & { tenantId?: string }).tenantId;
+        return p.id !== product.id && (!productTenantId || productTenantId === tenantId) && String(p.barcode || '').trim() === cleanBarcode;
+      });
       const dupUnitBarcode = await db.productUnits
         .where('[tenantId+normalizedBarcode]')
         .equals([tenantId, cleanBarcode])

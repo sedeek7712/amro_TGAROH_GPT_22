@@ -221,11 +221,11 @@ test('PVAR-011-02 SQLite: Tenant, branch, activity RBAC isolation & forged IPC p
     });
 
     runtime.database.prepare(
-      'INSERT OR IGNORE INTO tenants (id,name_ar,subscription_status,created_at,updated_at) VALUES (?,?,?,?,?)'
-    ).run('tenant_other', 'مؤسسة خارجية', 'ACTIVE', '2026-11-01T00:00:00Z', '2026-11-01T00:00:00Z');
+      'INSERT OR IGNORE INTO tenants (id,name,code,currency,is_active,data_json) VALUES (?,?,?,?,?,?)'
+    ).run('tenant_other', 'مؤسسة خارجية', 'OTHER', 'YER', 1, JSON.stringify({ id: 'tenant_other', name: 'مؤسسة خارجية', code: 'OTHER', currency: 'YER', isActive: true }));
     runtime.database.prepare(
-      'INSERT OR IGNORE INTO branches (tenant_id,id,code,is_main,active,data_json) VALUES (?,?,?,?,?,?)'
-    ).run('tenant_other', 'branch_main', 'BR01', 1, 1, JSON.stringify({ id: 'branch_main', code: 'BR01', isMain: true, active: true }));
+      'INSERT OR IGNORE INTO branches (tenant_id,id,code,name_ar,is_main,active,data_json) VALUES (?,?,?,?,?,?,?)'
+    ).run('tenant_other', 'branch_main', 'BR01', 'الفرع الرئيسي', 1, 1, JSON.stringify({ id: 'branch_main', code: 'BR01', nameAr: 'الفرع الرئيسي', isMain: true, active: true }));
     runtime.database.prepare(
       'INSERT OR IGNORE INTO activities (tenant_id,id,code,data_json) VALUES (?,?,?,?)'
     ).run('tenant_other', 'grocery', 'GROC', JSON.stringify({ id: 'grocery', nameAr: 'بقالة' }));
@@ -377,11 +377,11 @@ test('PVAR-011-02 SQLite: Tenant, branch, activity RBAC isolation & forged IPC p
     assert.throws(() => backend.exportBackupJSON({ token: cashierToken }), /RBAC/);
     const southCb = backend.createCashBoxAtomic({
       token: adminToken,
-      cashBox: {
+      box: {
         id: 'sq11-cb-south',
         code: 'CBS',
         nameAr: 'صندوق الجنوب',
-        accountCode: '11011',
+        accountCode: '1101',
         branchId: 'branch_south',
         balance: 0,
       },
@@ -498,6 +498,23 @@ test('PVAR-011-03 SQLite: E2E parity, balanced journals, legacy invoice returns,
       },
     });
     assert.equal(runtime.database.prepare('SELECT COUNT(*) AS c FROM journal_entries').get().c, jvCountBeforeCatalog);
+
+    // Fund the main cash box via an opening capital journal before cash purchase
+    backend.createJournalEntryAtomic({
+      token,
+      entry: {
+        id: 'sq11-jv-open-cash',
+        date: '2026-11-28',
+        description: 'رأس مال افتتاحي لاختبار PVAR-011',
+        costCenterId: 'general',
+        branchId: 'branch_main',
+        referenceType: 'MANUAL',
+        lines: [
+          { id: 'sq11-jv-l1', accountCode: '1101', cashBoxId, debit: 5000, credit: 0 },
+          { id: 'sq11-jv-l2', accountCode: '3101', debit: 0, credit: 5000 },
+        ],
+      },
+    });
 
     // Purchase 2 boxes (20 base units)
     backend.createPurchaseInvoiceAtomic({
@@ -619,7 +636,7 @@ test('PVAR-011-03 SQLite: E2E parity, balanced journals, legacy invoice returns,
               SUM(CAST(l.debit_decimal AS REAL)) AS dr,
               SUM(CAST(l.credit_decimal AS REAL)) AS cr
        FROM journal_entries j
-       JOIN journal_lines l ON l.tenant_id = j.tenant_id AND l.entry_id = j.id
+       JOIN journal_entry_lines l ON l.tenant_id = j.tenant_id AND l.entry_id = j.id
        GROUP BY j.id, j.entry_number`
     ).all();
     assert.ok(jvCheck.length > 0);
@@ -630,8 +647,8 @@ test('PVAR-011-03 SQLite: E2E parity, balanced journals, legacy invoice returns,
     assert.equal(runtime.database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
 
     // Create native backup + .media, verify media integrity passes, then simulate corrupted .media and rollback cleanly
-    const backup = await createSqliteBackup(runtime.database, runtime.backupDirectory, { prefix: 'pvar11' });
-    mediaStorage.backupTo(`${backup.backupPath}.media`);
+    const backupPath = await createSqliteBackup(runtime.database, runtime.backupDirectory, { prefix: 'pvar11' });
+    mediaStorage.backupTo(`${backupPath}.media`);
     const integrity = verifyProductMediaIntegrity(runtime.database, mediaStorage);
     assert.equal(integrity.checkedCount, 1);
 
@@ -639,14 +656,15 @@ test('PVAR-011-03 SQLite: E2E parity, balanced journals, legacy invoice returns,
     const tempMediaDir = path.join(dir, 'corrupt-media');
     mkdirSync(tempMediaDir, { recursive: true });
     const corruptStorage = createProductMediaStorage({ rootDirectory: tempMediaDir });
-    assert.throws(() => verifyProductMediaIntegrity(runtime.database, corruptStorage), /غير موجودة|تالف/);
+    assert.throws(() => verifyProductMediaIntegrity(runtime.database, corruptStorage), /غير موجودة|مفقود|تالف/);
 
     // Also test native restore roundtrip with safety backup intact
     const restored = await restoreSqliteBackupFile({
       databasePath: runtime.databasePath,
       backupDirectory: runtime.backupDirectory,
-      sourceBackupPath: backup.backupPath,
+      sourceBackupPath: backupPath,
       currentDatabase: runtime.database,
+      reopenOptions: { userDataPath: dir },
     });
     runtime = restored.databaseRuntime;
     assert.equal(existsSync(restored.safetyBackupPath), true);

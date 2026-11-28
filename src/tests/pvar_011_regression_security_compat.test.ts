@@ -125,7 +125,6 @@ async function setupFreshDexie() {
   await db.users.bulkPut(allUsers);
   await db.branches.put({
     id: 'branch_south',
-    tenantId: 'tenant_main',
     code: 'BR02',
     nameAr: 'فرع الجنوب',
     isMain: false,
@@ -621,7 +620,7 @@ test('PVAR-011-03 Dexie: RBAC, activity/branch isolation on catalog/units/media/
 
   // Pharmacy-only keeper must neither read nor mutate grocery families, SKUs, units, or images
   await loginAs(pharmaKeeper, 'Keeper#2026Pass');
-  assert.equal((await dexieDataService.getProductFamilies('all', true)).some((f) => f.id === 'dx11-gr-fam'), false);
+  assert.equal((await dexieDataService.getProductFamilies(undefined, true)).some((f) => f.id === 'dx11-gr-fam'), false);
   assert.equal(await dexieDataService.getProductCatalogEntry('dx11-gr-sku1'), undefined);
   await assert.rejects(
     () =>
@@ -791,7 +790,6 @@ test('PVAR-011-04 Dexie: Legacy invoice return + legacy v2.0 backup restore + va
     paymentMethod: 'CASH',
     cashBoxId: 'cb-main-11',
     isPosted: true,
-    createdAt: '2026-11-15T10:00:00.000Z',
   };
   await db.invoices.put(legacyInvoice);
 
@@ -848,11 +846,17 @@ test('PVAR-011-04 Dexie: Legacy invoice return + legacy v2.0 backup restore + va
   });
 
   const entries = await dexieDataService.getProductCatalog();
-  const skuReport = buildStockValuationReport({ entries, families: [famCreated.family], brands: [famBrand], level: 'SKU' });
-  const famReport = buildStockValuationReport({ entries, families: [famCreated.family], brands: [famBrand], level: 'FAMILY' });
-  assert.deepEqual(skuReport.summary, famReport.summary);
-  assert.equal(famReport.summary.totalQty, 15); // 9 + 4 + 2
-  assert.equal(famReport.summary.totalCost, 9 * 20 + 4 * 25 + 2 * 48); // 376
+  const stockReport = buildStockValuationReport({ entries, families: [famCreated.family], brands: [famBrand] });
+  const groupedQty =
+    stockReport.familyGroups.reduce((s, g) => s + g.totalQty, 0) +
+    stockReport.standaloneRows.reduce((s, r) => s + r.qty, 0);
+  const groupedCost =
+    stockReport.familyGroups.reduce((s, g) => s + g.totalCost, 0) +
+    stockReport.standaloneRows.reduce((s, r) => s + r.costValue, 0);
+  assert.equal(groupedQty, stockReport.summary.totalQty);
+  assert.equal(groupedCost, stockReport.summary.totalCost);
+  assert.equal(stockReport.summary.totalQty, 15); // 9 + 4 + 2
+  assert.equal(stockReport.summary.totalCost, 9 * 20 + 4 * 25 + 2 * 48); // 376
 
   // Legacy v2.0 backup (no catalog/units/images keys) restores cleanly without leaving stale catalog/media
   const fullJson = await dexieDataService.exportBackupJSON();

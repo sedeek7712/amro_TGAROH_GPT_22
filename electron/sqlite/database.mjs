@@ -19,6 +19,7 @@ const V2_TABLES = [
 ];
 const V3_TABLES = ['product_images'];
 const V4_TABLES = ['brands', 'product_families', 'product_catalog_meta'];
+const V5_TABLES = ['product_units'];
 
 function sha256(value) {
   return createHash('sha256').update(value, 'utf8').digest('hex');
@@ -148,6 +149,15 @@ export function verifySqliteFile(filePath, migrationsDirectory = DEFAULT_MIGRATI
       for (const tableName of V4_TABLES) {
         if (!hasTableStmt.get(tableName)) {
           throw new Error('النسخة الاحتياطية تفتقر إلى جدول بيانات كتالوج المنتجات (v4): ' + tableName);
+        }
+      }
+    }
+
+    const hasV5ProductUnitsMigration = migrationFiles.some((m) => m.filename === '005_product_units.sql');
+    if (schemaVersion >= 5 && hasV5ProductUnitsMigration) {
+      for (const tableName of V5_TABLES) {
+        if (!hasTableStmt.get(tableName)) {
+          throw new Error('النسخة الاحتياطية تفتقر إلى جدول الوحدات البديلة (v5): ' + tableName);
         }
       }
     }
@@ -388,10 +398,14 @@ export async function openErpDatabase(options) {
     );
     const hasV2PaymentMigration = migrationFiles.some((m) => m.filename === '002_payment_allocations_advances.sql');
     const hasV3ProductMediaMigration = migrationFiles.some((m) => m.filename === '003_product_images.sql');
+    const hasV4ProductCatalogMigration = migrationFiles.some((m) => m.filename === '004_product_catalog_metadata.sql');
+    const hasV5ProductUnitsMigration = migrationFiles.some((m) => m.filename === '005_product_units.sql');
     const tablesToRequire = [
       ...CORE_TABLES,
       ...(hasV2PaymentMigration ? V2_TABLES : []),
       ...(hasV3ProductMediaMigration ? V3_TABLES : []),
+      ...(hasV4ProductCatalogMigration ? V4_TABLES : []),
+      ...(hasV5ProductUnitsMigration ? V5_TABLES : []),
     ];
     for (const tableName of tablesToRequire) {
       if (!required.get(tableName)) {

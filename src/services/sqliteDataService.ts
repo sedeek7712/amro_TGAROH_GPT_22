@@ -16,6 +16,8 @@ import {
   PaymentAllocation,
   PaymentVoucher,
   Product,
+  ProductUnit,
+  SaveProductUnitInput,
   SystemAuditLog,
   SystemUser,
   VoucherManualAllocationInput,
@@ -72,6 +74,14 @@ export class SqliteDataService implements IDataService {
   }
   public async getProductById(id: string): Promise<Product | undefined> {
     return await bridge().getProductById({ token: token(), id });
+  }
+  public async getProductUnits(productId: string): Promise<ProductUnit[]> {
+    return await bridge().getProductUnits({ token: token(), productId });
+  }
+  public async saveProductUnit(input: SaveProductUnitInput): Promise<ProductUnit> {
+    const saved = await bridge().saveProductUnit({ token: token(), unit: input });
+    desktopSession.notifyChanged(['productUnits', 'auditLogs']);
+    return saved;
   }
   public async addProduct(product: Product): Promise<void> {
     await this.saveProductAtomic(product, false);

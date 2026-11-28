@@ -100,11 +100,11 @@ export function createProductUnitsService(database) {
           productId,
           code,
           nameAr,
-          ...(String(input.nameEn || '').trim() ? { nameEn: String(input.nameEn).trim() } : {}),
+          ...((String(input.nameEn || '').trim() || existing?.name_en) ? { nameEn: String(input.nameEn || existing?.name_en || '').trim() } : {}),
           baseUnitsNumerator: ratio.numerator,
           baseUnitsDenominator: ratio.denominator,
           ...(barcode ? { barcode, normalizedBarcode: barcode } : {}),
-          isActive: input.isActive !== false,
+          isActive: input.isActive === undefined ? (existing ? existing.is_active === 1 : true) : input.isActive !== false,
           createdAt: existing?.created_at || nowIso,
           updatedAt: nowIso,
         };

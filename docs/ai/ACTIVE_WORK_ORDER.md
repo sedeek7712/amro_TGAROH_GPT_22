@@ -3,9 +3,11 @@
 > **الحالة:** IMPLEMENTED — WAITING FOR OWNER REVIEW  
 > **معرّف المهمة:** WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY  
 > **المستودع:** `sedeek7712/amro_TGAROH_GPT_22`  
-> **فرع المهمة:** `fix/windows-local-data-integrity-2026-11-28`  
-> **المرجع الأساسي المستلم:** `f074313d7a73966d73a142954b01c719d9162801` (PR #34، مبدؤها عن `main` `6f54a7cecff2958c72373f4ab0c46a0fc73cc36a`)  
-> **ملاحظة GitHub/الحاوية:** نُفذت النطاقات A وB وC واجتازت الاختبارات محليًا في حاوية Linux (Node 22)، ولا يوجد `.git` أو صلاحية دفع لـ GitHub داخل الحاوية؛ لذا لم يُرفع التزام جديد بعد إلى PR #34 ولم يشتغل CI السحابي أو اختبار Windows الفعلي حتى الآن (يبقى PR #34 مفتوحًا دون دمج).  
+> **مرجع التنفيذ الحالي على main:** `7972dc40ee3750f12661ff4d411fa84ed42244d9`  
+> **فرع التوثيق الحالي:** `docs/reconcile-win-local-integrity-2026-11-28`  
+> **CI:** GitHub Actions run [46122561382](https://github.com/sedeek7712/amro_TGAROH_GPT_22/actions/runs/46122561382) — الوظائف الثلاث `verify` و`sqlite-electron-runtime` و`windows-exe-preview` ناجحة.  
+> **PR #34:** ما زال مفتوحًا كمسودة، غير مدمج، وفرعه قديم عن main؛ لم يعد هو وعاء تنفيذ A/B/C. لا تدمجه أو تغلقه دون موافقة مستقلة.  
+> **اختبار Windows الميداني:** لم يُثبت بعد؛ نجاح بناء EXE في CI لا يثبت تثبيت التطبيق وتشغيله وتحديثه على جهاز Windows حقيقي.  
 > **الوثيقة التنفيذية الكاملة:** [WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md](work-orders/WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md)
 
 ## تعليمات مباشرة

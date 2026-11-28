@@ -84,6 +84,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [unitDraft, setUnitDraft] = useState({ id: '', code: '', nameAr: '', numerator: '1', denominator: '1', barcode: '' });
   const [unitError, setUnitError] = useState<string | null>(null);
   const [isSavingUnit, setIsSavingUnit] = useState(false);
+  const [isLoadingUnits, setIsLoadingUnits] = useState(false);
 
 
   // حقول نموذج الإضافة والتعديل
@@ -192,10 +193,13 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
   const loadProductUnits = async (productId: string) => {
     setUnitError(null);
+    setIsLoadingUnits(true);
     try {
       setProductUnits(await dataService.getProductUnits(productId));
     } catch (err: unknown) {
       setUnitError(err instanceof Error ? err.message : 'تعذر تحميل الوحدات البديلة.');
+    } finally {
+      setIsLoadingUnits(false);
     }
   };
 
@@ -297,6 +301,14 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
     if (!formNameAr.trim()) {
       setFormError('يرجى إدخال اسم الصنف التجاري.');
+      return;
+    }
+    if (editingProduct && isLoadingUnits) {
+      setFormError('انتظر حتى يكتمل تحميل الوحدات البديلة.');
+      return;
+    }
+    if (editingProduct && formUnit !== editingProduct.unit && (productUnits.length > 0 || unitError)) {
+      setFormError('لا يمكن تغيير وحدة المخزون الأساسية بعد تعريف وحدات بديلة. راجع الوحدات أولًا في مرحلة مستقلة.');
       return;
     }
 
@@ -1105,11 +1117,11 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || isLoadingUnits}
                   className="px-5 py-2 bg-emerald-600 hover:bg-emerald-700 disabled:bg-slate-300 text-white font-bold rounded-lg transition-colors flex items-center gap-1.5"
                 >
                   <Check className="w-4 h-4" />
-                  <span>{isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الصنف'}</span>
+                  <span>{isLoadingUnits ? 'جارٍ تحميل الوحدات...' : isSubmitting ? 'جارٍ الحفظ...' : 'حفظ الصنف'}</span>
                 </button>
               </div>
             </form>

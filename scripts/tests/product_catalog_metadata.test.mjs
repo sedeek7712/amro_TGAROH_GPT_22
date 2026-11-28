@@ -12,7 +12,7 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
     const migrationsSource = fileURLToPath(new URL('../../electron/sqlite/migrations/', import.meta.url));
     const legacyMigrationsDir = path.join(userDataPath, 'migrations-v3');
     mkdirSync(legacyMigrationsDir, { recursive: true });
-    for (const filename of readdirSync(migrationsSource).filter((name) => /^00[1-3]_.*\\.sql$/.test(name))) {
+    for (const filename of readdirSync(migrationsSource).filter((name) => /^00[1-3]_.*\.sql$/.test(name))) {
       copyFileSync(path.join(migrationsSource, filename), path.join(legacyMigrationsDir, filename));
     }
 

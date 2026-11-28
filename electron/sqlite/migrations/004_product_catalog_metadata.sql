@@ -60,3 +60,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_product_catalog_meta_family_variant
 CREATE INDEX IF NOT EXISTS idx_product_catalog_meta_brand
   ON product_catalog_meta(tenant_id, brand_id)
   WHERE brand_id IS NOT NULL;
+
+
+-- A SKU in a family must belong to the same activity as that family.
+CREATE TRIGGER IF NOT EXISTS trg_product_catalog_meta_family_activity_insert
+BEFORE INSERT ON product_catalog_meta
+WHEN NEW.family_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1
+  FROM products p
+  JOIN product_families f
+    ON f.tenant_id = p.tenant_id
+   AND f.id = NEW.family_id
+  WHERE p.tenant_id = NEW.tenant_id
+    AND p.id = NEW.product_id
+    AND p.activity_id = f.activity_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Product activity must match product family activity');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_product_catalog_meta_family_activity_update
+BEFORE UPDATE OF family_id, product_id, tenant_id ON product_catalog_meta
+WHEN NEW.family_id IS NOT NULL AND NOT EXISTS (
+  SELECT 1
+  FROM products p
+  JOIN product_families f
+    ON f.tenant_id = p.tenant_id
+   AND f.id = NEW.family_id
+  WHERE p.tenant_id = NEW.tenant_id
+    AND p.id = NEW.product_id
+    AND p.activity_id = f.activity_id
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Product activity must match product family activity');
+END;

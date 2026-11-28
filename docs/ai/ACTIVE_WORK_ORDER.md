@@ -7,6 +7,7 @@
 > **فرع التوثيق الحالي:** `docs/reconcile-win-local-integrity-2026-11-28`  
 > **CI:** GitHub Actions run [46122561382](https://github.com/sedeek7712/amro_TGAROH_GPT_22/actions/runs/46122561382) — الوظائف الثلاث `verify` و`sqlite-electron-runtime` و`windows-exe-preview` ناجحة.  
 > **PR #34:** ما زال مفتوحًا كمسودة، غير مدمج، وفرعه قديم عن main؛ لم يعد هو وعاء تنفيذ A/B/C. لا تدمجه أو تغلقه دون موافقة مستقلة.  
+> **PR تصحيح التوثيق:** [#35](https://github.com/sedeek7712/amro_TGAROH_GPT_22/pull/35) مفتوح كمسودة، ويحتوي تحديثات توثيق فقط.  
 > **اختبار Windows الميداني:** لم يُثبت بعد؛ نجاح بناء EXE في CI لا يثبت تثبيت التطبيق وتشغيله وتحديثه على جهاز Windows حقيقي.  
 > **الوثيقة التنفيذية الكاملة:** [WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md](work-orders/WO-2026-11-28-WIN-LOCAL-DATA-INTEGRITY.md)
 

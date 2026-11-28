@@ -94,3 +94,36 @@ WHEN NEW.family_id IS NOT NULL AND NOT EXISTS (
 BEGIN
   SELECT RAISE(ABORT, 'Product activity must match product family activity');
 END;
+
+
+CREATE TRIGGER IF NOT EXISTS trg_products_activity_catalog_family_update
+BEFORE UPDATE OF activity_id, tenant_id, id ON products
+WHEN EXISTS (
+  SELECT 1
+  FROM product_catalog_meta m
+  JOIN product_families f
+    ON f.tenant_id = m.tenant_id
+   AND f.id = m.family_id
+  WHERE m.tenant_id = OLD.tenant_id
+    AND m.product_id = OLD.id
+    AND (NEW.tenant_id <> f.tenant_id OR NEW.activity_id <> f.activity_id)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Product activity must match linked product family activity');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_product_families_activity_catalog_update
+BEFORE UPDATE OF activity_id, tenant_id, id ON product_families
+WHEN EXISTS (
+  SELECT 1
+  FROM product_catalog_meta m
+  JOIN products p
+    ON p.tenant_id = m.tenant_id
+   AND p.id = m.product_id
+  WHERE m.tenant_id = OLD.tenant_id
+    AND m.family_id = OLD.id
+    AND (NEW.tenant_id <> p.tenant_id OR NEW.activity_id <> p.activity_id)
+)
+BEGIN
+  SELECT RAISE(ABORT, 'Product family activity must match linked product activity');
+END;

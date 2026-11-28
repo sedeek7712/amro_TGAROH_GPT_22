@@ -4,6 +4,7 @@ import type {
   ProductCatalogEntry,
   ProductFamily,
   ProductFamilyOption,
+  ProductUnit,
 } from '../types/erp';
 import { formatLocalDate } from './localDate';
 import { formatVariantAttributesPairs, matchesCatalogEntrySearch } from './productCatalogUi';
@@ -20,6 +21,7 @@ export interface PosScanResolution {
   entry: ProductCatalogEntry;
   matchedBy: 'BARCODE' | 'CODE' | 'UNIT_BARCODE';
   matchedUnitName?: string;
+  matchedUnit?: ProductUnit;
   saleability: PosSkuSaleability;
 }
 
@@ -178,7 +180,7 @@ export function resolvePosScanTarget(
     };
   }
 
-  const unitMatches: Array<{ entry: ProductCatalogEntry; unitName: string }> = [];
+  const unitMatches: Array<{ entry: ProductCatalogEntry; unit: ProductUnit }> = [];
   for (const entry of entries) {
     const matchedUnit = (entry.units || []).find((unit) => {
       if (unit.isActive === false) return false;
@@ -186,7 +188,7 @@ export function resolvePosScanTarget(
       return Boolean(ub && ub === q);
     });
     if (matchedUnit) {
-      unitMatches.push({ entry, unitName: matchedUnit.nameAr });
+      unitMatches.push({ entry, unit: matchedUnit });
     }
   }
   const preferredUnitHit =
@@ -195,7 +197,8 @@ export function resolvePosScanTarget(
     return {
       entry: preferredUnitHit.entry,
       matchedBy: 'UNIT_BARCODE',
-      matchedUnitName: preferredUnitHit.unitName,
+      matchedUnitName: preferredUnitHit.unit.nameAr,
+      matchedUnit: preferredUnitHit.unit,
       saleability: getSkuSaleabilityStatus(preferredUnitHit.entry, todayDate),
     };
   }

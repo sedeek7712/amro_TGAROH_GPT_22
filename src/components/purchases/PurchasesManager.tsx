@@ -27,9 +27,15 @@ import { authService } from '../../services/authService';
 import { hasPermission, getAuthorizedActivityIds } from '../../config/rbac';
 import { getActiveCurrencyConfig, roundMoney } from '../../config/currency';
 import { useLiveInvoices, useLiveParties, useLiveCashBoxes, useLiveProducts } from '../../hooks/useLiveDexie';
-import { Invoice, InvoiceItem, ActivityId, PaymentMethod } from '../../types/erp';
+import { Invoice, InvoiceItem, ActivityId, PaymentMethod, ProductUnit } from '../../types/erp';
 import { ReceiptModal } from '../common/ReceiptModal';
 import { formatLocalDate } from '../../utils/localDate';
+import {
+  computePurchaseBaseUnitCost,
+  computeSuggestedUnitPrice,
+  formatUnitConversionSummary,
+  resolveUnitConversionToBase,
+} from '../../../electron/sqlite/unit-conversion.mjs';
 
 interface PurchasesManagerProps {
   onRefresh: () => void;
@@ -81,18 +87,28 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
   const [applyAdvanceInput, setApplyAdvanceInput] = useState('');
   const [items, setItems] = useState<
     Array<{
+      id: string;
       productId: string;
       productName: string;
+      productCode: string;
       quantity: number;
       costPrice: number;
       batchNumber?: string;
       expiryDate?: string;
       unit: string;
+      unitId: string;
+      unitNameSnapshot: string;
+      baseUnitNameSnapshot: string;
+      conversionNumeratorSnapshot: number;
+      conversionDenominatorSnapshot: number;
+      baseQuantity: number;
     }>
   >([]);
 
   // حقول إضافة سطر صنف للفاتورة
   const [selectedProductId, setSelectedProductId] = useState('');
+  const [selectedUnitId, setSelectedUnitId] = useState('BASE');
+  const [selectedProductUnits, setSelectedProductUnits] = useState<ProductUnit[]>([]);
   const [itemQty, setItemQty] = useState('1');
   const [itemCost, setItemCost] = useState('');
   const [itemBatch, setItemBatch] = useState('');
@@ -147,6 +163,73 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
     );
   });
 
+  useEffect(() => {
+    if (!selectedProductId) {
+      setSelectedProductUnits([]);
+      setSelectedUnitId('BASE');
+      return;
+    }
+    let cancelled = false;
+    dataService
+      .getProductUnits(selectedProductId)
+      .then((units) => {
+        if (cancelled) return;
+        setSelectedProductUnits((units || []).filter((u) => u.isActive !== false));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSelectedProductUnits([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProductId]);
+
+  const selectedProductObj = products.find((p) => p.id === selectedProductId);
+  const selectedAlternateUnit =
+    selectedUnitId === 'BASE'
+      ? undefined
+      : selectedProductUnits.find((u) => u.id === selectedUnitId && u.isActive !== false);
+
+  const liveUnitPreview = React.useMemo(() => {
+    if (!selectedProductObj) return null;
+    const qtyNum = Number(itemQty);
+    if (!Number.isFinite(qtyNum) || qtyNum <= 0) return null;
+    const numerator = selectedAlternateUnit ? selectedAlternateUnit.baseUnitsNumerator : 1;
+    const denominator = selectedAlternateUnit ? selectedAlternateUnit.baseUnitsDenominator : 1;
+    const unitName = selectedAlternateUnit ? selectedAlternateUnit.nameAr : selectedProductObj.unit;
+    try {
+      const conv = resolveUnitConversionToBase({
+        quantity: qtyNum,
+        numerator,
+        denominator,
+        unitName,
+      });
+      const enteredCost =
+        itemCost.trim() === '' ? selectedProductObj.purchasePrice : Number(itemCost);
+      const baseCostResult =
+        Number.isFinite(enteredCost) && enteredCost >= 0
+          ? computePurchaseBaseUnitCost({
+              enteredQuantity: conv.enteredQuantity,
+              enteredCostPrice: enteredCost,
+              baseQuantity: conv.baseQuantity,
+            })
+          : null;
+      return {
+        valid: true as const,
+        conv,
+        unitName,
+        baseUnitName: selectedProductObj.unit,
+        baseUnitCost: baseCostResult?.baseUnitCost,
+      };
+    } catch (err: unknown) {
+      return {
+        valid: false as const,
+        error: err instanceof Error ? err.message : 'كمية غير صالحة لهذه الوحدة.',
+      };
+    }
+  }, [selectedProductObj, selectedAlternateUnit, itemQty, itemCost]);
+
   const handleAddItemToInvoice = () => {
     setFormError(null);
     if (!isActivityConfirmed) {
@@ -156,8 +239,52 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
     const product = products.find((p) => p.id === selectedProductId);
     if (!product) return;
 
-    const qty = Number(itemQty) || 1;
-    const cost = Number(itemCost) || product.purchasePrice;
+    const qty = roundMoney(Number(itemQty), 4);
+    if (!Number.isFinite(qty) || qty <= 0) {
+      setFormError('كمية الصنف يجب أن تكون أكبر من الصفر.');
+      return;
+    }
+
+    const chosenUnit =
+      selectedUnitId === 'BASE'
+        ? undefined
+        : selectedProductUnits.find((u) => u.id === selectedUnitId && u.isActive !== false);
+    if (selectedUnitId !== 'BASE' && !chosenUnit) {
+      setFormError('الوحدة المختارة غير متاحة أو معطلة.');
+      return;
+    }
+
+    const numerator = chosenUnit ? chosenUnit.baseUnitsNumerator : 1;
+    const denominator = chosenUnit ? chosenUnit.baseUnitsDenominator : 1;
+    const unitName = chosenUnit ? chosenUnit.nameAr : product.unit;
+    const decimalPlaces = getActiveCurrencyConfig().decimalPlaces ?? 2;
+    const defaultUnitCost = chosenUnit
+      ? computeSuggestedUnitPrice({
+          basePrice: product.purchasePrice,
+          numerator,
+          denominator,
+          decimalPlaces,
+        })
+      : product.purchasePrice;
+    const cost = itemCost.trim() === '' ? defaultUnitCost : Number(itemCost);
+    if (!Number.isFinite(cost) || cost < 0) {
+      setFormError('سعر التكلفة يجب أن يكون رقماً غير سالب.');
+      return;
+    }
+
+    let conv;
+    try {
+      conv = resolveUnitConversionToBase({
+        quantity: qty,
+        numerator,
+        denominator,
+        unitName,
+      });
+    } catch (err: unknown) {
+      setFormError(err instanceof Error ? err.message : 'تعذر تحويل الكمية إلى الوحدة الأساسية.');
+      return;
+    }
+
     const todayStr = formatLocalDate();
 
     // الفحص الصارم للأدوية بالصيدلية
@@ -179,17 +306,27 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
     setItems((prev) => [
       ...prev,
       {
+        id: storage.generateUUID(),
         productId: product.id,
         productName: product.nameAr,
-        quantity: qty,
+        productCode: product.code,
+        quantity: conv.enteredQuantity,
         costPrice: cost,
         batchNumber: itemBatch.trim() || undefined,
         expiryDate: itemExpiry.trim() || undefined,
-        unit: product.unit,
+        unit: unitName,
+        unitId: chosenUnit ? chosenUnit.id : 'BASE',
+        unitNameSnapshot: unitName,
+        baseUnitNameSnapshot: product.unit,
+        conversionNumeratorSnapshot: numerator,
+        conversionDenominatorSnapshot: denominator,
+        baseQuantity: conv.baseQuantity,
       },
     ]);
 
     setSelectedProductId('');
+    setSelectedUnitId('BASE');
+    setSelectedProductUnits([]);
     setItemQty('1');
     setItemCost('');
     setItemBatch('');
@@ -273,11 +410,17 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
 
     // 1. تجهيز سطور الفاتورة
     const invoiceItems: InvoiceItem[] = items.map((item) => ({
-      id: storage.generateUUID(),
+      id: item.id,
       productId: item.productId,
       productName: item.productName,
-      productCode: '',
+      productCode: item.productCode,
       unit: item.unit,
+      unitId: item.unitId,
+      unitNameSnapshot: item.unitNameSnapshot,
+      baseUnitNameSnapshot: item.baseUnitNameSnapshot,
+      conversionNumeratorSnapshot: item.conversionNumeratorSnapshot,
+      conversionDenominatorSnapshot: item.conversionDenominatorSnapshot,
+      baseQuantity: item.baseQuantity,
       quantity: item.quantity,
       unitPrice: item.costPrice,
       discount: 0,
@@ -313,7 +456,9 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
       const created = await dataService.createPurchaseInvoiceAtomic({
         invoice: newInvoice,
         itemsWithBatches: items.map((item) => ({
+          invoiceItemId: item.id,
           productId: item.productId,
+          unitId: item.unitId,
           quantity: item.quantity,
           costPrice: item.costPrice,
           batchNumber: item.batchNumber,
@@ -351,50 +496,54 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
         i.originalInvoiceId === returnSourceInvoice.id &&
         i.status !== 'REVERSED'
     );
-    const returnedByKey = new Map<string, number>();
+    const origLines = returnSourceInvoice.items || [];
+    const returnedByLineId = new Map<string, number>();
+    const returnedLegacyByKey = new Map<string, number>();
     for (const r of priorReturns) {
       for (const it of r.items || []) {
-        const key = `${it.productId}::${it.batchNumber || ''}`;
-        returnedByKey.set(key, roundMoney((returnedByKey.get(key) || 0) + it.quantity, 4));
+        if (it.originalInvoiceItemId) {
+          returnedByLineId.set(
+            it.originalInvoiceItemId,
+            roundMoney((returnedByLineId.get(it.originalInvoiceItemId) || 0) + it.quantity, 4)
+          );
+        } else {
+          const legacyKey = `${it.productId}::${it.batchNumber || ''}`;
+          returnedLegacyByKey.set(
+            legacyKey,
+            roundMoney((returnedLegacyByKey.get(legacyKey) || 0) + it.quantity, 4)
+          );
+        }
       }
     }
 
-    const grouped = new Map<
-      string,
-      {
-        key: string;
-        productId: string;
-        productName: string;
-        batchNumber?: string;
-        unit: string;
-        purchasedQty: number;
-        unitPrice: number;
-      }
-    >();
-    for (const it of returnSourceInvoice.items || []) {
-      const key = `${it.productId}::${it.batchNumber || ''}`;
-      const prev = grouped.get(key);
-      if (prev) {
-        prev.purchasedQty = roundMoney(prev.purchasedQty + it.quantity, 4);
-      } else {
-        grouped.set(key, {
-          key,
-          productId: it.productId,
-          productName: it.productName,
-          batchNumber: it.batchNumber,
-          unit: it.unit,
-          purchasedQty: it.quantity,
-          unitPrice: it.unitPrice,
-        });
-      }
+    const countByLegacyKey = new Map<string, number>();
+    for (const it of origLines) {
+      const legacyKey = `${it.productId}::${it.batchNumber || ''}`;
+      countByLegacyKey.set(legacyKey, (countByLegacyKey.get(legacyKey) || 0) + 1);
     }
 
-    return Array.from(grouped.values()).map((line) => {
-      const alreadyReturned = returnedByKey.get(line.key) || 0;
+    return origLines.map((it, idx) => {
+      const key = it.id || `${it.productId}::${it.batchNumber || ''}::${idx}`;
+      const legacyKey = `${it.productId}::${it.batchNumber || ''}`;
+      const byId = it.id ? returnedByLineId.get(it.id) || 0 : 0;
+      const legacyOnly =
+        (countByLegacyKey.get(legacyKey) || 0) === 1
+          ? returnedLegacyByKey.get(legacyKey) || 0
+          : 0;
+      const alreadyReturned = roundMoney(byId + legacyOnly, 4);
+      const unitSummary = formatUnitConversionSummary(it);
       return {
-        ...line,
+        key,
+        originalInvoiceItemId: it.id,
+        productId: it.productId,
+        productName: it.productName,
+        batchNumber: it.batchNumber,
+        unit: it.unit,
+        unitSummary,
+        purchasedQty: it.quantity,
+        unitPrice: it.unitPrice,
         alreadyReturned,
-        remainingQty: Math.max(0, roundMoney(line.purchasedQty - alreadyReturned, 4)),
+        remainingQty: Math.max(0, roundMoney(it.quantity - alreadyReturned, 4)),
       };
     });
   }, [returnSourceInvoice, allInvoices]);
@@ -421,6 +570,7 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
 
     const itemsPayload = purchaseReturnableLines
       .map((line) => ({
+        originalInvoiceItemId: line.originalInvoiceItemId,
         productId: line.productId,
         quantity: roundMoney(Number(returnQuantities[line.key]) || 0, 4),
         batchNumber: line.batchNumber,
@@ -445,7 +595,8 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
     try {
       const createdReturn = await dataService.createPurchaseReturnAtomic({
         originalInvoiceId: returnSourceInvoice.id,
-        items: itemsPayload.map(({ productId, quantity, batchNumber }) => ({
+        items: itemsPayload.map(({ originalInvoiceItemId, productId, quantity, batchNumber }) => ({
+          originalInvoiceItemId,
           productId,
           quantity,
           batchNumber,
@@ -717,14 +868,17 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
                     </span>
                   )}
                 </div>
-                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                <div className="grid grid-cols-1 sm:grid-cols-6 gap-2">
                   <div className="sm:col-span-2">
                     <select
+                      aria-label="اختيار الصنف من المستودع"
                       value={selectedProductId}
                       onChange={(e) => {
-                        setSelectedProductId(e.target.value);
-                        const p = products.find((prod) => prod.id === e.target.value);
-                        if (p) setItemCost(String(p.purchasePrice));
+                        const nextId = e.target.value;
+                        setSelectedProductId(nextId);
+                        setSelectedUnitId('BASE');
+                        const p = products.find((prod) => prod.id === nextId);
+                        setItemCost(p ? String(p.purchasePrice) : '');
                       }}
                       className="w-full px-3 py-1.5 border border-slate-200 rounded bg-white text-slate-900"
                     >
@@ -739,10 +893,55 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
                     </select>
                   </div>
 
+                  <div className="sm:col-span-2">
+                    <select
+                      aria-label="وحدة الشراء"
+                      value={selectedUnitId}
+                      disabled={!selectedProductObj}
+                      onChange={(e) => {
+                        const nextUnitId = e.target.value;
+                        setSelectedUnitId(nextUnitId);
+                        if (!selectedProductObj) return;
+                        if (nextUnitId === 'BASE') {
+                          setItemCost(String(selectedProductObj.purchasePrice));
+                          return;
+                        }
+                        const unit = selectedProductUnits.find((u) => u.id === nextUnitId);
+                        if (unit) {
+                          const dec = getActiveCurrencyConfig().decimalPlaces ?? 2;
+                          setItemCost(
+                            String(
+                              computeSuggestedUnitPrice({
+                                basePrice: selectedProductObj.purchasePrice,
+                                numerator: unit.baseUnitsNumerator,
+                                denominator: unit.baseUnitsDenominator,
+                                decimalPlaces: dec,
+                              })
+                            )
+                          );
+                        }
+                      }}
+                      className="w-full px-3 py-1.5 border border-slate-200 rounded bg-white text-slate-900 disabled:bg-slate-100 disabled:text-slate-400"
+                    >
+                      <option value="BASE">
+                        {selectedProductObj
+                          ? `${selectedProductObj.unit} (أساسية)`
+                          : '-- وحدة القياس --'}
+                      </option>
+                      {selectedProductUnits.map((u) => (
+                        <option key={u.id} value={u.id}>
+                          {u.nameAr} ({u.baseUnitsDenominator === 1 ? u.baseUnitsNumerator : `${u.baseUnitsNumerator}/${u.baseUnitsDenominator}`} {selectedProductObj?.unit})
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
                   <div>
                     <input
                       type="number"
-                      min="1"
+                      min="0.0001"
+                      step="any"
+                      aria-label="الكمية"
                       value={itemQty}
                       onChange={(e) => setItemQty(e.target.value)}
                       placeholder="الكمية"
@@ -754,6 +953,8 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
                     <input
                       type="number"
                       step="any"
+                      min="0"
+                      aria-label="سعر التكلفة للوحدة"
                       value={itemCost}
                       onChange={(e) => setItemCost(e.target.value)}
                       placeholder="سعر التكلفة"
@@ -761,6 +962,28 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
                     />
                   </div>
                 </div>
+
+                {liveUnitPreview && (
+                  liveUnitPreview.valid ? (
+                    selectedAlternateUnit && (
+                      <div className="px-2.5 py-1.5 rounded bg-emerald-50 border border-emerald-200 text-[11px] text-emerald-900 flex flex-wrap items-center justify-between gap-2">
+                        <span>
+                          تحويل المخزون: <strong className="font-mono">{liveUnitPreview.conv.enteredQuantity}</strong> {liveUnitPreview.unitName} ={' '}
+                          <strong className="font-mono">{liveUnitPreview.conv.baseQuantity}</strong> {liveUnitPreview.baseUnitName}
+                        </span>
+                        {liveUnitPreview.baseUnitCost !== undefined && (
+                          <span className="font-mono">
+                            تكلفة الوحدة الأساسية: <strong>{liveUnitPreview.baseUnitCost.toFixed(2)} {currencySymbol}</strong> / {liveUnitPreview.baseUnitName}
+                          </span>
+                        )}
+                      </div>
+                    )
+                  ) : (
+                    <div className="px-2.5 py-1.5 rounded bg-rose-50 border border-rose-200 text-[11px] font-semibold text-rose-800">
+                      {liveUnitPreview.error}
+                    </div>
+                  )
+                )}
 
                 {activityId === 'pharmacy' && (
                   <div className="p-2.5 bg-emerald-50 rounded-lg border border-emerald-300 space-y-1.5 pt-2">
@@ -853,34 +1076,42 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100">
-                    {items.map((item, i) => (
-                      <tr key={i}>
-                        <td className="py-2 px-3">
-                          <div className="font-bold">{item.productName}</div>
-                          {item.batchNumber && (
-                            <div className="text-[10px] text-slate-500 font-mono">
-                              تشغيلة: {item.batchNumber} {item.expiryDate ? `| انتهاء: ${item.expiryDate}` : ''}
-                            </div>
-                          )}
-                        </td>
-                        <td className="py-2 px-3 text-center font-mono font-bold">
-                          {item.quantity} {item.unit}
-                        </td>
-                        <td className="py-2 px-3 text-center font-mono">{item.costPrice.toFixed(2)}</td>
-                        <td className="py-2 px-3 text-center font-mono font-bold text-slate-900">
-                          {(item.quantity * item.costPrice).toFixed(2)} {currencySymbol}
-                        </td>
-                        <td className="py-2 px-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleRemoveItem(i)}
-                            className="text-rose-600 hover:text-rose-800"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {items.map((item, i) => {
+                      const unitSummary = formatUnitConversionSummary(item);
+                      return (
+                        <tr key={item.id || i}>
+                          <td className="py-2 px-3">
+                            <div className="font-bold">{item.productName}</div>
+                            {unitSummary && (
+                              <div className="text-[10px] text-emerald-700 font-medium">
+                                {unitSummary}
+                              </div>
+                            )}
+                            {item.batchNumber && (
+                              <div className="text-[10px] text-slate-500 font-mono">
+                                تشغيلة: {item.batchNumber} {item.expiryDate ? `| انتهاء: ${item.expiryDate}` : ''}
+                              </div>
+                            )}
+                          </td>
+                          <td className="py-2 px-3 text-center font-mono font-bold">
+                            {item.quantity} {item.unit}
+                          </td>
+                          <td className="py-2 px-3 text-center font-mono">{item.costPrice.toFixed(2)}</td>
+                          <td className="py-2 px-3 text-center font-mono font-bold text-slate-900">
+                            {(item.quantity * item.costPrice).toFixed(2)} {currencySymbol}
+                          </td>
+                          <td className="py-2 px-3 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveItem(i)}
+                              className="text-rose-600 hover:text-rose-800"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1084,6 +1315,11 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
                       <tr key={line.key}>
                         <td className="py-2 px-3">
                           <div className="font-bold text-slate-900">{line.productName}</div>
+                          {line.unitSummary && (
+                            <div className="text-[10px] text-emerald-700 font-medium">
+                              {line.unitSummary}
+                            </div>
+                          )}
                           {line.batchNumber && (
                             <div className="text-[10px] font-mono text-slate-500">تشغيلة: {line.batchNumber}</div>
                           )}

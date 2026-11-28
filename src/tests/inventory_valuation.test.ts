@@ -226,6 +226,8 @@ describe('Inventory Valuation (INV-02), Opening/Adjustment JVs (INV-01) & Archiv
     // Archive and restore preserves data cleanly
     const archived = await dexieDataService.saveProductAtomic({ ...prod, isActive: false }, true);
     assert.equal(archived.isActive, false);
+    const restored = await dexieDataService.saveProductAtomic({ ...archived, isActive: true }, true);
+    assert.equal(restored.isActive, true);
 
     // Create temp unreferenced product and verify deletion reverses its opening JV
     await dexieDataService.saveProductAtomic(

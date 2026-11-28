@@ -35,7 +35,7 @@ function isFiniteNonNegative(val: unknown): val is number {
 export function validateSalesInvoiceInput(params: {
   invoice: Invoice;
   totalCogs: number;
-  stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+  stockDeductions: Array<{ invoiceItemId?: string; productId: string; quantity: number; batchNumber?: string }>;
   cashBox?: CashBox | null;
   applyAdvanceAmount?: number;
 }): void {
@@ -51,6 +51,9 @@ export function validateSalesInvoiceInput(params: {
   for (const item of invoice.items) {
     if (!isFinitePositive(item.quantity)) {
       throw new FinancialValidationError(`كمية الصنف (${item.productName}) يجب أن تكون أكبر من الصفر.`);
+    }
+    if (item.baseQuantity !== undefined && !isFinitePositive(item.baseQuantity)) {
+      throw new FinancialValidationError(`الكمية الأساسية للصنف (${item.productName}) يجب أن تكون أكبر من الصفر.`);
     }
     if (!isFiniteNonNegative(item.unitPrice) || !isFiniteNonNegative(item.discount)) {
       throw new FinancialValidationError(`السعر والخصم للصنف (${item.productName}) يجب ألا يكونا قيمتين سالبتين.`);
@@ -68,15 +71,31 @@ export function validateSalesInvoiceInput(params: {
   }
 
   const invoiceQuantities = new Map<string, number>();
+  const invoiceLineMap = new Map<string, { productId: string; baseQty: number }>();
   for (const item of invoice.items) {
-    invoiceQuantities.set(item.productId, (invoiceQuantities.get(item.productId) || 0) + item.quantity);
+    const effectiveBaseQty = item.baseQuantity ?? item.quantity;
+    invoiceQuantities.set(item.productId, (invoiceQuantities.get(item.productId) || 0) + effectiveBaseQty);
+    if (item.id) {
+      invoiceLineMap.set(item.id, { productId: item.productId, baseQty: effectiveBaseQty });
+    }
   }
   const deductionQuantities = new Map<string, number>();
+  const deductionByItemId = new Map<string, number>();
   for (const deduction of stockDeductions) {
     deductionQuantities.set(
       deduction.productId,
       (deductionQuantities.get(deduction.productId) || 0) + deduction.quantity
     );
+    if (deduction.invoiceItemId) {
+      const targetLine = invoiceLineMap.get(deduction.invoiceItemId);
+      if (!targetLine || targetLine.productId !== deduction.productId) {
+        throw new FinancialValidationError('معرف سطر الفاتورة في خصم المخزون لا يطابق بنود الفاتورة.');
+      }
+      deductionByItemId.set(
+        deduction.invoiceItemId,
+        (deductionByItemId.get(deduction.invoiceItemId) || 0) + deduction.quantity
+      );
+    }
   }
   if (invoiceQuantities.size !== deductionQuantities.size) {
     throw new FinancialValidationError('بنود الفاتورة لا تطابق بنود خصم المخزون.');
@@ -84,6 +103,14 @@ export function validateSalesInvoiceInput(params: {
   for (const [productId, quantity] of invoiceQuantities) {
     if (Math.abs(quantity - (deductionQuantities.get(productId) || 0)) > 0.0001) {
       throw new FinancialValidationError(`كمية الصنف (${productId}) لا تطابق كمية خصم المخزون.`);
+    }
+  }
+  if (deductionByItemId.size > 0) {
+    for (const [itemId, line] of invoiceLineMap) {
+      const dedSum = deductionByItemId.get(itemId);
+      if (dedSum !== undefined && Math.abs(line.baseQty - dedSum) > 0.0001) {
+        throw new FinancialValidationError(`كمية السطر (${itemId}) لا تطابق كمية خصم المخزون.`);
+      }
     }
   }
 
@@ -142,7 +169,9 @@ export function validateSalesInvoiceInput(params: {
 export function validatePurchaseInvoiceInput(params: {
   invoice: Invoice;
   itemsWithBatches: Array<{
+    invoiceItemId?: string;
     productId: string;
+    unitId?: string;
     quantity: number;
     costPrice: number;
     batchNumber?: string;

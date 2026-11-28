@@ -34,6 +34,7 @@ import { useLiveProducts, useLiveParties, useLiveCashBoxes, useLiveInvoices } fr
 import {
   Product,
   ProductBatch,
+  ProductUnit,
   Party,
   ActivityId,
   Invoice,
@@ -56,6 +57,11 @@ import {
   PosFamilyCard,
   resolvePosScanTarget,
 } from '../../utils/posCatalog';
+import {
+  computeSuggestedUnitPrice,
+  formatUnitConversionSummary,
+  resolveUnitConversionToBase,
+} from '../../../electron/sqlite/unit-conversion.mjs';
 
 interface POSProps {
   selectedActivity: ActivityId | 'all';
@@ -66,6 +72,10 @@ interface POSProps {
 interface CartItem extends InvoiceItem {
   maxStock: number;
   availableBatches?: ProductBatch[];
+  availableUnits?: ProductUnit[];
+  baseUnitName: string;
+  baseSellPrice: number;
+  basePurchasePrice: number;
 }
 
 export const PointOfSale: React.FC<POSProps> = ({
@@ -122,7 +132,11 @@ export const PointOfSale: React.FC<POSProps> = ({
   const [invoiceNotes, setInvoiceNotes] = useState<string>('');
   const [completedInvoice, setCompletedInvoice] = useState<Invoice | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
-  const [batchPickerProduct, setBatchPickerProduct] = useState<Product | null>(null);
+  const [batchPickerTarget, setBatchPickerTarget] = useState<{
+    product: Product;
+    entry?: ProductCatalogEntry;
+    preferredUnit?: ProductUnit;
+  } | null>(null);
   const [activeFamilyCard, setActiveFamilyCard] = useState<PosFamilyCard | null>(null);
   const [catalogEntries, setCatalogEntries] = useState<ProductCatalogEntry[]>([]);
   const [families, setFamilies] = useState<ProductFamily[]>([]);
@@ -224,11 +238,49 @@ export const PointOfSale: React.FC<POSProps> = ({
     ? catalogView.directSearchEntries.length
     : catalogView.familyCards.length + catalogView.standaloneEntries.length;
 
+  const validateCartStockForCandidate = (
+    cartItems: CartItem[],
+    product: Product,
+    batchNumber: string | undefined,
+    candidateBaseQty: number,
+    excludeIndex: number = -1
+  ): string | null => {
+    const otherProductBaseQty = cartItems.reduce(
+      (sum, c, idx) =>
+        idx !== excludeIndex && c.productId === product.id
+          ? roundMoney(sum + Number(c.baseQuantity ?? c.quantity ?? 0), 4)
+          : sum,
+      0
+    );
+    const totalProductBaseQty = roundMoney(otherProductBaseQty + candidateBaseQty, 4);
+    if (totalProductBaseQty > Number(product.currentStock || 0) + 0.0001) {
+      return `الكمية المطلوبة بالوحدة الأساسية (${totalProductBaseQty} ${product.unit}) تتجاوز المتاح في المخزن (${product.currentStock} ${product.unit}).`;
+    }
+    if (batchNumber) {
+      const targetBatch = (product.batches || []).find((b) => b.batchNumber === batchNumber);
+      if (targetBatch) {
+        const otherBatchBaseQty = cartItems.reduce(
+          (sum, c, idx) =>
+            idx !== excludeIndex && c.productId === product.id && c.batchNumber === batchNumber
+              ? roundMoney(sum + Number(c.baseQuantity ?? c.quantity ?? 0), 4)
+              : sum,
+          0
+        );
+        const totalBatchBaseQty = roundMoney(otherBatchBaseQty + candidateBaseQty, 4);
+        if (totalBatchBaseQty > Number(targetBatch.quantity || 0) + 0.0001) {
+          return `الكمية المطلوبة من التشغيلة (${batchNumber}) بالوحدة الأساسية (${totalBatchBaseQty} ${product.unit}) تتجاوز رصيد التشغيلة (${targetBatch.quantity} ${product.unit}).`;
+        }
+      }
+    }
+    return null;
+  };
+
   // إضافة صنف للسلة
   const addToCart = (
     product: Product,
     batch?: ProductBatch,
-    catalogEntry?: ProductCatalogEntry
+    catalogEntry?: ProductCatalogEntry,
+    preferredUnit?: ProductUnit
   ) => {
     if (product.isActive === false) {
       setErrorMessage(`الصنف (${product.nameAr}) مؤرشف ومعطل ولا يمكن بيعه.`);
@@ -238,63 +290,146 @@ export const PointOfSale: React.FC<POSProps> = ({
       setErrorMessage(`الصنف (${product.nameAr}) رصيده نافد بالمستودع.`);
       return;
     }
+    if (batch && inventory.isBatchExpired(batch.expiryDate)) {
+      setErrorMessage(
+        `محظور بيع التشغيلة (${batch.batchNumber}) لأنها منتهية الصلاحية بتاريخ ${batch.expiryDate}!`
+      );
+      return;
+    }
 
     const resolvedEntry =
       catalogEntry || effectiveCatalogEntries.find((entry) => entry.product.id === product.id);
+    const activeUnits = (resolvedEntry?.units || []).filter((u) => u.isActive !== false);
+    const chosenUnit =
+      preferredUnit && preferredUnit.isActive !== false ? preferredUnit : undefined;
+    const targetUnitKey = chosenUnit ? chosenUnit.id : 'BASE';
+    const numerator = chosenUnit ? chosenUnit.baseUnitsNumerator : 1;
+    const denominator = chosenUnit ? chosenUnit.baseUnitsDenominator : 1;
+    const unitName = chosenUnit ? chosenUnit.nameAr : product.unit;
+    const decimalPlaces = getActiveCurrencyConfig().decimalPlaces ?? 2;
     const variantSnapshot = buildVariantInvoiceItemSnapshot(resolvedEntry);
 
-    setErrorMessage(null);
+    const existingIndex = cart.findIndex(
+      (item) =>
+        item.productId === product.id &&
+        (item.batchNumber || '') === (batch?.batchNumber || '') &&
+        (item.unitId || 'BASE') === targetUnitKey
+    );
 
-    setCart((prevCart) => {
-      const existingIndex = prevCart.findIndex(
-        (item) => item.productId === product.id && item.batchNumber === (batch ? batch.batchNumber : undefined)
-      );
-
-      if (existingIndex !== -1) {
-        const item = prevCart[existingIndex];
-        const newQty = item.quantity + 1;
-        if (newQty > item.maxStock) {
-          setErrorMessage(`الكمية القصوى المتاحة هي ${item.maxStock}`);
-          return prevCart;
-        }
-        const updated = [...prevCart];
-        updated[existingIndex] = {
-          ...item,
+    if (existingIndex !== -1) {
+      const existing = cart[existingIndex];
+      const newQty = roundMoney(existing.quantity + 1, 4);
+      let conv;
+      try {
+        conv = resolveUnitConversionToBase({
           quantity: newQty,
-          total: Number((newQty * item.unitPrice - item.discount).toFixed(2)),
-        };
-        return updated;
+          numerator: existing.conversionNumeratorSnapshot || numerator,
+          denominator: existing.conversionDenominatorSnapshot || denominator,
+          unitName: existing.unit,
+        });
+      } catch (err: unknown) {
+        setErrorMessage(err instanceof Error ? err.message : 'تعذر تحويل الكمية للوحدة المختارة.');
+        return;
       }
 
-      if (batch && inventory.isBatchExpired(batch.expiryDate)) {
-        setErrorMessage(`محظور بيع التشغيلة (${batch.batchNumber}) لأنها منتهية الصلاحية بتاريخ ${batch.expiryDate}!`);
-        return prevCart;
+      const stockErr = validateCartStockForCandidate(
+        cart,
+        product,
+        batch?.batchNumber,
+        conv.baseQuantity,
+        existingIndex
+      );
+      if (stockErr) {
+        setErrorMessage(stockErr);
+        return;
       }
 
-      const availableStock = batch ? batch.quantity : product.currentStock;
-      const newItem: CartItem = {
-        id: storage.generateUUID(),
-        productId: product.id,
-        productName: product.nameAr,
-        productCode: product.code,
-        batchNumber: batch?.batchNumber,
-        expiryDate: batch?.expiryDate,
-        oemNumber: product.oemNumber,
-        ...variantSnapshot,
-        unit: product.unit,
+      setErrorMessage(null);
+      setCart((prevCart) =>
+        prevCart.map((it, idx) =>
+          idx === existingIndex
+            ? {
+                ...it,
+                quantity: newQty,
+                baseQuantity: conv.baseQuantity,
+                total: roundMoney(newQty * it.unitPrice - it.discount, decimalPlaces),
+              }
+            : it
+        )
+      );
+      return;
+    }
+
+    let initialConv;
+    try {
+      initialConv = resolveUnitConversionToBase({
         quantity: 1,
-        unitPrice: product.sellPrice,
-        discount: 0,
-        total: product.sellPrice,
-        maxStock: availableStock,
-        availableBatches: product.batches,
-      };
+        numerator,
+        denominator,
+        unitName,
+      });
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'تعذر تحويل الكمية للوحدة المختارة.');
+      return;
+    }
 
-      return [...prevCart, newItem];
-    });
+    const stockErr = validateCartStockForCandidate(
+      cart,
+      product,
+      batch?.batchNumber,
+      initialConv.baseQuantity
+    );
+    if (stockErr) {
+      setErrorMessage(stockErr);
+      return;
+    }
+
+    const suggestedUnitPrice = chosenUnit
+      ? computeSuggestedUnitPrice({
+          basePrice: product.sellPrice,
+          numerator,
+          denominator,
+          decimalPlaces,
+        })
+      : product.sellPrice;
+
+    setErrorMessage(null);
+    const availableStock = batch ? batch.quantity : product.currentStock;
+    const newItem: CartItem = {
+      id: storage.generateUUID(),
+      productId: product.id,
+      productName: product.nameAr,
+      productCode: product.code,
+      batchNumber: batch?.batchNumber,
+      expiryDate: batch?.expiryDate,
+      oemNumber: product.oemNumber,
+      ...variantSnapshot,
+      unit: unitName,
+      unitId: targetUnitKey,
+      unitNameSnapshot: unitName,
+      baseUnitNameSnapshot: product.unit,
+      conversionNumeratorSnapshot: numerator,
+      conversionDenominatorSnapshot: denominator,
+      baseQuantity: initialConv.baseQuantity,
+      quantity: 1,
+      unitPrice: suggestedUnitPrice,
+      discount: 0,
+      total: suggestedUnitPrice,
+      maxStock: availableStock,
+      availableBatches: product.batches,
+      availableUnits: activeUnits,
+      baseUnitName: product.unit,
+      baseSellPrice: product.sellPrice,
+      basePurchasePrice: product.purchasePrice,
+    };
+
+    setCart((prevCart) => [...prevCart, newItem]);
   };
 
-  const handleSelectCatalogEntry = (entry: ProductCatalogEntry) => {
+  const handleSelectCatalogEntry = (
+    entry: ProductCatalogEntry,
+    preferredUnit?: ProductUnit
+  ) => {
     const saleability = getSkuSaleabilityStatus(entry);
     if (!saleability.sellable) {
       setErrorMessage(saleability.message || `الصنف (${entry.product.nameAr}) غير متاح للبيع.`);
@@ -303,14 +438,14 @@ export const PointOfSale: React.FC<POSProps> = ({
     const p = entry.product;
     if (p.batches && p.batches.length > 1) {
       setErrorMessage(null);
-      setBatchPickerProduct(p);
+      setBatchPickerTarget({ product: p, entry, preferredUnit });
       return;
     }
     if (p.batches && p.batches.length === 1) {
-      addToCart(p, p.batches[0], entry);
+      addToCart(p, p.batches[0], entry, preferredUnit);
       return;
     }
-    addToCart(p, undefined, entry);
+    addToCart(p, undefined, entry, preferredUnit);
   };
 
   // معالجة الضغط على Enter أو زر المسح في حقل الباركود
@@ -327,7 +462,10 @@ export const PointOfSale: React.FC<POSProps> = ({
         );
         return;
       }
-      handleSelectCatalogEntry(scanMatch.entry);
+      handleSelectCatalogEntry(
+        scanMatch.entry,
+        scanMatch.matchedBy === 'UNIT_BARCODE' ? scanMatch.matchedUnit : undefined
+      );
       setSearchQuery('');
       return;
     }
@@ -344,23 +482,170 @@ export const PointOfSale: React.FC<POSProps> = ({
   };
 
   const updateQuantity = (index: number, newQty: number) => {
-    setCart((prev) => {
-      const updated = [...prev];
-      const item = updated[index];
-      if (newQty <= 0) {
-        return updated.filter((_, i) => i !== index);
+    const item = cart[index];
+    if (!item) return;
+    if (!Number.isFinite(newQty) || newQty <= 0) {
+      setErrorMessage(null);
+      setCart((prev) => prev.filter((_, i) => i !== index));
+      return;
+    }
+    const roundedQty = roundMoney(newQty, 4);
+    let conv;
+    try {
+      conv = resolveUnitConversionToBase({
+        quantity: roundedQty,
+        numerator: item.conversionNumeratorSnapshot || 1,
+        denominator: item.conversionDenominatorSnapshot || 1,
+        unitName: item.unit,
+      });
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'كمية غير صالحة لهذه الوحدة.');
+      return;
+    }
+
+    const product = products.find((p) => p.id === item.productId);
+    if (product) {
+      const stockErr = validateCartStockForCandidate(
+        cart,
+        product,
+        item.batchNumber,
+        conv.baseQuantity,
+        index
+      );
+      if (stockErr) {
+        setErrorMessage(stockErr);
+        return;
       }
-      if (newQty > item.maxStock) {
-        setErrorMessage(`الكمية المتاحة في المخزن هي ${item.maxStock} فقط.`);
-        return prev;
+    }
+
+    const decimalPlaces = getActiveCurrencyConfig().decimalPlaces ?? 2;
+    setErrorMessage(null);
+    setCart((prev) =>
+      prev.map((it, i) =>
+        i === index
+          ? {
+              ...it,
+              quantity: conv.enteredQuantity,
+              baseQuantity: conv.baseQuantity,
+              total: roundMoney(conv.enteredQuantity * it.unitPrice - it.discount, decimalPlaces),
+            }
+          : it
+      )
+    );
+  };
+
+  const changeCartItemUnit = (index: number, nextUnitId: string) => {
+    const item = cart[index];
+    if (!item) return;
+    const currentUnitId = item.unitId || 'BASE';
+    if (nextUnitId === currentUnitId) return;
+
+    const product = products.find((p) => p.id === item.productId);
+    const chosenUnit =
+      nextUnitId === 'BASE'
+        ? undefined
+        : (item.availableUnits || []).find((u) => u.id === nextUnitId && u.isActive !== false);
+    if (nextUnitId !== 'BASE' && !chosenUnit) {
+      setErrorMessage('الوحدة المختارة غير متاحة أو معطلة.');
+      return;
+    }
+
+    const numerator = chosenUnit ? chosenUnit.baseUnitsNumerator : 1;
+    const denominator = chosenUnit ? chosenUnit.baseUnitsDenominator : 1;
+    const unitName = chosenUnit ? chosenUnit.nameAr : item.baseUnitName;
+    const decimalPlaces = getActiveCurrencyConfig().decimalPlaces ?? 2;
+
+    const duplicateIdx = cart.findIndex(
+      (c, i) =>
+        i !== index &&
+        c.productId === item.productId &&
+        (c.batchNumber || '') === (item.batchNumber || '') &&
+        (c.unitId || 'BASE') === nextUnitId
+    );
+    const targetQuantity =
+      duplicateIdx !== -1 ? roundMoney(cart[duplicateIdx].quantity + item.quantity, 4) : item.quantity;
+
+    let conv;
+    try {
+      conv = resolveUnitConversionToBase({
+        quantity: targetQuantity,
+        numerator,
+        denominator,
+        unitName,
+      });
+    } catch (err: unknown) {
+      setErrorMessage(err instanceof Error ? err.message : 'تعذر تحويل الكمية إلى الوحدة المختارة.');
+      return;
+    }
+
+    if (product) {
+      // When merging into duplicateIdx, exclude both index and duplicateIdx before checking total candidate baseQty
+      const filteredCart =
+        duplicateIdx !== -1
+          ? cart.filter((_, i) => i !== index && i !== duplicateIdx)
+          : cart.filter((_, i) => i !== index);
+      const stockErr = validateCartStockForCandidate(
+        filteredCart,
+        product,
+        item.batchNumber,
+        conv.baseQuantity
+      );
+      if (stockErr) {
+        setErrorMessage(stockErr);
+        return;
       }
-      item.quantity = newQty;
-      item.total = Number((newQty * item.unitPrice - item.discount).toFixed(2));
-      return updated;
-    });
+    }
+
+    const newUnitPrice = chosenUnit
+      ? computeSuggestedUnitPrice({
+          basePrice: item.baseSellPrice,
+          numerator,
+          denominator,
+          decimalPlaces,
+        })
+      : item.baseSellPrice;
+
+    setErrorMessage(null);
+    if (duplicateIdx !== -1) {
+      setCart((prev) =>
+        prev
+          .map((it, i) =>
+            i === duplicateIdx
+              ? {
+                  ...it,
+                  quantity: conv.enteredQuantity,
+                  baseQuantity: conv.baseQuantity,
+                  total: roundMoney(conv.enteredQuantity * it.unitPrice - it.discount, decimalPlaces),
+                }
+              : it
+          )
+          .filter((_, i) => i !== index)
+      );
+      return;
+    }
+
+    setCart((prev) =>
+      prev.map((it, i) =>
+        i === index
+          ? {
+              ...it,
+              unit: unitName,
+              unitId: nextUnitId,
+              unitNameSnapshot: unitName,
+              baseUnitNameSnapshot: item.baseUnitName,
+              conversionNumeratorSnapshot: numerator,
+              conversionDenominatorSnapshot: denominator,
+              baseQuantity: conv.baseQuantity,
+              unitPrice: newUnitPrice,
+              total: roundMoney(conv.enteredQuantity * newUnitPrice - it.discount, decimalPlaces),
+            }
+          : it
+      )
+    );
   };
 
   const removeFromCart = (index: number) => {
+    setErrorMessage(null);
     setCart((prev) => prev.filter((_, i) => i !== index));
   };
 
@@ -445,16 +730,17 @@ export const PointOfSale: React.FC<POSProps> = ({
     setErrorMessage(null);
     setIsSubmitting(true);
 
-    // 1. حساب تكلفة البضاعة المباعة التقديرية
+    // 1. حساب تكلفة البضاعة المباعة التقديرية بالوحدة الأساسية
     let totalCogs = 0;
     for (const item of cart) {
       const prod = products.find((p) => p.id === item.productId);
       if (prod) {
+        const baseQty = item.baseQuantity ?? item.quantity;
         if (item.batchNumber && prod.batches) {
           const b = prod.batches.find((batch) => batch.batchNumber === item.batchNumber);
-          totalCogs += item.quantity * (b?.costPrice || prod.purchasePrice);
+          totalCogs += baseQty * (b?.costPrice || prod.purchasePrice);
         } else {
-          totalCogs += item.quantity * prod.purchasePrice;
+          totalCogs += baseQty * prod.purchasePrice;
         }
       }
     }
@@ -476,7 +762,7 @@ export const PointOfSale: React.FC<POSProps> = ({
       partyName: finalPartyName,
       date: formatLocalDate(),
       dueDate: paymentMethod === 'CREDIT' && dueDate ? dueDate : undefined,
-      items: cart,
+      items: cart.map(({ maxStock: _ms, availableBatches: _ab, availableUnits: _au, baseUnitName: _bun, baseSellPrice: _bsp, basePurchasePrice: _bpp, ...invoiceItem }) => invoiceItem),
       subtotal,
       discount: discountAmount,
       tax: 0,
@@ -493,8 +779,9 @@ export const PointOfSale: React.FC<POSProps> = ({
         invoice: newInvoice,
         totalCogs: Number(totalCogs.toFixed(2)),
         stockDeductions: cart.map((item) => ({
+          invoiceItemId: item.id,
           productId: item.productId,
-          quantity: item.quantity,
+          quantity: item.baseQuantity ?? item.quantity,
           batchNumber: item.batchNumber,
         })),
         applyAdvanceAmount: appliedAdvanceAmount > 0 ? appliedAdvanceAmount : undefined,
@@ -542,60 +829,55 @@ export const PointOfSale: React.FC<POSProps> = ({
         i.originalInvoiceId === selectedOriginalSale.id &&
         i.status !== 'REVERSED'
     );
-    const returnedByKey = new Map<string, number>();
-    const returnedByProduct = new Map<string, number>();
+    const origLines = selectedOriginalSale.items || [];
+    const returnedByLineId = new Map<string, number>();
+    const returnedLegacyByKey = new Map<string, number>();
+
     for (const r of priorReturns) {
       for (const it of r.items || []) {
-        const key = `${it.productId}::${it.batchNumber || ''}`;
-        returnedByKey.set(key, roundMoney((returnedByKey.get(key) || 0) + it.quantity, 4));
-        returnedByProduct.set(
-          it.productId,
-          roundMoney((returnedByProduct.get(it.productId) || 0) + it.quantity, 4)
-        );
+        if (it.originalInvoiceItemId) {
+          returnedByLineId.set(
+            it.originalInvoiceItemId,
+            roundMoney((returnedByLineId.get(it.originalInvoiceItemId) || 0) + it.quantity, 4)
+          );
+        } else {
+          const legacyKey = `${it.productId}::${it.batchNumber || ''}`;
+          returnedLegacyByKey.set(
+            legacyKey,
+            roundMoney((returnedLegacyByKey.get(legacyKey) || 0) + it.quantity, 4)
+          );
+        }
       }
     }
 
-    const grouped = new Map<
-      string,
-      {
-        key: string;
-        productId: string;
-        productName: string;
-        batchNumber?: string;
-        unit: string;
-        soldQty: number;
-        unitPrice: number;
-        remainingQty: number;
-      }
-    >();
-
-    for (const it of selectedOriginalSale.items || []) {
-      const key = `${it.productId}::${it.batchNumber || ''}`;
-      const prev = grouped.get(key);
-      if (prev) {
-        prev.soldQty = roundMoney(prev.soldQty + it.quantity, 4);
-      } else {
-        grouped.set(key, {
-          key,
-          productId: it.productId,
-          productName: it.productName,
-          batchNumber: it.batchNumber,
-          unit: it.unit,
-          soldQty: it.quantity,
-          unitPrice: it.unitPrice,
-          remainingQty: it.quantity,
-        });
-      }
+    const countByLegacyKey = new Map<string, number>();
+    for (const it of origLines) {
+      const legacyKey = `${it.productId}::${it.batchNumber || ''}`;
+      countByLegacyKey.set(legacyKey, (countByLegacyKey.get(legacyKey) || 0) + 1);
     }
 
-    return Array.from(grouped.values()).map((line) => {
-      const usedKey = returnedByKey.get(line.key) || 0;
-      const usedProd = returnedByProduct.get(line.productId) || 0;
-      const alreadyReturned = Math.max(usedKey, line.batchNumber ? usedKey : usedProd);
+    return origLines.map((it, idx) => {
+      const key = it.id || `${it.productId}::${it.batchNumber || ''}::${idx}`;
+      const legacyKey = `${it.productId}::${it.batchNumber || ''}`;
+      const byId = it.id ? returnedByLineId.get(it.id) || 0 : 0;
+      const legacyOnly =
+        (countByLegacyKey.get(legacyKey) || 0) === 1
+          ? returnedLegacyByKey.get(legacyKey) || 0
+          : 0;
+      const alreadyReturned = roundMoney(byId + legacyOnly, 4);
+      const unitSummary = formatUnitConversionSummary(it);
       return {
-        ...line,
+        key,
+        originalInvoiceItemId: it.id,
+        productId: it.productId,
+        productName: it.productName,
+        batchNumber: it.batchNumber,
+        unit: it.unit,
+        unitSummary,
+        soldQty: it.quantity,
+        unitPrice: it.unitPrice,
         alreadyReturned,
-        remainingQty: Math.max(0, roundMoney(line.soldQty - alreadyReturned, 4)),
+        remainingQty: Math.max(0, roundMoney(it.quantity - alreadyReturned, 4)),
       };
     });
   }, [selectedOriginalSale, allInvoices]);
@@ -629,6 +911,7 @@ export const PointOfSale: React.FC<POSProps> = ({
 
     const returnItemsPayload = returnableLines
       .map((line) => ({
+        originalInvoiceItemId: line.originalInvoiceItemId,
         productId: line.productId,
         quantity: roundMoney(Number(returnQuantities[line.key]) || 0, 4),
         batchNumber: line.batchNumber,
@@ -653,7 +936,8 @@ export const PointOfSale: React.FC<POSProps> = ({
     try {
       const res = await dataService.createSalesReturnAtomic({
         originalInvoiceId: selectedOriginalSale.id,
-        items: returnItemsPayload.map(({ productId, quantity, batchNumber }) => ({
+        items: returnItemsPayload.map(({ originalInvoiceItemId, productId, quantity, batchNumber }) => ({
+          originalInvoiceItemId,
           productId,
           quantity,
           batchNumber,
@@ -1103,61 +1387,87 @@ export const PointOfSale: React.FC<POSProps> = ({
                 <p className="text-xs">السلة فارغة، اختر أصنافاً من القائمة أو امسح الباركود</p>
               </div>
             ) : (
-              cart.map((item, index) => (
-                <div key={item.id} className="py-2.5 flex items-center justify-between gap-3 text-xs">
-                  <div className="flex-1 min-w-0">
-                    <div className="font-bold text-slate-900 truncate">{item.productName}</div>
-                    {(item.variantSummary || item.brandNameSnapshot) && (
-                      <div className="text-[10.5px] text-slate-600 truncate">
-                        {[item.variantSummary, item.brandNameSnapshot].filter(Boolean).join(' · ')}
+              cart.map((item, index) => {
+                const unitSummary = formatUnitConversionSummary(item);
+                const hasAlternateUnits = Boolean(item.availableUnits && item.availableUnits.length > 0);
+                return (
+                  <div key={item.id} className="py-2.5 flex items-center justify-between gap-2.5 text-xs">
+                    <div className="flex-1 min-w-0">
+                      <div className="font-bold text-slate-900 truncate">{item.productName}</div>
+                      {(item.variantSummary || item.brandNameSnapshot) && (
+                        <div className="text-[10.5px] text-slate-600 truncate">
+                          {[item.variantSummary, item.brandNameSnapshot].filter(Boolean).join(' · ')}
+                        </div>
+                      )}
+                      <div className="text-[11px] text-slate-500 font-mono">
+                        {item.productCode} · {item.unitPrice.toFixed(2)} {currencySymbol} / {item.unit}
+                        {item.batchNumber && (
+                          <span className="text-emerald-700 mr-1.5 font-sans">
+                            (تشغيلة: {item.batchNumber})
+                          </span>
+                        )}
                       </div>
-                    )}
-                    <div className="text-[11px] text-slate-500 font-mono">
-                      {item.productCode} · {item.unitPrice.toFixed(2)} {currencySymbol} / {item.unit}
-                      {item.batchNumber && (
-                        <span className="text-emerald-700 mr-1.5 font-sans">
-                          (تشغيلة: {item.batchNumber})
-                        </span>
+                      {hasAlternateUnits && (
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                          <select
+                            aria-label={`وحدة ${item.productName}`}
+                            value={item.unitId || 'BASE'}
+                            onChange={(e) => changeCartItemUnit(index, e.target.value)}
+                            className="px-2 py-0.5 text-[11px] font-semibold bg-slate-50 border border-slate-300 rounded text-slate-800 focus:outline-none focus:ring-1 focus:ring-emerald-500"
+                          >
+                            <option value="BASE">{item.baseUnitName} (أساسية)</option>
+                            {item.availableUnits!.map((u) => (
+                              <option key={u.id} value={u.id}>
+                                {u.nameAr} ({u.baseUnitsDenominator === 1 ? u.baseUnitsNumerator : `${u.baseUnitsNumerator}/${u.baseUnitsDenominator}`} {item.baseUnitName})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+                      {unitSummary && (
+                        <div className="mt-0.5 text-[10px] text-emerald-700 font-medium">
+                          {unitSummary}
+                        </div>
                       )}
                     </div>
-                  </div>
 
-                  {/* Quantity Controller */}
-                  <div className="flex items-center gap-1.5 shrink-0 bg-slate-100 p-1 rounded-lg">
+                    {/* Quantity Controller */}
+                    <div className="flex items-center gap-1 shrink-0 bg-slate-100 p-1 rounded-lg">
+                      <button
+                        type="button"
+                        onClick={() => updateQuantity(index, roundMoney(item.quantity - 1, 4))}
+                        aria-label={`إنقاص كمية ${item.productName}`}
+                        className="w-5 h-5 rounded bg-white hover:bg-slate-200 flex items-center justify-center text-slate-700 transition-colors"
+                      >
+                        <Minus className="w-3 h-3" />
+                      </button>
+                      <span className="font-mono font-bold w-7 text-center">{item.quantity}</span>
+                      <button
+                        type="button"
+                        onClick={() => updateQuantity(index, roundMoney(item.quantity + 1, 4))}
+                        aria-label={`زيادة كمية ${item.productName}`}
+                        className="w-5 h-5 rounded bg-white hover:bg-slate-200 flex items-center justify-center text-slate-700 transition-colors"
+                      >
+                        <Plus className="w-3 h-3" />
+                      </button>
+                    </div>
+
+                    {/* Total item amount */}
+                    <div className="w-16 text-left font-mono tabular-nums font-bold text-slate-900 shrink-0">
+                      {item.total.toFixed(2)}
+                    </div>
+
                     <button
                       type="button"
-                      onClick={() => updateQuantity(index, item.quantity - 1)}
-                      aria-label={`إنقاص كمية ${item.productName}`}
-                      className="w-5 h-5 rounded bg-white hover:bg-slate-200 flex items-center justify-center text-slate-700 transition-colors"
+                      onClick={() => removeFromCart(index)}
+                      aria-label={`حذف ${item.productName} من السلة`}
+                      className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
                     >
-                      <Minus className="w-3 h-3" />
-                    </button>
-                    <span className="font-mono font-bold w-7 text-center">{item.quantity}</span>
-                    <button
-                      type="button"
-                      onClick={() => updateQuantity(index, item.quantity + 1)}
-                      aria-label={`زيادة كمية ${item.productName}`}
-                      className="w-5 h-5 rounded bg-white hover:bg-slate-200 flex items-center justify-center text-slate-700 transition-colors"
-                    >
-                      <Plus className="w-3 h-3" />
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
-
-                  {/* Total item amount */}
-                  <div className="w-16 text-left font-mono tabular-nums font-bold text-slate-900 shrink-0">
-                    {item.total.toFixed(2)}
-                  </div>
-
-                  <button
-                    type="button"
-                    onClick={() => removeFromCart(index)}
-                    aria-label={`حذف ${item.productName} من السلة`}
-                    className="p-1 text-slate-400 hover:text-rose-600 transition-colors"
-                  >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))
+                );
+              })
             )}
           </div>
 
@@ -1334,16 +1644,16 @@ export const PointOfSale: React.FC<POSProps> = ({
       />
 
       {/* Batch Picker Modal */}
-      {batchPickerProduct && (
+      {batchPickerTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
           <div className="relative w-full max-w-md bg-white rounded-xl shadow-2xl overflow-hidden border border-slate-200">
             <div className="flex items-center justify-between px-5 py-3.5 bg-slate-900 text-white">
               <div>
-                <h3 className="text-xs font-bold">{batchPickerProduct.nameAr}</h3>
+                <h3 className="text-xs font-bold">{batchPickerTarget.product.nameAr}</h3>
                 <p className="text-[10px] text-slate-400">اختر التشغيلة المطلوبة للبيع</p>
               </div>
               <button
-                onClick={() => setBatchPickerProduct(null)}
+                onClick={() => setBatchPickerTarget(null)}
                 aria-label="إغلاق نافذة اختيار التشغيلة"
                 className="text-slate-400 hover:text-white"
               >
@@ -1354,8 +1664,13 @@ export const PointOfSale: React.FC<POSProps> = ({
             <div className="p-4 space-y-2 max-h-72 overflow-y-auto text-xs">
               <button
                 onClick={() => {
-                  addToCart(batchPickerProduct);
-                  setBatchPickerProduct(null);
+                  addToCart(
+                    batchPickerTarget.product,
+                    undefined,
+                    batchPickerTarget.entry,
+                    batchPickerTarget.preferredUnit
+                  );
+                  setBatchPickerTarget(null);
                 }}
                 className="w-full p-2.5 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 rounded-lg text-emerald-900 font-bold text-right flex items-center justify-between transition-colors"
               >
@@ -1365,7 +1680,7 @@ export const PointOfSale: React.FC<POSProps> = ({
 
               <div className="text-[11px] font-semibold text-slate-500 pt-1">أو اختر تشغيلة محددة:</div>
 
-              {batchPickerProduct.batches?.map((batch) => {
+              {batchPickerTarget.product.batches?.map((batch) => {
                 const isExpired = inventory.isBatchExpired(batch.expiryDate);
                 const isOutOfStock = batch.quantity <= 0;
                 return (
@@ -1375,8 +1690,13 @@ export const PointOfSale: React.FC<POSProps> = ({
                     disabled={isExpired || isOutOfStock}
                     onClick={() => {
                       if (isExpired || isOutOfStock) return;
-                      addToCart(batchPickerProduct, batch);
-                      setBatchPickerProduct(null);
+                      addToCart(
+                        batchPickerTarget.product,
+                        batch,
+                        batchPickerTarget.entry,
+                        batchPickerTarget.preferredUnit
+                      );
+                      setBatchPickerTarget(null);
                     }}
                     className={`w-full p-2.5 rounded-lg border text-right transition-all ${
                       isExpired
@@ -1395,7 +1715,7 @@ export const PointOfSale: React.FC<POSProps> = ({
                         </div>
                       </div>
                       <div className="text-left font-mono font-bold text-emerald-800">
-                        {batch.quantity} {batchPickerProduct.unit}
+                        {batch.quantity} {batchPickerTarget.product.unit}
                       </div>
                     </div>
                   </button>
@@ -1538,6 +1858,11 @@ export const PointOfSale: React.FC<POSProps> = ({
                           <tr key={line.key}>
                             <td className="py-2 px-3">
                               <div className="font-bold text-slate-900">{line.productName}</div>
+                              {line.unitSummary && (
+                                <div className="text-[10px] text-emerald-700 font-medium">
+                                  {line.unitSummary}
+                                </div>
+                              )}
                               {line.batchNumber && (
                                 <div className="text-[10px] font-mono text-slate-500">تشغيلة: {line.batchNumber}</div>
                               )}

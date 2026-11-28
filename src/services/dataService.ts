@@ -99,7 +99,7 @@ export interface IDataService {
   createSalesInvoiceAtomic(params: {
     invoice: Invoice;
     totalCogs: number;
-    stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    stockDeductions: Array<{ invoiceItemId?: string; productId: string; quantity: number; batchNumber?: string }>;
     applyAdvanceAmount?: number;
     clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }>;
@@ -107,7 +107,9 @@ export interface IDataService {
   createPurchaseInvoiceAtomic(params: {
     invoice: Invoice;
     itemsWithBatches: Array<{
+      invoiceItemId?: string;
       productId: string;
+      unitId?: string;
       quantity: number;
       costPrice: number;
       batchNumber?: string;
@@ -119,7 +121,7 @@ export interface IDataService {
 
   createSalesReturnAtomic(params: {
     originalInvoiceId: string;
-    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    items: Array<{ originalInvoiceItemId?: string; productId: string; quantity: number; batchNumber?: string }>;
     returnReason: string;
     refundMethod: 'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE';
     cashBoxId?: string;
@@ -129,7 +131,7 @@ export interface IDataService {
 
   createPurchaseReturnAtomic(params: {
     originalInvoiceId: string;
-    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    items: Array<{ originalInvoiceItemId?: string; productId: string; quantity: number; batchNumber?: string }>;
     returnReason: string;
     refundMethod: 'AUTO' | 'AP_OFFSET' | 'CASH' | 'ADVANCE';
     cashBoxId?: string;

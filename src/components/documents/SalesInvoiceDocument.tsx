@@ -3,6 +3,7 @@ import type { Invoice, InvoiceType } from '../../types/erp';
 import type { ResolvedDocumentHeader } from '../../utils/documentBranding';
 import type { DocumentPaperSize } from '../../utils/printDocument';
 import { computeInvoiceOpenRemaining } from '../../utils/documentNotifications';
+import { formatUnitConversionSummary } from '../../../electron/sqlite/unit-conversion.mjs';
 import {
   DocumentAmountBanner,
   DocumentFooter,
@@ -146,63 +147,75 @@ export const SalesInvoiceDocument: React.FC<SalesInvoiceDocumentProps> = ({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-200">
-            {invoice.items.map((item, idx) => (
-              <tr key={item.id || idx} className={idx % 2 === 1 ? 'bg-slate-50/70' : 'bg-white'}>
-                {!isThermal && (
-                  <td className="py-2 px-2.5 text-center font-mono text-slate-500">{idx + 1}</td>
-                )}
-                <td className={isThermal ? 'py-1.5 px-1.5' : 'py-2 px-3'}>
-                  <div className="font-bold text-slate-900">{item.productName}</div>
-                  {(item.variantSummary || item.brandNameSnapshot) && (
-                    <div
-                      className={`text-slate-600 ${
-                        isThermal ? 'text-[8.5px]' : 'text-[10.5px]'
-                      }`}
-                    >
-                      {[item.variantSummary, item.brandNameSnapshot].filter(Boolean).join(' · ')}
-                    </div>
+            {invoice.items.map((item, idx) => {
+              const unitSummary = formatUnitConversionSummary(item);
+              return (
+                <tr key={item.id || idx} className={idx % 2 === 1 ? 'bg-slate-50/70' : 'bg-white'}>
+                  {!isThermal && (
+                    <td className="py-2 px-2.5 text-center font-mono text-slate-500">{idx + 1}</td>
                   )}
-                  {(item.batchNumber || item.oemNumber || item.productCode) && (
-                    <div
-                      className={`text-slate-500 font-mono ${
-                        isThermal ? 'text-[8.5px]' : 'text-[10px]'
-                      }`}
-                    >
-                      {item.productCode ? `${item.productCode}` : ''}
-                      {item.batchNumber ? `${item.productCode ? ' | ' : ''}تشغيلة: ${item.batchNumber}` : ''}
-                      {item.expiryDate ? ` | انتهاء: ${item.expiryDate}` : ''}
-                      {item.oemNumber ? ` | OEM: ${item.oemNumber}` : ''}
-                    </div>
-                  )}
-                </td>
-                <td
-                  className={`text-center font-mono tabular-nums ${
-                    isThermal ? 'py-1.5 px-1' : 'py-2 px-2.5'
-                  }`}
-                >
-                  {item.quantity} {isThermal ? '' : item.unit}
-                </td>
-                <td
-                  className={`text-center font-mono tabular-nums ${
-                    isThermal ? 'py-1.5 px-1' : 'py-2 px-2.5'
-                  }`}
-                >
-                  {Number(item.unitPrice || 0).toFixed(dec)}
-                </td>
-                {!isThermal && (
-                  <td className="py-2 px-2.5 text-center font-mono tabular-nums text-slate-600">
-                    {Number(item.discount || 0) > 0 ? Number(item.discount).toFixed(dec) : '-'}
+                  <td className={isThermal ? 'py-1.5 px-1.5' : 'py-2 px-3'}>
+                    <div className="font-bold text-slate-900">{item.productName}</div>
+                    {(item.variantSummary || item.brandNameSnapshot) && (
+                      <div
+                        className={`text-slate-600 ${
+                          isThermal ? 'text-[8.5px]' : 'text-[10.5px]'
+                        }`}
+                      >
+                        {[item.variantSummary, item.brandNameSnapshot].filter(Boolean).join(' · ')}
+                      </div>
+                    )}
+                    {unitSummary && (
+                      <div
+                        className={`text-emerald-800 font-medium ${
+                          isThermal ? 'text-[8.5px]' : 'text-[10.5px]'
+                        }`}
+                      >
+                        {unitSummary}
+                      </div>
+                    )}
+                    {(item.batchNumber || item.oemNumber || item.productCode) && (
+                      <div
+                        className={`text-slate-500 font-mono ${
+                          isThermal ? 'text-[8.5px]' : 'text-[10px]'
+                        }`}
+                      >
+                        {item.productCode ? `${item.productCode}` : ''}
+                        {item.batchNumber ? `${item.productCode ? ' | ' : ''}تشغيلة: ${item.batchNumber}` : ''}
+                        {item.expiryDate ? ` | انتهاء: ${item.expiryDate}` : ''}
+                        {item.oemNumber ? ` | OEM: ${item.oemNumber}` : ''}
+                      </div>
+                    )}
                   </td>
-                )}
-                <td
-                  className={`text-left font-mono tabular-nums font-bold text-slate-900 ${
-                    isThermal ? 'py-1.5 px-1.5' : 'py-2 px-3'
-                  }`}
-                >
-                  {Number(item.total || 0).toFixed(dec)}
-                </td>
-              </tr>
-            ))}
+                  <td
+                    className={`text-center font-mono tabular-nums whitespace-nowrap ${
+                      isThermal ? 'py-1.5 px-1' : 'py-2 px-2.5'
+                    }`}
+                  >
+                    {item.quantity} {item.unit}
+                  </td>
+                  <td
+                    className={`text-center font-mono tabular-nums ${
+                      isThermal ? 'py-1.5 px-1' : 'py-2 px-2.5'
+                    }`}
+                  >
+                    {Number(item.unitPrice || 0).toFixed(dec)}
+                  </td>
+                  {!isThermal && (
+                    <td className="py-2 px-2.5 text-center font-mono tabular-nums text-slate-600">
+                      {Number(item.discount || 0) > 0 ? Number(item.discount).toFixed(dec) : '-'}
+                    </td>
+                  )}
+                  <td
+                    className={`text-left font-mono tabular-nums font-bold text-slate-900 ${
+                      isThermal ? 'py-1.5 px-1.5' : 'py-2 px-3'
+                    }`}
+                  >
+                    {Number(item.total || 0).toFixed(dec)}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>

@@ -28,7 +28,9 @@ test('PVAR-004B-1 migrates SQLite v4 to v5 and enforces alternate-unit ownership
 
     const runtime = await openErpDatabase({ userDataPath });
     const database = runtime.database;
-    assert.equal(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 5);
+    const maxVersion = database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version;
+    assert.ok(maxVersion >= 5, `Expected upgraded schema version >= 5, got ${maxVersion}`);
+    assert.equal(database.prepare('SELECT version FROM schema_migrations WHERE version=5').get()?.version, 5);
     const oldProduct = database.prepare(
       'SELECT code, current_stock_decimal FROM products WHERE tenant_id=? AND id=?'
     ).get('tenant_main', 'units-product');

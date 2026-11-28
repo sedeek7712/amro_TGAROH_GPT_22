@@ -592,18 +592,23 @@ export function insertRows(database, data, options = {}) {
        normalizedInvoice.status, safeJson(normalizedInvoice)]
     );
     for (const item of row.items || []) {
+      const baseQtyDecimal =
+        item.baseQuantity !== undefined && item.baseQuantity !== null
+          ? decimal(item.baseQuantity, 'invoiceItem.baseQuantity')
+          : null;
       run(
-        'INSERT INTO invoice_items (tenant_id,invoice_id,id,product_id,quantity_decimal,unit_price_decimal,total_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)',
+        'INSERT INTO invoice_items (tenant_id,invoice_id,id,product_id,quantity_decimal,base_quantity_decimal,unit_price_decimal,total_decimal,data_json) VALUES (?,?,?,?,?,?,?,?,?)',
         [tenantId, invoiceId, requiredString(item.id,'invoiceItem.id'), requiredString(item.productId,'invoiceItem.productId'),
-         decimal(item.quantity,'invoiceItem.quantity'), decimal(item.unitPrice,'invoiceItem.unitPrice'),
+         decimal(item.quantity,'invoiceItem.quantity'), baseQtyDecimal, decimal(item.unitPrice,'invoiceItem.unitPrice'),
          decimal(item.total,'invoiceItem.total'), safeJson(item)]
       );
     }
     for (let index = 0; index < (row.stockDeductionsRecorded || []).length; index += 1) {
       const deduction = row.stockDeductionsRecorded[index];
       run(
-        'INSERT INTO invoice_stock_deductions (tenant_id,invoice_id,line_number,product_id,batch_number,quantity_decimal,unit_cost_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)',
-        [tenantId, invoiceId, index, requiredString(deduction.productId,'stockDeduction.productId'),
+        'INSERT INTO invoice_stock_deductions (tenant_id,invoice_id,line_number,invoice_item_id,product_id,batch_number,quantity_decimal,unit_cost_decimal,data_json) VALUES (?,?,?,?,?,?,?,?,?)',
+        [tenantId, invoiceId, index, deduction.invoiceItemId ? String(deduction.invoiceItemId) : null,
+         requiredString(deduction.productId,'stockDeduction.productId'),
          deduction.batchNumber || null, decimal(deduction.quantity,'stockDeduction.quantity'),
          decimal(deduction.unitCost,'stockDeduction.unitCost'), safeJson(deduction)]
       );

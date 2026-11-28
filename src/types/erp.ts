@@ -290,6 +290,13 @@ export interface InvoiceItem {
   variantAttributesSnapshot?: Record<string, string>;
   variantSummary?: string;
   unit: string;
+  unitId?: string;
+  unitNameSnapshot?: string;
+  baseUnitNameSnapshot?: string;
+  conversionNumeratorSnapshot?: number;
+  conversionDenominatorSnapshot?: number;
+  baseQuantity?: number;
+  originalInvoiceItemId?: string;
   quantity: number;
   unitPrice: number;
   discount: number;
@@ -297,6 +304,7 @@ export interface InvoiceItem {
 }
 
 export interface StockDeductionRecorded {
+  invoiceItemId?: string;
   productId: string;
   batchNumber?: string;
   expiryDate?: string;

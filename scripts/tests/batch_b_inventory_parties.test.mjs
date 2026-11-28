@@ -245,6 +245,14 @@ test('Batch B backend: products, product_batches sync, FEFO adjustment, parties,
     assert.equal(archivedProd.isActive, false);
     assert.equal(backend2.getProductById({ token: adminToken2, id: 'prod-1' }).isActive, false);
 
+    // Restore product to active before selling to test invoice-referenced deletion lock
+    const restoredProd = backend2.saveProductAtomic({
+      token: adminToken2,
+      product: { ...archivedProd, isActive: true },
+      isUpdate: true,
+    });
+    assert.equal(restoredProd.isActive, true);
+
     // Invoice-referenced product deletion must be blocked
     backend2.createSalesInvoiceAtomic({
       token: adminToken2,

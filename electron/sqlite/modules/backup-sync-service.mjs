@@ -1517,13 +1517,17 @@ export function createBackupSyncService(database, backupDirectory) {
             );
             database.prepare('DELETE FROM invoice_items WHERE tenant_id = ? AND invoice_id = ?').run(tenantId, inv.id);
             const itemStmt = database.prepare(
-              'INSERT INTO invoice_items (tenant_id,invoice_id,id,product_id,quantity_decimal,unit_price_decimal,total_decimal,data_json) VALUES (?,?,?,?,?,?,?,?)'
+              'INSERT INTO invoice_items (tenant_id,invoice_id,id,product_id,quantity_decimal,base_quantity_decimal,unit_price_decimal,total_decimal,data_json) VALUES (?,?,?,?,?,?,?,?,?)'
             );
             for (const it of inv.items) {
               const qDec = formatScaledInt(parseScaledInt(it.quantity ?? 0, QTY_SCALE, 'remoteItemQty'), QTY_SCALE);
+              const bqDec =
+                it.baseQuantity !== undefined && it.baseQuantity !== null
+                  ? formatScaledInt(parseScaledInt(it.baseQuantity, QTY_SCALE, 'remoteItemBaseQty'), QTY_SCALE)
+                  : null;
               const uDec = formatScaledInt(parseScaledInt(it.unitPrice ?? 0, MONEY_SCALE, 'remoteItemPrice'), MONEY_SCALE);
               const tDec = formatScaledInt(parseScaledInt(it.total ?? 0, MONEY_SCALE, 'remoteItemTotal'), MONEY_SCALE);
-              itemStmt.run(tenantId, inv.id, String(it.id || randomUUID()), String(it.productId || ''), qDec, uDec, tDec, JSON.stringify(it));
+              itemStmt.run(tenantId, inv.id, String(it.id || randomUUID()), String(it.productId || ''), qDec, bqDec, uDec, tDec, JSON.stringify(it));
             }
             break;
           }

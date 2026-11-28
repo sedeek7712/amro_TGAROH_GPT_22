@@ -162,6 +162,21 @@ export function verifySqliteFile(filePath, migrationsDirectory = DEFAULT_MIGRATI
       }
     }
 
+    const hasV6InvoiceUnitSnapshotsMigration = migrationFiles.some(
+      (m) => m.filename === '006_invoice_unit_snapshots.sql'
+    );
+    if (schemaVersion >= 6 && hasV6InvoiceUnitSnapshotsMigration) {
+      const invoiceItemCols = new Set(
+        candidateDb.prepare("PRAGMA table_info('invoice_items')").all().map((c) => c.name)
+      );
+      const deductionCols = new Set(
+        candidateDb.prepare("PRAGMA table_info('invoice_stock_deductions')").all().map((c) => c.name)
+      );
+      if (!invoiceItemCols.has('base_quantity_decimal') || !deductionCols.has('invoice_item_id')) {
+        throw new Error('النسخة الاحتياطية تفتقر إلى أعمدة لقطات تحويل الوحدات في الفواتير (v6).');
+      }
+    }
+
     const counts = tableCounts(candidateDb);
     return {
       valid: true,
@@ -410,6 +425,20 @@ export async function openErpDatabase(options) {
     for (const tableName of tablesToRequire) {
       if (!required.get(tableName)) {
         throw new Error('Required ERP table is missing after migration: ' + tableName);
+      }
+    }
+    const hasV6InvoiceUnitSnapshotsMigration = migrationFiles.some(
+      (m) => m.filename === '006_invoice_unit_snapshots.sql'
+    );
+    if (hasV6InvoiceUnitSnapshotsMigration) {
+      const invoiceItemCols = new Set(
+        database.prepare("PRAGMA table_info('invoice_items')").all().map((c) => c.name)
+      );
+      const deductionCols = new Set(
+        database.prepare("PRAGMA table_info('invoice_stock_deductions')").all().map((c) => c.name)
+      );
+      if (!invoiceItemCols.has('base_quantity_decimal') || !deductionCols.has('invoice_item_id')) {
+        throw new Error('Required v6 invoice unit snapshot columns are missing after migration');
       }
     }
 

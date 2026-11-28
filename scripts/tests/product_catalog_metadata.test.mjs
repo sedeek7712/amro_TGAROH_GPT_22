@@ -29,7 +29,9 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
     const runtime = await openErpDatabase({ userDataPath });
     const database = runtime.database;
 
-    assert.equal(database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version, 5);
+    const maxVersion = database.prepare('SELECT MAX(version) AS version FROM schema_migrations').get().version;
+    assert.ok(maxVersion >= 4, `Expected upgraded schema version >= 4, got ${maxVersion}`);
+    assert.equal(database.prepare('SELECT version FROM schema_migrations WHERE version=4').get()?.version, 4);
     for (const table of ['brands', 'product_families', 'product_catalog_meta', 'product_units']) {
       assert.ok(database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(table));
     }

@@ -24,6 +24,7 @@ import {
   computeInvoiceOpenRemaining,
   validateAmanatDocumentState,
 } from '../../utils/documentNotifications';
+import { formatUnitConversionSummary } from '../../../electron/sqlite/unit-conversion.mjs';
 
 export type SupportedDocumentPaperSize = 'A4' | '80mm' | '58mm';
 
@@ -284,12 +285,16 @@ export function buildInvoiceDocumentSnapshot(params: {
         { label: 'السعر', align: 'center', widthWeight: 1.2 },
         { label: 'الإجمالي', align: 'left', widthWeight: 1.4 },
       ],
-      rows: invoice.items.map((item) => [
-        item.productName,
-        `${item.quantity} ${item.unit || ''}`.trim(),
-        Number(item.unitPrice || 0).toFixed(dec),
-        Number(item.total || 0).toFixed(dec),
-      ]),
+      rows: invoice.items.map((item) => {
+        const unitSummary = formatUnitConversionSummary(item);
+        const itemLabel = unitSummary ? `${item.productName} (${unitSummary})` : item.productName;
+        return [
+          itemLabel,
+          `${item.quantity} ${item.unit || ''}`.trim(),
+          Number(item.unitPrice || 0).toFixed(dec),
+          Number(item.total || 0).toFixed(dec),
+        ];
+      }),
     },
     totalsRows,
     notes: invoice.returnReason ? `سبب الإرجاع: ${invoice.returnReason}` : invoice.notes,

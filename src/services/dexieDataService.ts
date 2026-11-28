@@ -86,6 +86,82 @@ import {
   resolveVoucherAccountingPlan,
   toCents,
 } from '../../electron/sqlite/payment-allocation-engine.mjs';
+import {
+  computePurchaseBaseUnitCost,
+  resolveUnitConversionToBase,
+} from '../../electron/sqlite/unit-conversion.mjs';
+
+async function resolveDexieInvoiceItemUnitTx(
+  tenantId: string,
+  product: Product,
+  requestedUnitId?: string
+): Promise<{
+  unitId: string;
+  unit: string;
+  unitNameSnapshot: string;
+  baseUnitNameSnapshot: string;
+  conversionNumeratorSnapshot: number;
+  conversionDenominatorSnapshot: number;
+}> {
+  const unitId = requestedUnitId !== undefined && requestedUnitId !== null ? String(requestedUnitId).trim() : '';
+  if (!unitId || unitId === 'BASE') {
+    return {
+      unitId: 'BASE',
+      unit: product.unit,
+      unitNameSnapshot: product.unit,
+      baseUnitNameSnapshot: product.unit,
+      conversionNumeratorSnapshot: 1,
+      conversionDenominatorSnapshot: 1,
+    };
+  }
+  const unitRow = await db.productUnits.get(unitId);
+  if (!unitRow || unitRow.tenantId !== tenantId || unitRow.productId !== product.id) {
+    throw new FinancialValidationError(`الوحدة البديلة المحددة غير صالحة أو لا تنتمي للصنف (${product.nameAr}).`);
+  }
+  if (unitRow.isActive === false) {
+    throw new FinancialValidationError(
+      `الوحدة البديلة (${unitRow.nameAr}) للصنف (${product.nameAr}) معطلة ولا يمكن استخدامها في فواتير جديدة.`
+    );
+  }
+  return {
+    unitId: unitRow.id,
+    unit: unitRow.nameAr,
+    unitNameSnapshot: unitRow.nameAr,
+    baseUnitNameSnapshot: product.unit,
+    conversionNumeratorSnapshot: unitRow.baseUnitsNumerator,
+    conversionDenominatorSnapshot: unitRow.baseUnitsDenominator,
+  };
+}
+
+function resolveDexieOriginalInvoiceLineForReturn(
+  origItems: InvoiceItem[],
+  reqItem: { originalInvoiceItemId?: string; productId: string; batchNumber?: string },
+  docLabel: string
+): InvoiceItem {
+  const reqItemId = reqItem.originalInvoiceItemId ? String(reqItem.originalInvoiceItemId).trim() : '';
+  if (reqItemId) {
+    const exact = origItems.find((it) => it.id === reqItemId);
+    if (!exact || exact.productId !== reqItem.productId) {
+      throw new FinancialValidationError(`بند الفاتورة الأصلية (${reqItemId}) غير موجود أو لا يطابق الصنف.`);
+    }
+    if (reqItem.batchNumber && exact.batchNumber && exact.batchNumber !== reqItem.batchNumber) {
+      throw new FinancialValidationError(`رقم التشغيلة (${reqItem.batchNumber}) لا يطابق بند الفاتورة الأصلية المحدد.`);
+    }
+    return exact;
+  }
+  const matchingOrigLines = origItems.filter(
+    (it) => it.productId === reqItem.productId && (!reqItem.batchNumber || it.batchNumber === reqItem.batchNumber)
+  );
+  if (matchingOrigLines.length === 0) {
+    throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود ضمن بنود ${docLabel}.`);
+  }
+  if (matchingOrigLines.length > 1) {
+    throw new FinancialValidationError(
+      `توجد عدة أسطر للصنف (${matchingOrigLines[0].productName || reqItem.productId}) في ${docLabel}؛ يجب تحديد السطر المطلوب إرجاعه.`
+    );
+  }
+  return matchingOrigLines[0];
+}
 
 function validateCatalogBackupData(data: Record<string, unknown>): void {
   const readRows = (key: string): Array<Record<string, unknown>> => {
@@ -4753,12 +4829,18 @@ export class DexieDataService implements IDataService {
   public async createSalesInvoiceAtomic(params: {
     invoice: Invoice;
     totalCogs: number;
-    stockDeductions: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    stockDeductions: Array<{ invoiceItemId?: string; productId: string; quantity: number; batchNumber?: string }>;
     applyAdvanceAmount?: number;
     clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }> {
     await this.ensureReady();
-    const { invoice, totalCogs, stockDeductions, clientRequestId } = params;
+    const { invoice: rawInvoice, totalCogs, stockDeductions, clientRequestId } = params;
+    const invoice: Invoice = {
+      ...rawInvoice,
+      items: Array.isArray(rawInvoice.items)
+        ? rawInvoice.items.map((it) => ({ ...it, id: it.id?.trim() || storage.generateUUID() }))
+        : [],
+    };
     const applyAdvance = roundMoney(params.applyAdvanceAmount ?? 0);
     const { actor, tenantId, branchId } = this.requireAuthorizedActor('pos:sale', invoice.branchId);
     assertActivityAccess(actor, invoice.activityId, 'إصدار فاتورة مبيعات');
@@ -4775,6 +4857,7 @@ export class DexieDataService implements IDataService {
         db.invoices,
         db.journalEntries,
         db.products,
+        db.productUnits,
         db.cashBoxes,
         db.accounts,
         db.parties,
@@ -4830,6 +4913,43 @@ export class DexieDataService implements IDataService {
         const targetCashBox = invoice.cashBoxId ? await db.cashBoxes.get(invoice.cashBoxId) : undefined;
         if (invoice.paidAmount > 0) this.assertCashBoxBranchAccess(actor, targetCashBox, branchId);
 
+        if (!invoice.items || invoice.items.length === 0) {
+          throw new FinancialValidationError('فاتورة المبيعات يجب أن تحتوي على صنف واحد على الأقل.');
+        }
+
+        // تحويل وحدات البيع بشكل رسمي داخل المعاملة وحفظ اللقطة التاريخية دون الوثوق بالواجهة
+        for (const item of invoice.items) {
+          if (!Number.isFinite(item.quantity) || item.quantity <= 0) {
+            throw new FinancialValidationError(`كمية الصنف (${item.productName}) يجب أن تكون أكبر من الصفر.`);
+          }
+          const lineProduct = await db.products.get(item.productId);
+          if (!lineProduct) {
+            throw new FinancialValidationError(`الصنف ذو المعرف ${item.productId} غير موجود في المستودع.`);
+          }
+          if (lineProduct.isActive === false) {
+            throw new FinancialValidationError(`الصنف (${lineProduct.nameAr}) مؤرشف ومعطل ولا يمكن بيعه.`);
+          }
+          const resolvedUnit = await resolveDexieInvoiceItemUnitTx(tenantId, lineProduct, item.unitId);
+          let conversion;
+          try {
+            conversion = resolveUnitConversionToBase({
+              quantity: item.quantity,
+              numerator: resolvedUnit.conversionNumeratorSnapshot,
+              denominator: resolvedUnit.conversionDenominatorSnapshot,
+              unitName: resolvedUnit.unitNameSnapshot,
+            });
+          } catch (err) {
+            throw new FinancialValidationError(err instanceof Error ? err.message : 'تعذر تحويل وحدة الصنف.');
+          }
+          item.unitId = resolvedUnit.unitId;
+          item.unit = resolvedUnit.unit;
+          item.unitNameSnapshot = resolvedUnit.unitNameSnapshot;
+          item.baseUnitNameSnapshot = resolvedUnit.baseUnitNameSnapshot;
+          item.conversionNumeratorSnapshot = resolvedUnit.conversionNumeratorSnapshot;
+          item.conversionDenominatorSnapshot = resolvedUnit.conversionDenominatorSnapshot;
+          item.baseQuantity = conversion.baseQuantity;
+        }
+
         validateSalesInvoiceInput({
           invoice,
           totalCogs,
@@ -4862,6 +4982,7 @@ export class DexieDataService implements IDataService {
         const recordedStockDeductions: StockDeductionRecorded[] = [];
 
         for (const deduction of stockDeductions) {
+          const dedItemId = deduction.invoiceItemId ? String(deduction.invoiceItemId) : undefined;
           const product = await db.products.get(deduction.productId);
           if (!product) {
             throw new FinancialValidationError(
@@ -4907,6 +5028,7 @@ export class DexieDataService implements IDataService {
               }
               actualTotalCogs += deduction.quantity * batch.costPrice;
               recordedStockDeductions.push({
+                ...(dedItemId ? { invoiceItemId: dedItemId } : {}),
                 productId: product.id,
                 batchNumber: batch.batchNumber,
                 expiryDate: batch.expiryDate,
@@ -4935,6 +5057,7 @@ export class DexieDataService implements IDataService {
                 }
                 actualTotalCogs += deductFromThis * batch.costPrice;
                 recordedStockDeductions.push({
+                  ...(dedItemId ? { invoiceItemId: dedItemId } : {}),
                   productId: product.id,
                   batchNumber: batch.batchNumber,
                   expiryDate: batch.expiryDate,
@@ -4956,6 +5079,7 @@ export class DexieDataService implements IDataService {
             }
             actualTotalCogs += deduction.quantity * product.purchasePrice;
             recordedStockDeductions.push({
+              ...(dedItemId ? { invoiceItemId: dedItemId } : {}),
               productId: product.id,
               quantity: deduction.quantity,
               unitCost: product.purchasePrice,
@@ -5351,7 +5475,9 @@ export class DexieDataService implements IDataService {
   public async createPurchaseInvoiceAtomic(params: {
     invoice: Invoice;
     itemsWithBatches: Array<{
+      invoiceItemId?: string;
       productId: string;
+      unitId?: string;
       quantity: number;
       costPrice: number;
       batchNumber?: string;
@@ -5361,7 +5487,13 @@ export class DexieDataService implements IDataService {
     clientRequestId?: string;
   }): Promise<{ success: boolean; invoice: Invoice; journalEntry: JournalEntry; advanceJournalEntry?: JournalEntry }> {
     await this.ensureReady();
-    const { invoice, itemsWithBatches, clientRequestId } = params;
+    const { invoice: rawInvoice, itemsWithBatches, clientRequestId } = params;
+    const invoice: Invoice = {
+      ...rawInvoice,
+      items: Array.isArray(rawInvoice.items)
+        ? rawInvoice.items.map((it) => ({ ...it, id: it.id?.trim() || storage.generateUUID() }))
+        : [],
+    };
     const applyAdvance = roundMoney(params.applyAdvanceAmount || 0);
     if (applyAdvance < 0) {
       throw new FinancialValidationError('مبلغ التسوية من رصيد سلفة المورد لا يجوز أن يكون سالباً.');
@@ -5384,6 +5516,7 @@ export class DexieDataService implements IDataService {
         db.invoices,
         db.journalEntries,
         db.products,
+        db.productUnits,
         db.cashBoxes,
         db.accounts,
         db.parties,
@@ -5446,6 +5579,56 @@ export class DexieDataService implements IDataService {
           applyAdvanceAmount: applyAdvance,
         });
 
+        const invoiceItemsById = new Map(invoice.items.map((it) => [it.id, it]));
+        const matchedInvItemIds = new Set<string>();
+        const pairedLines: Array<{
+          item: (typeof itemsWithBatches)[number];
+          pairedInvItem?: InvoiceItem;
+          requestedUnitId?: string;
+        }> = [];
+        for (let idx = 0; idx < itemsWithBatches.length; idx += 1) {
+          const item = itemsWithBatches[idx];
+          let pairedInvItem: InvoiceItem | undefined;
+          if (invoice.items.length > 0) {
+            if (item.invoiceItemId) {
+              pairedInvItem = invoiceItemsById.get(String(item.invoiceItemId));
+              if (!pairedInvItem || matchedInvItemIds.has(pairedInvItem.id)) {
+                throw new FinancialValidationError('معرف سطر الفاتورة في بنود الشراء غير صالح أو مكرر.');
+              }
+            } else if (invoice.items.length === itemsWithBatches.length && !matchedInvItemIds.has(invoice.items[idx].id)) {
+              pairedInvItem = invoice.items[idx];
+            } else {
+              pairedInvItem = invoice.items.find(
+                (it) =>
+                  !matchedInvItemIds.has(it.id) &&
+                  it.productId === item.productId &&
+                  Math.abs(Number(it.quantity) - Number(item.quantity)) <= 0.0001
+              );
+            }
+            if (!pairedInvItem) {
+              throw new FinancialValidationError('بنود فاتورة المشتريات لا تطابق بنود التوريد.');
+            }
+            if (
+              pairedInvItem.productId !== item.productId ||
+              Math.abs(Number(pairedInvItem.quantity) - Number(item.quantity)) > 0.0001
+            ) {
+              throw new FinancialValidationError('بيانات الصنف أو الكمية في بنود التوريد لا تطابق بنود فاتورة المشتريات.');
+            }
+            if (item.unitId && pairedInvItem.unitId && String(item.unitId).trim() !== String(pairedInvItem.unitId).trim()) {
+              throw new FinancialValidationError('وحدة بند التوريد لا تطابق وحدة السطر في فاتورة المشتريات.');
+            }
+            matchedInvItemIds.add(pairedInvItem.id);
+          }
+          pairedLines.push({
+            item,
+            pairedInvItem,
+            requestedUnitId: item.unitId ?? pairedInvItem?.unitId,
+          });
+        }
+        if (invoice.items.length > 0 && matchedInvItemIds.size !== invoice.items.length) {
+          throw new FinancialValidationError('بنود فاتورة المشتريات لا تطابق بنود التوريد المخزني.');
+        }
+
         let supplier: Party | undefined;
         if (invoice.partyId) {
           supplier = await db.parties.get(invoice.partyId);
@@ -5465,11 +5648,9 @@ export class DexieDataService implements IDataService {
         }
 
         const todayStr = new Date().toISOString().split('T')[0];
-        // تُوزع تعديلات الفاتورة (الخصم والضريبة) نسبياً على تكلفة التوريد حتى تطابق قيمة المخزون القيد المحاسبي.
-        const inventoryCostFactor = invoice.subtotal > 0 ? invoice.total / invoice.subtotal : 1;
 
-        // أ. فحص الأصناف وتحديث الأرصدة والتشغيلات
-        for (const item of itemsWithBatches) {
+        // أ. فحص الأصناف، تحويل الوحدات للأساس، وتحديث الأرصدة والتشغيلات وتكلفة الوحدة الأساسية
+        for (const { item, pairedInvItem, requestedUnitId } of pairedLines) {
           const product = await db.products.get(item.productId);
           if (!product) {
             throw new FinancialValidationError(`الصنف ذو المعرف ${item.productId} غير موجود.`);
@@ -5497,11 +5678,41 @@ export class DexieDataService implements IDataService {
             }
           }
 
-          const landedUnitCost = roundMoney(item.costPrice * inventoryCostFactor, 4);
+          const resolvedUnit = await resolveDexieInvoiceItemUnitTx(tenantId, product, requestedUnitId);
+          let conversion;
+          try {
+            conversion = resolveUnitConversionToBase({
+              quantity: item.quantity,
+              numerator: resolvedUnit.conversionNumeratorSnapshot,
+              denominator: resolvedUnit.conversionDenominatorSnapshot,
+              unitName: resolvedUnit.unitNameSnapshot,
+            });
+          } catch (err) {
+            throw new FinancialValidationError(err instanceof Error ? err.message : 'تعذر تحويل وحدة الصنف.');
+          }
+
+          const landedUnitCost = computePurchaseBaseUnitCost({
+            enteredQuantity: conversion.enteredQuantity,
+            enteredCostPrice: item.costPrice,
+            baseQuantity: conversion.baseQuantity,
+            invoiceSubtotal: invoice.subtotal,
+            invoiceTotal: invoice.total,
+          }).baseUnitCost;
           if (!Number.isFinite(landedUnitCost) || landedUnitCost < 0) {
             throw new FinancialValidationError(`تكلفة التوريد النهائية للصنف (${product.nameAr}) غير صالحة.`);
           }
 
+          if (pairedInvItem) {
+            pairedInvItem.unitId = resolvedUnit.unitId;
+            pairedInvItem.unit = resolvedUnit.unit;
+            pairedInvItem.unitNameSnapshot = resolvedUnit.unitNameSnapshot;
+            pairedInvItem.baseUnitNameSnapshot = resolvedUnit.baseUnitNameSnapshot;
+            pairedInvItem.conversionNumeratorSnapshot = resolvedUnit.conversionNumeratorSnapshot;
+            pairedInvItem.conversionDenominatorSnapshot = resolvedUnit.conversionDenominatorSnapshot;
+            pairedInvItem.baseQuantity = conversion.baseQuantity;
+          }
+
+          const addedBaseQty = conversion.baseQuantity;
           if (item.batchNumber && item.expiryDate) {
             if (!product.batches) product.batches = [];
             const existingBatch = product.batches.find((b) => b.batchNumber === item.batchNumber);
@@ -5511,8 +5722,8 @@ export class DexieDataService implements IDataService {
               }
               const previousQuantity = existingBatch.quantity;
               const previousValue = previousQuantity * existingBatch.costPrice;
-              const addedValue = item.quantity * landedUnitCost;
-              const nextQuantity = roundMoney(previousQuantity + item.quantity, 4);
+              const addedValue = addedBaseQty * landedUnitCost;
+              const nextQuantity = roundMoney(previousQuantity + addedBaseQty, 4);
               existingBatch.costPrice = nextQuantity > 0
                 ? roundMoney((previousValue + addedValue) / nextQuantity, 4)
                 : landedUnitCost;
@@ -5523,7 +5734,7 @@ export class DexieDataService implements IDataService {
                 productId: product.id,
                 batchNumber: item.batchNumber,
                 expiryDate: item.expiryDate,
-                quantity: item.quantity,
+                quantity: addedBaseQty,
                 costPrice: landedUnitCost,
               });
             }
@@ -5538,9 +5749,9 @@ export class DexieDataService implements IDataService {
           } else {
             const previousQuantity = product.currentStock;
             const previousValue = previousQuantity * product.purchasePrice;
-            const nextQuantity = roundMoney(previousQuantity + item.quantity, 4);
+            const nextQuantity = roundMoney(previousQuantity + addedBaseQty, 4);
             product.purchasePrice = nextQuantity > 0
-              ? roundMoney((previousValue + item.quantity * landedUnitCost) / nextQuantity, 4)
+              ? roundMoney((previousValue + addedBaseQty * landedUnitCost) / nextQuantity, 4)
               : landedUnitCost;
             product.currentStock = nextQuantity;
           }
@@ -5884,7 +6095,7 @@ export class DexieDataService implements IDataService {
 
   public async createSalesReturnAtomic(params: {
     originalInvoiceId: string;
-    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    items: Array<{ originalInvoiceItemId?: string; productId: string; quantity: number; batchNumber?: string }>;
     returnReason: string;
     refundMethod: 'AUTO' | 'AR_OFFSET' | 'CASH' | 'ADVANCE';
     cashBoxId?: string;
@@ -5962,21 +6173,30 @@ export class DexieDataService implements IDataService {
           )
           .toArray();
 
-        const returnedByProduct = new Map<string, number>();
-        const returnedByProductBatch = new Map<string, number>();
+        const returnedByLineId = new Map<string, number>();
+        const legacyReturnedByProduct = new Map<string, number>();
+        const legacyReturnedByProductBatch = new Map<string, number>();
+        const returnedByDeductionLineKey = new Map<string, number>();
         const returnedByDeductionKey = new Map<string, number>();
         for (const r of priorReturns) {
           for (const it of r.items || []) {
-            returnedByProduct.set(
-              it.productId,
-              roundMoney((returnedByProduct.get(it.productId) || 0) + it.quantity, 4)
-            );
-            if (it.batchNumber) {
-              const itemKey = `${it.productId}::${it.batchNumber}`;
-              returnedByProductBatch.set(
-                itemKey,
-                roundMoney((returnedByProductBatch.get(itemKey) || 0) + it.quantity, 4)
+            if (it.originalInvoiceItemId) {
+              returnedByLineId.set(
+                it.originalInvoiceItemId,
+                roundMoney((returnedByLineId.get(it.originalInvoiceItemId) || 0) + it.quantity, 4)
               );
+            } else {
+              legacyReturnedByProduct.set(
+                it.productId,
+                roundMoney((legacyReturnedByProduct.get(it.productId) || 0) + it.quantity, 4)
+              );
+              if (it.batchNumber) {
+                const itemKey = `${it.productId}::${it.batchNumber}`;
+                legacyReturnedByProductBatch.set(
+                  itemKey,
+                  roundMoney((legacyReturnedByProductBatch.get(itemKey) || 0) + it.quantity, 4)
+                );
+              }
             }
           }
           for (const ded of r.stockDeductionsRecorded || []) {
@@ -5985,6 +6205,13 @@ export class DexieDataService implements IDataService {
               dk,
               roundMoney((returnedByDeductionKey.get(dk) || 0) + ded.quantity, 4)
             );
+            if (ded.invoiceItemId) {
+              const dlk = `${ded.invoiceItemId}::${ded.batchNumber || ''}`;
+              returnedByDeductionLineKey.set(
+                dlk,
+                roundMoney((returnedByDeductionLineKey.get(dlk) || 0) + ded.quantity, 4)
+              );
+            }
           }
         }
 
@@ -6000,32 +6227,52 @@ export class DexieDataService implements IDataService {
             throw new FinancialValidationError('كمية الصنف المرتجع يجب أن تكون أكبر من الصفر.');
           }
           const reqQty = roundMoney(reqItem.quantity, 4);
-          const matchingOrigLines = (orig.items || []).filter(
+          const origLine = resolveDexieOriginalInvoiceLineForReturn(
+            orig.items || [],
+            reqItem,
+            'الفاتورة الأصلية'
+          );
+          const soldQty = roundMoney(origLine.quantity, 4);
+          const batchKey = `${reqItem.productId}::${reqItem.batchNumber || ''}`;
+          const sameProductLines = (orig.items || []).filter(
             (it) =>
               it.productId === reqItem.productId &&
               (!reqItem.batchNumber || it.batchNumber === reqItem.batchNumber)
           );
-          if (matchingOrigLines.length === 0) {
-            throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود ضمن بنود الفاتورة الأصلية.`);
-          }
-          const soldQty = roundMoney(matchingOrigLines.reduce((s, l) => s + l.quantity, 0), 4);
-          const batchKey = `${reqItem.productId}::${reqItem.batchNumber || ''}`;
-          const alreadyRet = reqItem.batchNumber
-            ? (returnedByDeductionKey.get(batchKey) || returnedByProductBatch.get(batchKey) || 0)
-            : (returnedByProduct.get(reqItem.productId) || 0);
+          const legacyAlreadyRet = sameProductLines.length === 1
+            ? (reqItem.batchNumber
+                ? (legacyReturnedByProductBatch.get(batchKey) || 0)
+                : (legacyReturnedByProduct.get(reqItem.productId) || 0))
+            : 0;
+          const alreadyRet = roundMoney((returnedByLineId.get(origLine.id) || 0) + legacyAlreadyRet, 4);
           const remainingReturnable = roundMoney(soldQty - alreadyRet, 4);
           if (reqQty > remainingReturnable + 0.0001) {
             throw new FinancialValidationError(
-              `الكمية المطلوب إرجاعها للصنف (${matchingOrigLines[0].productName}) تتجاوز الكمية المتاحة للإرجاع (${remainingReturnable}).`
+              `الكمية المطلوب إرجاعها للصنف (${origLine.productName}) تتجاوز الكمية المتاحة للإرجاع (${remainingReturnable}).`
             );
           }
-          returnedByProduct.set(reqItem.productId, roundMoney((returnedByProduct.get(reqItem.productId) || 0) + reqQty, 4));
-          if (reqItem.batchNumber) {
-            returnedByProductBatch.set(batchKey, roundMoney((returnedByProductBatch.get(batchKey) || 0) + reqQty, 4));
-          }
+          returnedByLineId.set(origLine.id, roundMoney((returnedByLineId.get(origLine.id) || 0) + reqQty, 4));
 
-          const avgLineNetUnit =
-            matchingOrigLines.reduce((s, l) => s + l.total, 0) / soldQty;
+          const hasUnitSnapshot =
+            origLine.unitId !== undefined ||
+            origLine.conversionNumeratorSnapshot !== undefined ||
+            origLine.baseQuantity !== undefined;
+          const snapNum = origLine.conversionNumeratorSnapshot ?? 1;
+          const snapDen = origLine.conversionDenominatorSnapshot ?? 1;
+          let returnConversion;
+          try {
+            returnConversion = resolveUnitConversionToBase({
+              quantity: reqQty,
+              numerator: snapNum,
+              denominator: snapDen,
+              unitName: origLine.unitNameSnapshot || origLine.unit || 'الوحدة',
+            });
+          } catch (err) {
+            throw new FinancialValidationError(err instanceof Error ? err.message : 'تعذر تحويل وحدة المرتجع.');
+          }
+          const returnBaseQty = returnConversion.baseQuantity;
+
+          const avgLineNetUnit = origLine.total / soldQty;
           const lineNetTotal = roundMoney(reqQty * avgLineNetUnit * netFactor);
           returnSubtotal = roundMoney(returnSubtotal + roundMoney(reqQty * avgLineNetUnit));
           returnTotal = roundMoney(returnTotal + lineNetTotal);
@@ -6035,28 +6282,44 @@ export class DexieDataService implements IDataService {
             throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود في المستودع.`);
           }
 
-          // استرداد الكمية والتكلفة من سجل خصم المخزون الأصلي (Perpetual Inventory Restoration)
-          const matchingDeductions = (orig.stockDeductionsRecorded || []).filter(
+          // استرداد الكمية والتكلفة الأساسية من سجل خصم المخزون الأصلي (Perpetual Inventory Restoration)
+          const lineDeductions = (orig.stockDeductionsRecorded || []).filter(
             (d) =>
-              d.productId === reqItem.productId &&
+              d.invoiceItemId === origLine.id &&
               (!reqItem.batchNumber || d.batchNumber === reqItem.batchNumber)
           );
+          const matchingDeductions = lineDeductions.length > 0
+            ? lineDeductions
+            : (orig.stockDeductionsRecorded || []).filter(
+                (d) =>
+                  d.productId === reqItem.productId &&
+                  (!reqItem.batchNumber || d.batchNumber === reqItem.batchNumber)
+              );
 
-          let qtyLeftToRestore = reqQty;
+          const returnItemId = storage.generateUUID();
+          let qtyLeftToRestore = returnBaseQty;
           if (matchingDeductions.length > 0) {
             for (const ded of matchingDeductions) {
               if (qtyLeftToRestore <= 0) break;
+              const useLineTracking = Boolean(ded.invoiceItemId);
+              const dlk = `${ded.invoiceItemId || ''}::${ded.batchNumber || ''}`;
               const dk = `${ded.productId}::${ded.batchNumber || ''}`;
-              const usedBefore = returnedByDeductionKey.get(dk) || 0;
+              const usedBefore = useLineTracking
+                ? (returnedByDeductionLineKey.get(dlk) || 0)
+                : (returnedByDeductionKey.get(dk) || 0);
               const availFromSlice = roundMoney(Math.max(0, ded.quantity - usedBefore), 4);
               if (availFromSlice <= 0) continue;
               const sliceQty = Math.min(qtyLeftToRestore, availFromSlice);
-              returnedByDeductionKey.set(dk, roundMoney(usedBefore + sliceQty, 4));
+              if (useLineTracking) {
+                returnedByDeductionLineKey.set(dlk, roundMoney(usedBefore + sliceQty, 4));
+              }
+              returnedByDeductionKey.set(dk, roundMoney((returnedByDeductionKey.get(dk) || 0) + sliceQty, 4));
               qtyLeftToRestore = roundMoney(qtyLeftToRestore - sliceQty, 4);
 
               const sliceUnitCost = Number.isFinite(ded.unitCost) ? ded.unitCost : product.purchasePrice;
               restoredCogs = roundMoney(restoredCogs + sliceQty * sliceUnitCost);
               restoredDeductions.push({
+                invoiceItemId: returnItemId,
                 productId: product.id,
                 batchNumber: ded.batchNumber,
                 expiryDate: ded.expiryDate,
@@ -6108,6 +6371,7 @@ export class DexieDataService implements IDataService {
             const fallbackCost = product.purchasePrice;
             restoredCogs = roundMoney(restoredCogs + qtyLeftToRestore * fallbackCost);
             restoredDeductions.push({
+              invoiceItemId: returnItemId,
               productId: product.id,
               quantity: qtyLeftToRestore,
               unitCost: fallbackCost,
@@ -6119,12 +6383,23 @@ export class DexieDataService implements IDataService {
           await db.products.put(product);
 
           returnItems.push({
-            id: storage.generateUUID(),
+            id: returnItemId,
+            originalInvoiceItemId: origLine.id,
             productId: product.id,
-            productName: matchingOrigLines[0].productName || product.nameAr,
-            productCode: matchingOrigLines[0].productCode || product.code,
-            batchNumber: reqItem.batchNumber || matchingOrigLines[0].batchNumber,
-            unit: matchingOrigLines[0].unit || product.unit,
+            productName: origLine.productName || product.nameAr,
+            productCode: origLine.productCode || product.code,
+            batchNumber: reqItem.batchNumber || origLine.batchNumber,
+            unit: origLine.unit || product.unit,
+            ...(hasUnitSnapshot
+              ? {
+                  unitId: origLine.unitId ?? 'BASE',
+                  unitNameSnapshot: origLine.unitNameSnapshot || origLine.unit || product.unit,
+                  baseUnitNameSnapshot: origLine.baseUnitNameSnapshot || product.unit,
+                  conversionNumeratorSnapshot: snapNum,
+                  conversionDenominatorSnapshot: snapDen,
+                  baseQuantity: returnBaseQty,
+                }
+              : {}),
             quantity: reqQty,
             unitPrice: roundMoney(avgLineNetUnit * netFactor, 4),
             discount: 0,
@@ -6494,7 +6769,7 @@ export class DexieDataService implements IDataService {
 
   public async createPurchaseReturnAtomic(params: {
     originalInvoiceId: string;
-    items: Array<{ productId: string; quantity: number; batchNumber?: string }>;
+    items: Array<{ originalInvoiceItemId?: string; productId: string; quantity: number; batchNumber?: string }>;
     returnReason: string;
     refundMethod: 'AUTO' | 'AP_OFFSET' | 'CASH' | 'ADVANCE';
     cashBoxId?: string;
@@ -6572,14 +6847,22 @@ export class DexieDataService implements IDataService {
           )
           .toArray();
 
-        const returnedByProductBatch = new Map<string, number>();
+        const returnedByLineId = new Map<string, number>();
+        const legacyReturnedByProductBatch = new Map<string, number>();
         for (const r of priorReturns) {
           for (const it of r.items || []) {
-            const key = `${it.productId}::${it.batchNumber || ''}`;
-            returnedByProductBatch.set(
-              key,
-              roundMoney((returnedByProductBatch.get(key) || 0) + it.quantity, 4)
-            );
+            if (it.originalInvoiceItemId) {
+              returnedByLineId.set(
+                it.originalInvoiceItemId,
+                roundMoney((returnedByLineId.get(it.originalInvoiceItemId) || 0) + it.quantity, 4)
+              );
+            } else {
+              const key = `${it.productId}::${it.batchNumber || ''}`;
+              legacyReturnedByProductBatch.set(
+                key,
+                roundMoney((legacyReturnedByProductBatch.get(key) || 0) + it.quantity, 4)
+              );
+            }
           }
         }
 
@@ -6593,24 +6876,49 @@ export class DexieDataService implements IDataService {
             throw new FinancialValidationError('كمية الصنف المرتجع يجب أن تكون أكبر من الصفر.');
           }
           const reqQty = roundMoney(reqItem.quantity, 4);
-          const matchingOrigLines = (orig.items || []).filter(
+          const origLine = resolveDexieOriginalInvoiceLineForReturn(
+            orig.items || [],
+            reqItem,
+            'فاتورة الشراء الأصلية'
+          );
+          const targetBatchNum = reqItem.batchNumber || origLine.batchNumber;
+          const batchKey = `${reqItem.productId}::${targetBatchNum || ''}`;
+          const sameProductLines = (orig.items || []).filter(
             (it) =>
               it.productId === reqItem.productId &&
               (!reqItem.batchNumber || it.batchNumber === reqItem.batchNumber)
           );
-          if (matchingOrigLines.length === 0) {
-            throw new FinancialValidationError(`الصنف (${reqItem.productId}) غير موجود ضمن بنود فاتورة الشراء الأصلية.`);
-          }
-          const batchKey = `${reqItem.productId}::${reqItem.batchNumber || matchingOrigLines[0].batchNumber || ''}`;
-          const purchasedQty = roundMoney(matchingOrigLines.reduce((s, l) => s + l.quantity, 0), 4);
-          const alreadyRet = returnedByProductBatch.get(batchKey) || 0;
+          const legacyAlreadyRet = sameProductLines.length === 1
+            ? (legacyReturnedByProductBatch.get(batchKey) || 0)
+            : 0;
+          const purchasedQty = roundMoney(origLine.quantity, 4);
+          const alreadyRet = roundMoney((returnedByLineId.get(origLine.id) || 0) + legacyAlreadyRet, 4);
           const remainingReturnable = roundMoney(purchasedQty - alreadyRet, 4);
           if (reqQty > remainingReturnable + 0.0001) {
             throw new FinancialValidationError(
-              `الكمية المطلوب إرجاعها للمورد من (${matchingOrigLines[0].productName}) تتجاوز الكمية المتاحة (${remainingReturnable}).`
+              `الكمية المطلوب إرجاعها للمورد من (${origLine.productName}) تتجاوز الكمية المتاحة (${remainingReturnable}).`
             );
           }
-          returnedByProductBatch.set(batchKey, roundMoney(alreadyRet + reqQty, 4));
+          returnedByLineId.set(origLine.id, roundMoney((returnedByLineId.get(origLine.id) || 0) + reqQty, 4));
+
+          const hasUnitSnapshot =
+            origLine.unitId !== undefined ||
+            origLine.conversionNumeratorSnapshot !== undefined ||
+            origLine.baseQuantity !== undefined;
+          const snapNum = origLine.conversionNumeratorSnapshot ?? 1;
+          const snapDen = origLine.conversionDenominatorSnapshot ?? 1;
+          let returnConversion;
+          try {
+            returnConversion = resolveUnitConversionToBase({
+              quantity: reqQty,
+              numerator: snapNum,
+              denominator: snapDen,
+              unitName: origLine.unitNameSnapshot || origLine.unit || 'الوحدة',
+            });
+          } catch (err) {
+            throw new FinancialValidationError(err instanceof Error ? err.message : 'تعذر تحويل وحدة مرتجع الشراء.');
+          }
+          const returnBaseQty = returnConversion.baseQuantity;
 
           const product = await db.products.get(reqItem.productId);
           if (!product) {
@@ -6619,25 +6927,24 @@ export class DexieDataService implements IDataService {
           if (product.batches && product.batches.length > 0) {
             validateProductStockConsistency(product);
           }
-          if (product.currentStock + 0.0001 < reqQty) {
+          if (product.currentStock + 0.0001 < returnBaseQty) {
             throw new FinancialValidationError(
-              `الرصيد المتاح بالمستودع من (${product.nameAr}) هو ${product.currentStock} فقط، ولا يكفي لإرجاع ${reqQty} للمورد.`
+              `الرصيد المتاح بالمستودع من (${product.nameAr}) هو ${product.currentStock} فقط، ولا يكفي لإرجاع ${returnBaseQty} للمورد.`
             );
           }
 
-          const targetBatchNum = reqItem.batchNumber || matchingOrigLines[0].batchNumber;
           if (targetBatchNum && product.batches && product.batches.length > 0) {
             const batch = product.batches.find((b) => b.batchNumber === targetBatchNum);
             if (!batch) {
               throw new FinancialValidationError(`التشغيلة (${targetBatchNum}) للصنف (${product.nameAr}) غير موجودة.`);
             }
-            if (batch.quantity + 0.0001 < reqQty) {
+            if (batch.quantity + 0.0001 < returnBaseQty) {
               throw new FinancialValidationError(
                 `الكمية المتاحة في التشغيلة (${targetBatchNum}) هي ${batch.quantity} فقط.`
               );
             }
-            inventoryCostDeducted = roundMoney(inventoryCostDeducted + reqQty * batch.costPrice);
-            batch.quantity = roundMoney(batch.quantity - reqQty, 4);
+            inventoryCostDeducted = roundMoney(inventoryCostDeducted + returnBaseQty * batch.costPrice);
+            batch.quantity = roundMoney(batch.quantity - returnBaseQty, 4);
             product.currentStock = roundMoney(
               product.batches.reduce((s, b) => s + b.quantity, 0),
               4
@@ -6648,24 +6955,35 @@ export class DexieDataService implements IDataService {
                 ? roundMoney(totalVal / product.currentStock, 4)
                 : batch.costPrice;
           } else {
-            inventoryCostDeducted = roundMoney(inventoryCostDeducted + reqQty * product.purchasePrice);
-            product.currentStock = roundMoney(product.currentStock - reqQty, 4);
+            inventoryCostDeducted = roundMoney(inventoryCostDeducted + returnBaseQty * product.purchasePrice);
+            product.currentStock = roundMoney(product.currentStock - returnBaseQty, 4);
           }
 
           validateProductStockConsistency(product);
           await db.products.put(product);
 
-          const avgPurchaseUnit = matchingOrigLines.reduce((s, l) => s + l.total, 0) / purchasedQty;
+          const avgPurchaseUnit = origLine.total / purchasedQty;
           const lineReturnVal = roundMoney(reqQty * avgPurchaseUnit * costFactor);
           returnTotal = roundMoney(returnTotal + lineReturnVal);
 
           returnItems.push({
             id: storage.generateUUID(),
+            originalInvoiceItemId: origLine.id,
             productId: product.id,
-            productName: matchingOrigLines[0].productName || product.nameAr,
-            productCode: matchingOrigLines[0].productCode || product.code,
+            productName: origLine.productName || product.nameAr,
+            productCode: origLine.productCode || product.code,
             batchNumber: targetBatchNum,
-            unit: matchingOrigLines[0].unit || product.unit,
+            unit: origLine.unit || product.unit,
+            ...(hasUnitSnapshot
+              ? {
+                  unitId: origLine.unitId ?? 'BASE',
+                  unitNameSnapshot: origLine.unitNameSnapshot || origLine.unit || product.unit,
+                  baseUnitNameSnapshot: origLine.baseUnitNameSnapshot || product.unit,
+                  conversionNumeratorSnapshot: snapNum,
+                  conversionDenominatorSnapshot: snapDen,
+                  baseQuantity: returnBaseQty,
+                }
+              : {}),
             quantity: reqQty,
             unitPrice: roundMoney(avgPurchaseUnit * costFactor, 4),
             discount: 0,

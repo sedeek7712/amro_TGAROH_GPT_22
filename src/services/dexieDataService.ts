@@ -1003,11 +1003,14 @@ export class DexieDataService implements IDataService {
   public async saveProductUnit(input: SaveProductUnitInput): Promise<ProductUnit> {
     await this.ensureReady();
     const { actor, tenantId } = this.requireAuthorizedActor('inventory:write');
-    const productId = String(input.productId || '').trim();
-    const code = String(input.code || '').trim();
-    const nameAr = String(input.nameAr || '').trim();
-    const numerator = Number(input.baseUnitsNumerator);
-    const denominator = Number(input.baseUnitsDenominator);
+    if (typeof input.productId !== 'string' || typeof input.code !== 'string' || typeof input.nameAr !== 'string') {
+      throw new Error('بيانات الصنف ورمز الوحدة واسمها يجب أن تكون نصوصًا صحيحة.');
+    }
+    const productId = input.productId.trim();
+    const code = input.code.trim();
+    const nameAr = input.nameAr.trim();
+    const numerator = input.baseUnitsNumerator;
+    const denominator = input.baseUnitsDenominator;
     if (!productId || !code || !nameAr) throw new Error('الصنف ورمز الوحدة واسم الوحدة حقول مطلوبة.');
     if (!Number.isSafeInteger(numerator) || !Number.isSafeInteger(denominator) || numerator <= 0 || denominator <= 0) {
       throw new Error('معامل التحويل يجب أن يتكون من عددين صحيحين موجبين.');
@@ -1023,6 +1026,9 @@ export class DexieDataService implements IDataService {
     }
     a /= x;
     b /= x;
+    if (input.id !== undefined && typeof input.id !== 'string') throw new Error('معرف الوحدة غير صالح.');
+    if (input.barcode !== undefined && typeof input.barcode !== 'string') throw new Error('باركود الوحدة يجب أن يكون نصًا.');
+    if (input.isActive !== undefined && typeof input.isActive !== 'boolean') throw new Error('حالة الوحدة غير صالحة.');
     const id = String(input.id || '').trim() || storage.generateUUID();
     const nowIso = new Date().toISOString();
     const barcode = String(input.barcode || '').trim();

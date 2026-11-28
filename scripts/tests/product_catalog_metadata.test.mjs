@@ -69,6 +69,17 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
       'INSERT INTO product_catalog_meta (tenant_id,product_id,family_id,brand_id,variant_key,variant_attributes_json,data_json) VALUES (?,?,?,?,?,?,?)'
     ).run('tenant_main', 'catalog-sku-b', null, 'brand-test', null, '{}', JSON.stringify({ productId: 'catalog-sku-b' }));
 
+    assert.throws(
+      () => database.prepare('UPDATE product_families SET activity_id=? WHERE tenant_id=? AND id=?')
+        .run('catalog_other_activity', 'tenant_main', 'family-test'),
+      /activity/
+    );
+    assert.throws(
+      () => database.prepare('UPDATE products SET activity_id=? WHERE tenant_id=? AND id=?')
+        .run('catalog_other_activity', 'tenant_main', 'catalog-sku-a'),
+      /activity/
+    );
+
     assert.throws(() => database.prepare(
       'INSERT INTO product_catalog_meta (tenant_id,product_id,family_id,brand_id,variant_key,variant_attributes_json,data_json) VALUES (?,?,?,?,?,?,?)'
     ).run('tenant_main', 'catalog-sku-c', 'family-test', null, 'size=m', JSON.stringify({ size: 'M' }), '{}'));

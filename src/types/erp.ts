@@ -111,6 +111,24 @@ export interface ProductFamily {
   updatedAt: string;
 }
 
+/** Alternate unit definition relative to the product's existing base inventory unit. */
+export interface ProductUnit {
+  id: string;
+  tenantId: string;
+  productId: string;
+  code: string;
+  nameAr: string;
+  nameEn?: string;
+  baseUnitsNumerator: number;
+  baseUnitsDenominator: number;
+  /** Keep barcodes as strings to preserve leading zeroes. */
+  barcode?: string;
+  normalizedBarcode?: string;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ProductCatalogMeta {
   productId: string;
   tenantId: string;

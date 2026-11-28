@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { openErpDatabase } from '../../electron/sqlite/database.mjs';
 import { createProductUnitsService } from '../../electron/sqlite/modules/product-units-service.mjs';
+import { createInventoryPartiesService } from '../../electron/sqlite/modules/inventory-parties-service.mjs';
+import { createCoreService } from '../../electron/sqlite/modules/core-service.mjs';
 
 test('PVAR-004B-2 SQLite alternate-unit management validates, persists and disables without deleting', async () => {
   const userDataPath = mkdtempSync(path.join(os.tmpdir(), 'erp-product-unit-service-'));
@@ -68,6 +70,20 @@ test('PVAR-004B-2 SQLite alternate-unit management validates, persists and disab
     });
     assert.equal(editedDisabled.isActive, false, 'editing a disabled unit must not reactivate it implicitly');
     assert.equal(service.getProductUnits(actor, 'unit-service-product').length, 1);
+    const inventory = createInventoryPartiesService(database, createCoreService(database));
+    assert.throws(() => inventory.saveProductAtomic(actor, {
+      id: 'unit-service-product',
+      activityId: 'unit-service-activity',
+      code: 'UNIT-SERVICE-SKU',
+      nameAr: 'صنف وحدات',
+      category: 'اختبار',
+      unit: 'كرتون',
+      purchasePrice: 0,
+      sellPrice: 0,
+      currentStock: 5,
+      minStockAlert: 0,
+      batches: [],
+    }, true), /لا يمكن تغيير وحدة المخزون الأساسية/);
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM product_units').get().count, 1);
     assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
     assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');

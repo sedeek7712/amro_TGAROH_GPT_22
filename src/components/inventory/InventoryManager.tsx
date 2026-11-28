@@ -915,7 +915,9 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                       </button>
                     </div>
                     <div className="space-y-2">
-                      {productUnits.length === 0 ? (
+                      {isLoadingUnits ? (
+                        <p className="text-[11px] text-slate-500 text-center py-2">جارٍ تحميل الوحدات البديلة...</p>
+                      ) : productUnits.length === 0 ? (
                         <p className="text-[11px] text-slate-500 text-center py-2">لا توجد وحدات بديلة لهذا الصنف.</p>
                       ) : productUnits.map((unit) => (
                         <div key={unit.id} className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg p-2">

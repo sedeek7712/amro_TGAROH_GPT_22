@@ -109,6 +109,15 @@ function validateCatalogBackupData(data: Record<string, unknown>): void {
     if (!tenantId || !id || !String(family.activityId || '') || !String(family.nameAr || '').trim()) {
       throw new Error('توجد مجموعة منتجات ناقصة البيانات في النسخة الاحتياطية.');
     }
+    if (!Array.isArray(family.optionSchema)) throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
+    const optionKeys = new Set<string>();
+    for (const option of family.optionSchema as Array<Record<string, unknown>>) {
+      const optionKey = String(option.key || '').trim();
+      if (!optionKey || optionKeys.has(optionKey) || !Array.isArray(option.values) || option.values.length === 0) {
+        throw new Error('مخطط خيارات مجموعة المنتج يحتوي تعريفاً مكرراً أو بلا قيم.');
+      }
+      optionKeys.add(optionKey);
+    }
     const key = `${tenantId}:${id}`;
     if (familyByKey.has(key)) throw new Error('معرّف مجموعة المنتجات مكرر في النسخة الاحتياطية.');
     if (family.brandId && !brandByKey.has(`${tenantId}:${String(family.brandId)}`)) {
@@ -123,11 +132,15 @@ function validateCatalogBackupData(data: Record<string, unknown>): void {
   }
 
   const variantKeys = new Set<string>();
+  const metadataProducts = new Set<string>();
   for (const meta of metadata) {
     const tenantId = String(meta.tenantId || '');
     const productId = String(meta.productId || '');
     const product = productById.get(productId);
     if (!tenantId || !product) throw new Error('بيانات كتالوج تشير إلى صنف غير موجود في النسخة الاحتياطية.');
+    const metadataProductKey = `${tenantId}:${productId}`;
+    if (metadataProducts.has(metadataProductKey)) throw new Error('يوجد أكثر من سجل كتالوج للصنف نفسه.');
+    metadataProducts.add(metadataProductKey);
     if (product.tenantId && String(product.tenantId) !== tenantId) {
       throw new Error('بيانات كتالوج الصنف لا تطابق المؤسسة التابعة له.');
     }

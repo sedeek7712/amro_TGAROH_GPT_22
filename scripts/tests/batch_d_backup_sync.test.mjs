@@ -660,6 +660,7 @@ test('BKP-01: SQLite importLegacyBackup handles older v2.0 JSON backups omitting
     assert.equal(res.success, true);
     assert.equal(res.rowCounts.activities, 4);
     assert.equal(res.rowCounts.productBatches, 1);
+    assert.equal(res.rowCounts.productUnits, 0);
     assert.equal(res.rowCounts.branches, 1);
     assert.equal(res.financialTotals.invoiceTotal, '100.000000');
   } finally {

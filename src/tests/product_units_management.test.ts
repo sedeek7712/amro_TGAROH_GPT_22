@@ -77,6 +77,10 @@ test('PVAR-004B-2 Dexie alternate-unit management persists and disables records'
     assert.equal(created.baseUnitsDenominator, 1);
     assert.equal(created.barcode, '0001234567890');
     assert.equal((await dexieDataService.getProductUnits(product.id)).length, 1);
+    await assert.rejects(
+      () => dexieDataService.saveProductAtomic({ ...product, unit: 'كرتون' }, true),
+      /لا يمكن تغيير وحدة المخزون الأساسية/
+    );
 
     await assert.rejects(() => dexieDataService.saveProductUnit({
       productId: product.id,

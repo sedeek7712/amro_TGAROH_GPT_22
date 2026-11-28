@@ -30,6 +30,7 @@ import {
   Brand,
   ProductFamily,
   ProductCatalogMeta,
+  ProductUnit,
 } from '../types/erp';
 
 const CANONICAL_V6_ACCOUNTS: Account[] = [
@@ -66,6 +67,7 @@ export class MultiActivityErpDatabase extends Dexie {
   brands!: Table<Brand, string>;
   productFamilies!: Table<ProductFamily, string>;
   productCatalogMeta!: Table<ProductCatalogMeta, [string, string]>;
+  productUnits!: Table<ProductUnit, string>;
 
   constructor() {
     super('MultiActivityErpDB');
@@ -205,6 +207,11 @@ export class MultiActivityErpDatabase extends Dexie {
       brands: 'id, tenantId, normalizedName, isActive, &[tenantId+normalizedName]',
       productFamilies: 'id, tenantId, activityId, brandId, nameAr, isActive, [tenantId+activityId]',
       productCatalogMeta: '[tenantId+productId], tenantId, productId, familyId, brandId, variantKey, [tenantId+familyId+variantKey]',
+    });
+
+    // Schema v9: alternate units only; no backfill and no operational side effects.
+    this.version(9).stores({
+      productUnits: 'id, tenantId, productId, code, isActive, [tenantId+productId], &[tenantId+productId+code], [tenantId+normalizedBarcode]',
     });
   }
 }

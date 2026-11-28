@@ -4,13 +4,29 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { db } from '../db/erpDatabase';
 
-test('PVAR-004A Dexie v8 exposes isolated catalog metadata stores without changing Product rows', async () => {
+test('PVAR-004A Dexie v9 exposes catalog metadata and alternate unit stores without changing Product rows', async () => {
   try {
     await db.open();
-    assert.equal(db.verno, 8);
+    assert.equal(db.verno, 9);
     assert.ok(db.tables.some((table) => table.name === 'brands'));
     assert.ok(db.tables.some((table) => table.name === 'productFamilies'));
     assert.ok(db.tables.some((table) => table.name === 'productCatalogMeta'));
+    assert.ok(db.tables.some((table) => table.name === 'productUnits'));
+    await db.productUnits.add({
+      id: 'unit-dexie-001',
+      tenantId: 'tenant_main',
+      productId: 'sku-dexie',
+      code: 'BOX',
+      nameAr: 'كرتون',
+      baseUnitsNumerator: 12,
+      baseUnitsDenominator: 1,
+      barcode: '0012345000006',
+      normalizedBarcode: '0012345000006',
+      isActive: true,
+      createdAt: '2026-11-28T00:00:00.000Z',
+      updatedAt: '2026-11-28T00:00:00.000Z',
+    });
+    assert.equal((await db.productUnits.get('unit-dexie-001'))?.barcode, '0012345000006');
 
     await db.brands.add({
       id: 'brand-dexie',
@@ -48,7 +64,7 @@ test('PVAR-004A Dexie v8 exposes isolated catalog metadata stores without changi
   }
 });
 
-test('PVAR-004A upgrades an existing Dexie v7 database to v8 without losing legacy products or batches', async () => {
+test('PVAR-004B-1 upgrades an existing Dexie v7 database to v9 without losing legacy products or batches', async () => {
   const legacy = new Dexie('MultiActivityErpDB');
   legacy.version(7).stores({
     activities: 'id, code, costCenterCode',
@@ -94,12 +110,13 @@ test('PVAR-004A upgrades an existing Dexie v7 database to v8 without losing lega
 
     await db.open();
 
-    assert.equal(db.verno, 8);
+    assert.equal(db.verno, 9);
     assert.deepEqual(await db.products.get(legacyProduct.id), legacyProduct);
     assert.deepEqual(await db.productBatches.get(legacyBatch.id), legacyBatch);
     assert.equal(await db.brands.count(), 0);
     assert.equal(await db.productFamilies.count(), 0);
     assert.equal(await db.productCatalogMeta.count(), 0);
+    assert.equal(await db.productUnits.count(), 0);
   } finally {
     legacy.close();
     db.close();

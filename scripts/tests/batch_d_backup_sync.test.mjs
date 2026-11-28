@@ -68,6 +68,12 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     });
     assert.equal(prod.id, 'prod-d-1');
 
+    // PVAR-004B-1: alternate units are storage-only and must survive native/JSON backups.
+    rt1.database.prepare(
+      'INSERT INTO product_units (tenant_id,id,product_id,code,name_ar,name_en,base_units_numerator,base_units_denominator,barcode,normalized_barcode,is_active,created_at,updated_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)'
+    ).run('tenant_main', 'unit-backup-d1', prod.id, 'BOX', 'كرتون', null, 12, 1, '0012345000006', '0012345000006', 1,
+      '2026-11-28T00:00:00.000Z', '2026-11-28T00:00:00.000Z', JSON.stringify({ id: 'unit-backup-d1' }));
+
     // PVAR-004A: seed optional catalog metadata; it must survive native and JSON backup/restore.
     rt1.database.prepare(
       'INSERT INTO brands (tenant_id,id,name_ar,normalized_name,is_active,data_json) VALUES (?,?,?,?,?,?)'
@@ -212,6 +218,8 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     assert.equal(parsedExport.data.brands.length, 1);
     assert.equal(parsedExport.data.productFamilies.length, 1);
     assert.equal(parsedExport.data.productCatalogMeta.length, 1);
+    assert.equal(parsedExport.data.productUnits.length, 1);
+    assert.equal(parsedExport.data.productUnits[0].barcode, '0012345000006');
     assert.equal(parsedExport.data.users.length, 2);
     assert.equal(Object.hasOwn(parsedExport.data.users[0], 'passwordHash'), false);
 
@@ -301,6 +309,7 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     assert.equal(rt2.database.prepare('SELECT COUNT(*) AS count FROM brands').get().count, 1);
     assert.equal(rt2.database.prepare('SELECT COUNT(*) AS count FROM product_families').get().count, 1);
     assert.equal(rt2.database.prepare('SELECT family_id FROM product_catalog_meta WHERE product_id=?').get(prod.id).family_id, 'family-backup-d1');
+    assert.equal(rt2.database.prepare('SELECT barcode FROM product_units WHERE id=?').get('unit-backup-d1').barcode, '0012345000006');
 
     // Also test JSON import over existing DB preserves passwords!
     const jsonImportRes = await backend2.importBackupJSON({ token: token2, rawJson: exportedJson });
@@ -309,6 +318,8 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     assert.equal(jsonImportRes.rowCounts.brands, 1);
     assert.equal(jsonImportRes.rowCounts.productFamilies, 1);
     assert.equal(jsonImportRes.rowCounts.productCatalogMeta, 1);
+    assert.equal(jsonImportRes.rowCounts.productUnits, 1);
+    assert.equal(rt2.database.prepare('SELECT COUNT(*) AS count FROM product_units').get().count, 1);
     const loginAfterJson = auth2.authenticate({ username: 'cashier_d', password: 'CashierD#2026' });
     assert.equal(loginAfterJson.success, true);
 
@@ -649,6 +660,7 @@ test('BKP-01: SQLite importLegacyBackup handles older v2.0 JSON backups omitting
     assert.equal(res.success, true);
     assert.equal(res.rowCounts.activities, 4);
     assert.equal(res.rowCounts.productBatches, 1);
+    assert.equal(res.rowCounts.productUnits, 0);
     assert.equal(res.rowCounts.branches, 1);
     assert.equal(res.financialTotals.invoiceTotal, '100.000000');
   } finally {

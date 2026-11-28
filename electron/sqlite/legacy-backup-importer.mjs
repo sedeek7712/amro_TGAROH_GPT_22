@@ -202,6 +202,43 @@ export function parseLegacyBackup(rawBackup) {
     data[key] = rows;
   }
 
+  data.productUnits = backup.data.productUnits ?? [];
+  if (!Array.isArray(data.productUnits) || !data.productUnits.every(isObject)) {
+    throw new Error('توجد سجلات وحدات بديلة غير صالحة.');
+  }
+  const unitIds = new Set();
+  const unitCodes = new Set();
+  const productKeys = new Set(data.products.map((row) => `${tenantIdOf(row)}:${String(row.id || '')}`));
+  for (const unit of data.productUnits) {
+    const tenantId = tenantIdOf(unit);
+    const id = requiredString(unit.id, 'productUnit.id');
+    const productId = requiredString(unit.productId, 'productUnit.productId');
+    const code = requiredString(unit.code, 'productUnit.code');
+    requiredString(unit.nameAr, 'productUnit.nameAr');
+    requiredString(unit.createdAt, 'productUnit.createdAt');
+    requiredString(unit.updatedAt, 'productUnit.updatedAt');
+    if (!tenantId || !productKeys.has(`${tenantId}:${productId}`)) {
+      throw new Error('الوحدة البديلة مرتبطة بصنف غير موجود أو بمؤسسة مختلفة.');
+    }
+    if (!Number.isSafeInteger(unit.baseUnitsNumerator) || unit.baseUnitsNumerator <= 0 ||
+        !Number.isSafeInteger(unit.baseUnitsDenominator) || unit.baseUnitsDenominator <= 0) {
+      throw new Error('معامل تحويل الوحدة البديلة يجب أن يكون عددين صحيحين موجبين.');
+    }
+    if (unit.barcode !== undefined && typeof unit.barcode !== 'string') {
+      throw new Error('باركود الوحدة البديلة يجب أن يحفظ كنص.');
+    }
+    if (unit.normalizedBarcode !== undefined && typeof unit.normalizedBarcode !== 'string') {
+      throw new Error('الباركود الموحد للوحدة البديلة يجب أن يحفظ كنص.');
+    }
+    const idKey = `${tenantId}:${id}`;
+    const codeKey = `${tenantId}:${productId}:${code}`;
+    if (unitIds.has(idKey) || unitCodes.has(codeKey)) {
+      throw new Error('يوجد معرّف أو رمز وحدة بديلة مكرر.');
+    }
+    unitIds.add(idKey);
+    unitCodes.add(codeKey);
+  }
+
   data.productBatches = Array.isArray(backup.data.productBatches)
     ? backup.data.productBatches
     : [];
@@ -261,7 +298,7 @@ export function parseLegacyBackup(rawBackup) {
 function countRows(database, table, tenantId) {
   const allowedTables = new Set([
     'branches', 'accounts', 'activities', 'products', 'product_batches',
-    'brands', 'product_families', 'product_catalog_meta',
+    'brands', 'product_families', 'product_catalog_meta', 'product_units',
     'parties', 'invoices', 'journal_entries', 'cash_boxes', 'vouchers',
     'payment_allocations', 'party_advance_transactions', 'allocation_audits',
     'amanat_records', 'users', 'audit_logs', 'outbox_queue', 'sync_conflicts',
@@ -274,7 +311,7 @@ function countRows(database, table, tenantId) {
 
 function assertEmptyDestination(database, tenantIds) {
   const protectedTables = [
-    'accounts', 'activities', 'products', 'product_batches', 'product_catalog_meta', 'product_families', 'brands', 'parties',
+    'accounts', 'activities', 'products', 'product_batches', 'product_units', 'product_catalog_meta', 'product_families', 'brands', 'parties',
     'invoices', 'invoice_items', 'invoice_stock_deductions',
     'journal_entries', 'journal_entry_lines', 'cash_boxes', 'vouchers',
     'payment_allocations', 'party_advance_transactions', 'allocation_audits',
@@ -316,6 +353,7 @@ export function sourceCounts(data) {
     brands: (data.brands || []).length,
     productFamilies: (data.productFamilies || []).length,
     productCatalogMeta: (data.productCatalogMeta || []).length,
+    productUnits: (data.productUnits || []).length,
     parties: data.parties.length,
     invoices: data.invoices.length,
     invoiceItems: data.invoices.reduce((n, row) => n + (Array.isArray(row.items) ? row.items.length : 0), 0),
@@ -438,6 +476,18 @@ export function insertRows(database, data, options = {}) {
       [tenantIdOf(row), requiredString(row.id,'product.id'), requiredString(row.activityId,'product.activityId'),
        requiredString(row.code,'product.code'), row.barcode || null, String(row.category || ''),
        decimal(row.currentStock,'product.currentStock'), safeJson(normalizedProduct)]
+    );
+  }
+
+  for (const row of data.productUnits || []) {
+    const tenantId = tenantIdOf(row);
+    run(
+      'INSERT INTO product_units (tenant_id,id,product_id,code,name_ar,name_en,base_units_numerator,base_units_denominator,barcode,normalized_barcode,is_active,created_at,updated_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+      [tenantId, requiredString(row.id,'productUnit.id'), requiredString(row.productId,'productUnit.productId'),
+       requiredString(row.code,'productUnit.code'), requiredString(row.nameAr,'productUnit.nameAr'),
+       row.nameEn ? String(row.nameEn) : null, row.baseUnitsNumerator, row.baseUnitsDenominator,
+       row.barcode ?? null, row.normalizedBarcode ?? null, boolInt(row.isActive !== false),
+       requiredString(row.createdAt,'productUnit.createdAt'), requiredString(row.updatedAt,'productUnit.updatedAt'), safeJson(row)]
     );
   }
 
@@ -731,6 +781,7 @@ export function actualCounts(database, tenantIds) {
     brands: 'brands',
     productFamilies: 'product_families',
     productCatalogMeta: 'product_catalog_meta',
+    productUnits: 'product_units',
     parties: 'parties',
     invoices: 'invoices',
     journalEntries: 'journal_entries',

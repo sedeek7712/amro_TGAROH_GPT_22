@@ -141,6 +141,32 @@ function validateCatalogBackupData(data: Record<string, unknown>): void {
       if (String(product.activityId || '') !== String(family.activityId || '')) {
         throw new Error('نشاط الصنف لا يطابق نشاط مجموعة المنتج.');
       }
+      const optionSchema = Array.isArray(family.optionSchema)
+        ? family.optionSchema as Array<Record<string, unknown>>
+        : [];
+      const attributes = meta.variantAttributes && typeof meta.variantAttributes === 'object' && !Array.isArray(meta.variantAttributes)
+        ? meta.variantAttributes as Record<string, unknown>
+        : null;
+      if (!attributes) throw new Error('خصائص متغير SKU غير صالحة.');
+      const allowedKeys = new Set<string>();
+      for (const option of optionSchema) {
+        const key = String(option.key || '').trim();
+        const values = Array.isArray(option.values) ? option.values.map(String) : [];
+        if (!key || allowedKeys.has(key) || values.length === 0) {
+          throw new Error('مخطط خيارات مجموعة المنتج غير صالح.');
+        }
+        allowedKeys.add(key);
+        const value = attributes[key];
+        if (option.required === true && (typeof value !== 'string' || !value.trim())) {
+          throw new Error('قيمة خيار مطلوبة مفقودة في متغير SKU.');
+        }
+        if (value !== undefined && (typeof value !== 'string' || !values.includes(value))) {
+          throw new Error('قيمة متغير SKU غير موجودة ضمن خيارات المجموعة.');
+        }
+      }
+      if (Object.keys(attributes).some((key) => !allowedKeys.has(key))) {
+        throw new Error('متغير SKU يحتوي خيارًا غير معرّف في المجموعة.');
+      }
       const uniqueKey = `${tenantId}:${String(meta.familyId)}:${variantKey}`;
       if (variantKeys.has(uniqueKey)) throw new Error('توجد تركيبة متغير مكررة داخل مجموعة المنتج.');
       variantKeys.add(uniqueKey);

@@ -3468,6 +3468,9 @@ export class DexieDataService implements IDataService {
       activities: await db.activities.toArray(),
       products: await db.products.toArray(),
       productBatches: await db.productBatches.toArray(),
+      brands: await db.brands.toArray(),
+      productFamilies: await db.productFamilies.toArray(),
+      productCatalogMeta: await db.productCatalogMeta.toArray(),
       parties: await db.parties.toArray(),
       invoices: await db.invoices.toArray(),
       journalEntries: await db.journalEntries.toArray(),
@@ -3593,6 +3596,9 @@ export class DexieDataService implements IDataService {
           db.activities,
           db.products,
           db.productBatches,
+          db.brands,
+          db.productFamilies,
+          db.productCatalogMeta,
           db.parties,
           db.invoices,
           db.journalEntries,
@@ -3635,6 +3641,20 @@ export class DexieDataService implements IDataService {
           await db.productBatches.clear();
           if (normalizedBatches.length > 0) {
             await db.productBatches.bulkPut(normalizedBatches);
+          }
+
+          // Older backups do not contain catalog metadata; treat them as empty lists.
+          await db.productCatalogMeta.clear();
+          if (Array.isArray(d.productCatalogMeta) && d.productCatalogMeta.length > 0) {
+            await db.productCatalogMeta.bulkPut(d.productCatalogMeta);
+          }
+          await db.productFamilies.clear();
+          if (Array.isArray(d.productFamilies) && d.productFamilies.length > 0) {
+            await db.productFamilies.bulkPut(d.productFamilies);
+          }
+          await db.brands.clear();
+          if (Array.isArray(d.brands) && d.brands.length > 0) {
+            await db.brands.bulkPut(d.brands);
           }
           if (Array.isArray(d.parties)) {
             await db.parties.clear();

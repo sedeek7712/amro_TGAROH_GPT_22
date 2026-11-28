@@ -18,6 +18,7 @@ import {
   AccountType,
   Product,
   ProductBatch,
+  ProductUnit,
   Party,
   Invoice,
   InvoiceItem,
@@ -188,6 +189,38 @@ function validateCatalogBackupData(data: Record<string, unknown>): void {
         throw new Error('بيانات العلامة التجارية للمنتج المستقل غير صالحة.');
       }
     }
+  }
+
+  const productUnits = readRows('productUnits');
+  const unitIds = new Set<string>();
+  const unitCodes = new Set<string>();
+  for (const unit of productUnits) {
+    const tenantId = String(unit.tenantId || '');
+    const id = String(unit.id || '');
+    const productId = String(unit.productId || '');
+    const code = String(unit.code || '').trim();
+    const product = productById.get(productId);
+    if (!tenantId || !id || !productId || !code || !String(unit.nameAr || '').trim() || !product) {
+      throw new Error('توجد وحدة بديلة ناقصة البيانات أو مرتبطة بصنف غير موجود.');
+    }
+    if (product.tenantId && String(product.tenantId) !== tenantId) {
+      throw new Error('الوحدة البديلة لا تطابق مؤسسة الصنف.');
+    }
+    if (!Number.isSafeInteger(unit.baseUnitsNumerator) || Number(unit.baseUnitsNumerator) <= 0 ||
+        !Number.isSafeInteger(unit.baseUnitsDenominator) || Number(unit.baseUnitsDenominator) <= 0) {
+      throw new Error('معامل تحويل الوحدة البديلة يجب أن يكون عددين صحيحين موجبين.');
+    }
+    if (unit.barcode !== undefined && typeof unit.barcode !== 'string') {
+      throw new Error('باركود الوحدة البديلة يجب أن يحفظ كنص للمحافظة على الأصفار الأولى.');
+    }
+    if (unit.normalizedBarcode !== undefined && typeof unit.normalizedBarcode !== 'string') {
+      throw new Error('الباركود الموحد للوحدة البديلة يجب أن يحفظ كنص.');
+    }
+    const idKey = `${tenantId}:${id}`;
+    const codeKey = `${tenantId}:${productId}:${code}`;
+    if (unitIds.has(idKey) || unitCodes.has(codeKey)) throw new Error('يوجد معرّف أو رمز وحدة بديلة مكرر.');
+    unitIds.add(idKey);
+    unitCodes.add(codeKey);
   }
 }
 
@@ -3591,6 +3624,7 @@ export class DexieDataService implements IDataService {
       brands: await db.brands.toArray(),
       productFamilies: await db.productFamilies.toArray(),
       productCatalogMeta: await db.productCatalogMeta.toArray(),
+      productUnits: await db.productUnits.toArray(),
       parties: await db.parties.toArray(),
       invoices: await db.invoices.toArray(),
       journalEntries: await db.journalEntries.toArray(),
@@ -3720,6 +3754,7 @@ export class DexieDataService implements IDataService {
           db.brands,
           db.productFamilies,
           db.productCatalogMeta,
+          db.productUnits,
           db.parties,
           db.invoices,
           db.journalEntries,
@@ -3762,6 +3797,12 @@ export class DexieDataService implements IDataService {
           await db.productBatches.clear();
           if (normalizedBatches.length > 0) {
             await db.productBatches.bulkPut(normalizedBatches);
+          }
+
+          // Older backups omit alternate units; restore them as an empty list.
+          await db.productUnits.clear();
+          if (Array.isArray(d.productUnits) && d.productUnits.length > 0) {
+            await db.productUnits.bulkPut(d.productUnits as ProductUnit[]);
           }
 
           // Older backups do not contain catalog metadata; treat them as empty lists.

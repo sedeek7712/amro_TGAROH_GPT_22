@@ -1023,37 +1023,39 @@ export class DexieDataService implements IDataService {
     }
     a /= x;
     b /= x;
-    const product = await db.products.get(productId);
-    if (!product) throw new Error('الصنف غير موجود أو لا تملك صلاحية الوصول إليه.');
-    assertActivityAccess(actor, product.activityId, 'إدارة وحدات الصنف');
     const id = String(input.id || '').trim() || storage.generateUUID();
     const nowIso = new Date().toISOString();
     const barcode = String(input.barcode || '').trim();
-    const existing = await db.productUnits.get(id);
-    if (existing && (existing.tenantId !== tenantId || existing.productId !== productId)) {
-      throw new Error('لا يمكن نقل الوحدة البديلة إلى صنف آخر.');
-    }
-    const duplicate = await db.productUnits
-      .where('[tenantId+productId+code]')
-      .equals([tenantId, productId, code])
-      .first();
-    if (duplicate && duplicate.id !== id) throw new Error('رمز الوحدة مستخدم بالفعل لهذا الصنف.');
-    const unit: ProductUnit = {
-      id,
-      tenantId,
-      productId,
-      code,
-      nameAr,
-      ...(existing?.nameEn ? { nameEn: existing.nameEn } : {}),
-      baseUnitsNumerator: Number(a),
-      baseUnitsDenominator: Number(b),
-      ...(barcode ? { barcode, normalizedBarcode: barcode } : {}),
-      isActive: input.isActive === undefined ? (existing?.isActive ?? true) : input.isActive !== false,
-      createdAt: existing?.createdAt || nowIso,
-      updatedAt: nowIso,
-    };
-    await db.productUnits.put(unit);
-    return unit;
+    return await db.transaction('rw', db.products, db.productUnits, async () => {
+      const product = await db.products.get(productId);
+      if (!product) throw new Error('الصنف غير موجود أو لا تملك صلاحية الوصول إليه.');
+      assertActivityAccess(actor, product.activityId, 'إدارة وحدات الصنف');
+      const existing = await db.productUnits.get(id);
+      if (existing && (existing.tenantId !== tenantId || existing.productId !== productId)) {
+        throw new Error('لا يمكن نقل الوحدة البديلة إلى صنف آخر.');
+      }
+      const duplicate = await db.productUnits
+        .where('[tenantId+productId+code]')
+        .equals([tenantId, productId, code])
+        .first();
+      if (duplicate && duplicate.id !== id) throw new Error('رمز الوحدة مستخدم بالفعل لهذا الصنف.');
+      const unit: ProductUnit = {
+        id,
+        tenantId,
+        productId,
+        code,
+        nameAr,
+        ...(existing?.nameEn ? { nameEn: existing.nameEn } : {}),
+        baseUnitsNumerator: Number(a),
+        baseUnitsDenominator: Number(b),
+        ...(barcode ? { barcode, normalizedBarcode: barcode } : {}),
+        isActive: input.isActive === undefined ? (existing?.isActive ?? true) : input.isActive !== false,
+        createdAt: existing?.createdAt || nowIso,
+        updatedAt: nowIso,
+      };
+      await db.productUnits.put(unit);
+      return unit;
+    });
   }
 
   public async saveProductAtomic(product: Product, isUpdate = false): Promise<Product> {

@@ -58,6 +58,15 @@ test('PVAR-004B-2 SQLite alternate-unit management validates, persists and disab
 
     const disabled = service.saveProductUnit(actor, { ...created, isActive: false });
     assert.equal(disabled.isActive, false);
+    const editedDisabled = service.saveProductUnit(actor, {
+      id: disabled.id,
+      productId: disabled.productId,
+      code: disabled.code,
+      nameAr: 'كرتون معدل',
+      baseUnitsNumerator: disabled.baseUnitsNumerator,
+      baseUnitsDenominator: disabled.baseUnitsDenominator,
+    });
+    assert.equal(editedDisabled.isActive, false, 'editing a disabled unit must not reactivate it implicitly');
     assert.equal(service.getProductUnits(actor, 'unit-service-product').length, 1);
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM product_units').get().count, 1);
     assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);

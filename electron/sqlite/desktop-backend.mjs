@@ -4,6 +4,7 @@ import { createFinancialService } from './modules/financial-service.mjs';
 import { createBackupSyncService } from './modules/backup-sync-service.mjs';
 import { createProductMediaStorage } from '../product-media-storage.mjs';
 import { createProductMediaService } from './modules/product-media-service.mjs';
+import { createProductUnitsService } from './modules/product-units-service.mjs';
 import { importLegacyBackup, previewLegacyBackup } from './legacy-backup-importer.mjs';
 import { PermissionError } from './rbac.mjs';
 
@@ -24,6 +25,7 @@ export function createDesktopBackend({
   const backupSync = createBackupSyncService(database, backupDirectory);
   const mediaStorage = createProductMediaStorage({ rootDirectory: mediaDirectory || `${backupDirectory || process.cwd()}.product-media` });
   const productMedia = createProductMediaService(database, mediaStorage);
+  const productUnits = createProductUnitsService(database);
 
   function requireActor(token, requestedBranchId) {
     const actor = authenticationService.getActor(token, requestedBranchId);
@@ -39,6 +41,7 @@ export function createDesktopBackend({
     financial,
     backupSync,
     productMediaStorage: mediaStorage,
+    productUnits,
     requireActor,
 
     // --- Runtime & Auth ---
@@ -246,6 +249,16 @@ export function createDesktopBackend({
     getProductById({ token, id }) {
       const actor = requireActor(token);
       return inventoryParties.getProductById(actor, id);
+    },
+
+    getProductUnits({ token, productId }) {
+      return productUnits.getProductUnits(requireActor(token), productId);
+    },
+
+    saveProductUnit({ token, unit }) {
+      const saved = productUnits.saveProductUnit(requireActor(token), unit);
+      onDataChanged(['productUnits', 'auditLogs']);
+      return saved;
     },
 
     getProductImages({ token, productId }) {

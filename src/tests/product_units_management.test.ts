@@ -95,6 +95,15 @@ test('PVAR-004B-2 Dexie alternate-unit management persists and disables records'
 
     const disabled = await dexieDataService.saveProductUnit({ ...created, isActive: false });
     assert.equal(disabled.isActive, false);
+    const editedDisabled = await dexieDataService.saveProductUnit({
+      id: disabled.id,
+      productId: disabled.productId,
+      code: disabled.code,
+      nameAr: 'كرتون معدل',
+      baseUnitsNumerator: disabled.baseUnitsNumerator,
+      baseUnitsDenominator: disabled.baseUnitsDenominator,
+    });
+    assert.equal(editedDisabled.isActive, false, 'editing a disabled unit must not reactivate it implicitly');
     await db.close();
     await db.open();
     assert.equal((await db.productUnits.get(created.id))?.isActive, false);

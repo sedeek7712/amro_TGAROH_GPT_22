@@ -413,6 +413,25 @@ export function createBackupSyncService(database, backupDirectory) {
         variantAttributes: JSON.parse(row.variant_attributes_json || '{}'),
       }));
 
+      const productUnits = database.prepare(
+        'SELECT id, product_id, code, name_ar, name_en, base_units_numerator, base_units_denominator, barcode, normalized_barcode, is_active, created_at, updated_at, data_json FROM product_units WHERE tenant_id = ? ORDER BY product_id, code'
+      ).all(tenantId).map((row) => ({
+        ...parseRowJson(row),
+        id: row.id,
+        tenantId,
+        productId: row.product_id,
+        code: row.code,
+        nameAr: row.name_ar,
+        nameEn: row.name_en || undefined,
+        baseUnitsNumerator: row.base_units_numerator,
+        baseUnitsDenominator: row.base_units_denominator,
+        barcode: row.barcode || undefined,
+        normalizedBarcode: row.normalized_barcode || undefined,
+        isActive: row.is_active === 1,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      }));
+
       const parties = database.prepare(
         'SELECT id, party_type, name_ar, phone, balance_decimal, advance_balance_decimal, data_json FROM parties WHERE tenant_id = ? ORDER BY name_ar'
       ).all(tenantId).map((row) => ({
@@ -631,6 +650,7 @@ export function createBackupSyncService(database, backupDirectory) {
         brands,
         productFamilies,
         productCatalogMeta,
+        productUnits,
         parties,
         invoices,
         journalEntries,
@@ -740,6 +760,7 @@ export function createBackupSyncService(database, backupDirectory) {
           database.prepare('DELETE FROM vouchers WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM amanat_records WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM product_batches WHERE tenant_id = ?').run(tenantId);
+          database.prepare('DELETE FROM product_units WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM product_catalog_meta WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM products WHERE tenant_id = ?').run(tenantId);
           database.prepare('DELETE FROM product_families WHERE tenant_id = ?').run(tenantId);

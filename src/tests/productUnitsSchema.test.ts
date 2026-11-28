@@ -2,13 +2,14 @@ import 'fake-indexeddb/auto';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { db } from '../db/erpDatabase';
+import type { Product } from '../types/erp';
 
 test('PVAR-004B-1 Dexie v9 stores alternate units without rewriting legacy products', async () => {
   try {
     await db.open();
     assert.equal(db.verno, 9);
     assert.ok(db.tables.some((table) => table.name === 'productUnits'));
-    const product = {
+    const product: Product = {
       id: 'pvar-unit-product',
       activityId: 'grocery',
       code: 'PVAR-UNIT-001',

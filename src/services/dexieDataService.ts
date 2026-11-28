@@ -1044,10 +1044,11 @@ export class DexieDataService implements IDataService {
       productId,
       code,
       nameAr,
+      ...(existing?.nameEn ? { nameEn: existing.nameEn } : {}),
       baseUnitsNumerator: Number(a),
       baseUnitsDenominator: Number(b),
       ...(barcode ? { barcode, normalizedBarcode: barcode } : {}),
-      isActive: input.isActive !== false,
+      isActive: input.isActive === undefined ? (existing?.isActive ?? true) : input.isActive !== false,
       createdAt: existing?.createdAt || nowIso,
       updatedAt: nowIso,
     };

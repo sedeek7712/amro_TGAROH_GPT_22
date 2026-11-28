@@ -68,6 +68,21 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     });
     assert.equal(prod.id, 'prod-d-1');
 
+    // PVAR-004A: seed optional catalog metadata; it must survive native and JSON backup/restore.
+    rt1.database.prepare(
+      'INSERT INTO brands (tenant_id,id,name_ar,normalized_name,is_active,data_json) VALUES (?,?,?,?,?,?)'
+    ).run('tenant_main', 'brand-backup-d1', 'علامة النسخ', 'علامة النسخ', 1, JSON.stringify({ id: 'brand-backup-d1' }));
+    rt1.database.prepare(
+      'INSERT INTO product_families (tenant_id,id,activity_id,name_ar,category_snapshot,brand_id,option_schema_json,is_active,created_at,updated_at,data_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)'
+    ).run(
+      'tenant_main', 'family-backup-d1', 'pharmacy', 'دواء متعدد التركيز', 'أدوية', 'brand-backup-d1',
+      JSON.stringify([{ key: 'strength', labelAr: 'التركيز', values: ['250mg', '500mg'], required: true, sortOrder: 1 }]),
+      1, '2026-11-28T00:00:00.000Z', '2026-11-28T00:00:00.000Z', JSON.stringify({ id: 'family-backup-d1' })
+    );
+    rt1.database.prepare(
+      'INSERT INTO product_catalog_meta (tenant_id,product_id,family_id,brand_id,variant_key,variant_attributes_json,data_json) VALUES (?,?,?,?,?,?,?)'
+    ).run('tenant_main', prod.id, 'family-backup-d1', null, 'strength=500mg', JSON.stringify({ strength: '500mg' }), JSON.stringify({ productId: prod.id }));
+
     // Seed supplier + purchase 10 units @ 10 = 100 (CREDIT)
     const supplier = backend1.savePartyAtomic({
       token,
@@ -194,6 +209,9 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     const exportedJson = backend1.exportBackupJSON({ token });
     const parsedExport = JSON.parse(exportedJson);
     assert.equal(parsedExport.data.productBatches.length, 1);
+    assert.equal(parsedExport.data.brands.length, 1);
+    assert.equal(parsedExport.data.productFamilies.length, 1);
+    assert.equal(parsedExport.data.productCatalogMeta.length, 1);
     assert.equal(parsedExport.data.users.length, 2);
     assert.equal(Object.hasOwn(parsedExport.data.users[0], 'passwordHash'), false);
 
@@ -280,11 +298,17 @@ test('Batch D SQLite backup, native restore + rollback, JSON roundtrip preservin
     assert.equal(backend2.getProductById({ token: token2, id: prod.id }).currentStock, 8);
     assert.equal(backend2.getCashBoxes({ token: token2 }).find((c) => c.id === 'cb-1').balance, 40);
     assert.equal(backend2.getInvoices({ token: token2 }).length, 2);
+    assert.equal(rt2.database.prepare('SELECT COUNT(*) AS count FROM brands').get().count, 1);
+    assert.equal(rt2.database.prepare('SELECT COUNT(*) AS count FROM product_families').get().count, 1);
+    assert.equal(rt2.database.prepare('SELECT family_id FROM product_catalog_meta WHERE product_id=?').get(prod.id).family_id, 'family-backup-d1');
 
     // Also test JSON import over existing DB preserves passwords!
     const jsonImportRes = await backend2.importBackupJSON({ token: token2, rawJson: exportedJson });
     assert.equal(jsonImportRes.success, true);
     assert.equal(jsonImportRes.rowCounts.productBatches, 1);
+    assert.equal(jsonImportRes.rowCounts.brands, 1);
+    assert.equal(jsonImportRes.rowCounts.productFamilies, 1);
+    assert.equal(jsonImportRes.rowCounts.productCatalogMeta, 1);
     const loginAfterJson = auth2.authenticate({ username: 'cashier_d', password: 'CashierD#2026' });
     assert.equal(loginAfterJson.success, true);
 

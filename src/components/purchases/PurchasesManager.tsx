@@ -1023,8 +1023,15 @@ export const PurchasesManager: React.FC<PurchasesManagerProps> = ({
 
                 {activityId === 'grocery' && (
                   <div className="p-2 bg-amber-50/60 rounded-lg border border-amber-200 space-y-1 pt-1.5">
-                    <div className="text-[11px] font-semibold text-amber-900">
-                      بيانات التشغيلة والصلاحية للمادة الغذائية (اختياري)
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <span className="text-[11px] font-semibold text-amber-900">
+                        بيانات التشغيلة والصلاحية للمادة الغذائية (اختياري)
+                      </span>
+                      {selectedProductObj?.trackExpiry && (
+                        <span className="text-[10px] font-semibold text-amber-800 bg-amber-100 px-2 py-0.5 rounded border border-amber-300">
+                          هذا الصنف مفعّل له تتبع الصلاحية
+                        </span>
+                      )}
                     </div>
                     <div className="grid grid-cols-2 gap-2">
                       <div>

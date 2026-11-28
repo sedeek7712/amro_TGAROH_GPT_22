@@ -7,6 +7,7 @@
 import { storage } from './storageService';
 import { roundMoney } from '../config/currency';
 import { Product, ProductBatch, CommercialActivityId } from '../types/erp';
+import { formatLocalDate } from '../utils/localDate';
 
 class InventoryService {
   // توليد كود صنف فريد حسب النشاط التجاري
@@ -44,12 +45,12 @@ class InventoryService {
     return newProduct;
   }
 
-  // فحص ما إذا كانت التشغيلة منتهية الصلاحية
-  public isBatchExpired(expiryDate: string): boolean {
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const exp = new Date(expiryDate);
-    return exp.getTime() < today.getTime();
+  // فحص ما إذا كانت التشغيلة منتهية الصلاحية وفق تاريخ العمل المحلي YYYY-MM-DD
+  public isBatchExpired(expiryDate: string, todayDate?: string): boolean {
+    const clean = (expiryDate || '').trim();
+    if (!clean) return false;
+    const today = todayDate || formatLocalDate();
+    return clean < today;
   }
 
   // خصم مخزون عند البيع وفق استراتيجية FEFO (الأقرب انتهاءً يصرف أولاً) مع منع المنتهي الصلاحية
@@ -178,7 +179,7 @@ class InventoryService {
   }
 
   // فحص الأصناف قريبة الانتهاء (للصيدلية والمواد الغذائية)
-  public getExpiringSoonBatches(daysThreshold: number = 60): Array<{
+  public getExpiringSoonBatches(daysThreshold: number = 60, todayDate?: string): Array<{
     product: Product;
     batch: ProductBatch;
     daysRemaining: number;
@@ -192,21 +193,23 @@ class InventoryService {
       isExpired: boolean;
     }> = [];
 
-    const now = new Date();
-    now.setHours(0, 0, 0, 0);
+    const todayStr = todayDate || formatLocalDate();
+    const todayMs = Date.parse(`${todayStr}T00:00:00Z`);
 
     products.forEach((p) => {
       if (p.batches && p.batches.length > 0) {
         p.batches.forEach((b) => {
-          if (b.quantity > 0) {
-            const expTime = new Date(b.expiryDate).getTime();
-            const diffDays = Math.ceil((expTime - now.getTime()) / (1000 * 60 * 60 * 24));
+          const cleanExp = (b.expiryDate || '').trim();
+          if (b.quantity > 0 && cleanExp) {
+            const expMs = Date.parse(`${cleanExp}T00:00:00Z`);
+            if (!Number.isFinite(expMs) || !Number.isFinite(todayMs)) return;
+            const diffDays = Math.round((expMs - todayMs) / (1000 * 60 * 60 * 24));
             if (diffDays <= daysThreshold) {
               results.push({
                 product: p,
                 batch: b,
                 daysRemaining: diffDays,
-                isExpired: diffDays <= 0,
+                isExpired: diffDays < 0,
               });
             }
           }

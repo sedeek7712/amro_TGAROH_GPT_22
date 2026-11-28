@@ -8,6 +8,7 @@ import { hasPermission } from '../../config/rbac';
 interface ProductMediaManagerProps {
   product: Product;
   onClose: () => void;
+  onChanged?: () => void;
 }
 
 interface ProductImageView extends ProductImage {
@@ -62,7 +63,7 @@ async function resizeImage(file: File, maxSide: number, quality: number): Promis
   }
 }
 
-export const ProductMediaManager: React.FC<ProductMediaManagerProps> = ({ product, onClose }) => {
+export const ProductMediaManager: React.FC<ProductMediaManagerProps> = ({ product, onClose, onChanged }) => {
   const [images, setImages] = useState<ProductImageView[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
@@ -119,6 +120,7 @@ export const ProductMediaManager: React.FC<ProductMediaManagerProps> = ({ produc
         });
       }
       await reload();
+      onChanged?.();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'تعذر إرفاق الصورة.';
       await reload();
@@ -146,6 +148,7 @@ export const ProductMediaManager: React.FC<ProductMediaManagerProps> = ({ produc
     try {
       await productMediaService.setPrimaryImage(image.id);
       await reload();
+      onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر تغيير الصورة الرئيسية.');
     } finally {
@@ -161,6 +164,7 @@ export const ProductMediaManager: React.FC<ProductMediaManagerProps> = ({ produc
     try {
       await productMediaService.deleteImage(image.id);
       await reload();
+      onChanged?.();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'تعذر حذف الصورة.');
     } finally {

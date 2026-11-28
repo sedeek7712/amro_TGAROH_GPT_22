@@ -67,6 +67,12 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
   const [defaultMinAlert, setDefaultMinAlert] = useState('5');
   const [defaultBatch, setDefaultBatch] = useState('');
   const [defaultExpiry, setDefaultExpiry] = useState('');
+  const [defaultTrackExpiry, setDefaultTrackExpiry] = useState(false);
+  const [defaultScientificName, setDefaultScientificName] = useState('');
+  const [defaultDosageForm, setDefaultDosageForm] = useState('');
+  const [defaultManufacturer, setDefaultManufacturer] = useState('');
+  const [defaultCompatibleModels, setDefaultCompatibleModels] = useState('');
+  const [defaultEquipmentType, setDefaultEquipmentType] = useState('');
 
   const [skuDrafts, setSkuDrafts] = useState<VariantSkuDraft[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -105,6 +111,12 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
       setDefaultMinAlert('5');
       setDefaultBatch('');
       setDefaultExpiry('');
+      setDefaultTrackExpiry(false);
+      setDefaultScientificName('');
+      setDefaultDosageForm('');
+      setDefaultManufacturer('');
+      setDefaultCompatibleModels('');
+      setDefaultEquipmentType('');
       setSkuDrafts([]);
     }
   }, [isOpen, editingFamily]);
@@ -239,10 +251,31 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
         setSkuDrafts(activeDrafts);
       }
 
+      const specializedDefaults =
+        activityId === 'pharmacy'
+          ? {
+              trackExpiry: true,
+              scientificName: defaultScientificName.trim() || undefined,
+              dosageForm: defaultDosageForm.trim() || undefined,
+            }
+          : activityId === 'grocery'
+          ? { trackExpiry: defaultTrackExpiry }
+          : activityId === 'bike_parts'
+          ? {
+              manufacturer: defaultManufacturer.trim() || undefined,
+              compatibleModels: defaultCompatibleModels.trim() || undefined,
+            }
+          : {
+              manufacturer: defaultManufacturer.trim() || undefined,
+              compatibleModels: defaultCompatibleModels.trim() || undefined,
+              equipmentType: defaultEquipmentType.trim() || undefined,
+            };
+
       const selectedDrafts = validateFamilySkuDrafts({
         activityId,
         drafts: activeDrafts,
         todayDate: formatLocalDate(),
+        trackExpiry: activityId === 'pharmacy' || (activityId === 'grocery' && defaultTrackExpiry),
       });
 
       setSubmitting(true);
@@ -258,6 +291,7 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
             activityId,
             categorySnapshot: categorySnapshot.trim(),
             generateId: () => storage.generateUUID(),
+            specializedDefaults,
           }),
           variantAttributes: draft.variantAttributes,
         })),
@@ -658,31 +692,146 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
                 </div>
 
                 {activityId === 'pharmacy' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-2 border-t border-slate-100">
+                  <div className="space-y-3 pt-2 border-t border-slate-100">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                          الاسم العلمي للمادة الفعالة (اختياري)
+                        </label>
+                        <input
+                          type="text"
+                          value={defaultScientificName}
+                          onChange={(e) => setDefaultScientificName(e.target.value)}
+                          placeholder="مثال: Paracetamol, Amoxicillin..."
+                          className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">
+                          الشكل الدوائي (اختياري)
+                        </label>
+                        <input
+                          type="text"
+                          value={defaultDosageForm}
+                          onChange={(e) => setDefaultDosageForm(e.target.value)}
+                          placeholder="مثال: أقراص، شراب، كبسولات..."
+                          className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-emerald-900 mb-1">
+                          رقم التشغيلة الافتراضي لكل SKU (إجباري للصيدلية)
+                        </label>
+                        <input
+                          type="text"
+                          value={defaultBatch}
+                          onChange={(e) => setDefaultBatch(e.target.value)}
+                          placeholder="مثال: BTH-2026-01"
+                          className="w-full px-2.5 py-1.5 border border-emerald-300 rounded-lg font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-emerald-900 mb-1">
+                          تاريخ الصلاحية الافتراضي لكل SKU (إجباري للصيدلية)
+                        </label>
+                        <input
+                          type="date"
+                          min={formatLocalDate()}
+                          value={defaultExpiry}
+                          onChange={(e) => setDefaultExpiry(e.target.value)}
+                          className="w-full px-2.5 py-1.5 border border-emerald-300 rounded-lg font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {activityId === 'grocery' && (
+                  <div className="space-y-3 pt-2 border-t border-slate-100">
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={defaultTrackExpiry}
+                        onChange={(e) => setDefaultTrackExpiry(e.target.checked)}
+                        className="w-4 h-4 rounded text-amber-600 focus:ring-amber-500"
+                      />
+                      <span className="text-[11px] font-bold text-amber-900">
+                        تفعيل تتبع التشغيلات والصلاحية لمتغيرات هذا الصنف الغذائي (اختياري)
+                      </span>
+                    </label>
+                    {defaultTrackExpiry && (
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block text-[11px] font-semibold text-amber-900 mb-1">
+                            رقم التشغيلة الافتراضي (اختياري)
+                          </label>
+                          <input
+                            type="text"
+                            value={defaultBatch}
+                            onChange={(e) => setDefaultBatch(e.target.value)}
+                            placeholder="مثال: LOT-2026-01"
+                            className="w-full px-2.5 py-1.5 border border-amber-300 rounded-lg font-mono"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-semibold text-amber-900 mb-1">
+                            تاريخ الصلاحية الافتراضي (اختياري)
+                          </label>
+                          <input
+                            type="date"
+                            min={formatLocalDate()}
+                            value={defaultExpiry}
+                            onChange={(e) => setDefaultExpiry(e.target.value)}
+                            className="w-full px-2.5 py-1.5 border border-amber-300 rounded-lg font-mono"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(activityId === 'bike_parts' || activityId === 'equipment_parts') && (
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2 border-t border-slate-100">
                     <div>
-                      <label className="block text-[11px] font-semibold text-emerald-900 mb-1">
-                        رقم التشغيلة الافتراضي (إجباري للصيدلية)
+                      <label className="block text-[11px] font-semibold text-blue-900 mb-1">
+                        الشركة المصنعة (اختياري)
                       </label>
                       <input
                         type="text"
-                        value={defaultBatch}
-                        onChange={(e) => setDefaultBatch(e.target.value)}
-                        placeholder="مثال: BTH-2026-01"
-                        className="w-full px-2.5 py-1.5 border border-emerald-300 rounded-lg font-mono"
+                        value={defaultManufacturer}
+                        onChange={(e) => setDefaultManufacturer(e.target.value)}
+                        placeholder="مثال: Honda, Yamaha, CAT..."
+                        className="w-full px-2.5 py-1.5 border border-blue-200 rounded-lg"
                       />
                     </div>
                     <div>
-                      <label className="block text-[11px] font-semibold text-emerald-900 mb-1">
-                        تاريخ الصلاحية الافتراضي (إجباري للصيدلية)
+                      <label className="block text-[11px] font-semibold text-blue-900 mb-1">
+                        الموديلات المتوافقة (اختياري)
                       </label>
                       <input
-                        type="date"
-                        min={formatLocalDate()}
-                        value={defaultExpiry}
-                        onChange={(e) => setDefaultExpiry(e.target.value)}
-                        className="w-full px-2.5 py-1.5 border border-emerald-300 rounded-lg font-mono"
+                        type="text"
+                        value={defaultCompatibleModels}
+                        onChange={(e) => setDefaultCompatibleModels(e.target.value)}
+                        placeholder="مثال: 2020-2026..."
+                        className="w-full px-2.5 py-1.5 border border-blue-200 rounded-lg"
                       />
                     </div>
+                    {activityId === 'equipment_parts' && (
+                      <div>
+                        <label className="block text-[11px] font-semibold text-blue-900 mb-1">
+                          نوع المعدة (اختياري)
+                        </label>
+                        <input
+                          type="text"
+                          value={defaultEquipmentType}
+                          onChange={(e) => setDefaultEquipmentType(e.target.value)}
+                          placeholder="مثال: مضخة مياه، مولد..."
+                          className="w-full px-2.5 py-1.5 border border-blue-200 rounded-lg"
+                        />
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -710,10 +859,14 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
                           <th className="py-2 px-2.5">الشراء</th>
                           <th className="py-2 px-2.5">البيع</th>
                           <th className="py-2 px-2.5">الرصيد</th>
-                          {activityId === 'pharmacy' && (
+                          {(activityId === 'pharmacy' || (activityId === 'grocery' && defaultTrackExpiry)) && (
                             <>
-                              <th className="py-2 px-2.5">التشغيلة *</th>
-                              <th className="py-2 px-2.5">الصلاحية *</th>
+                              <th className="py-2 px-2.5">
+                                {activityId === 'pharmacy' ? 'التشغيلة (لكل SKU) *' : 'التشغيلة (اختياري)'}
+                              </th>
+                              <th className="py-2 px-2.5">
+                                {activityId === 'pharmacy' ? 'الصلاحية *' : 'الصلاحية'}
+                              </th>
                             </>
                           )}
                         </tr>
@@ -847,13 +1000,14 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
                                   className="w-16 px-2 py-1 border border-slate-200 rounded bg-white font-mono tabular-nums"
                                 />
                               </td>
-                              {activityId === 'pharmacy' && (
+                              {(activityId === 'pharmacy' || (activityId === 'grocery' && defaultTrackExpiry)) && (
                                 <>
                                   <td className="py-1.5 px-2">
                                     <input
                                       type="text"
                                       value={row.batchNumber}
                                       disabled={!row.selected}
+                                      placeholder={activityId === 'grocery' ? 'اختياري' : ''}
                                       onChange={(e) => {
                                         const val = e.target.value;
                                         setSkuDrafts((prev) =>
@@ -862,7 +1016,9 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
                                           )
                                         );
                                       }}
-                                      className="w-24 px-2 py-1 border border-emerald-300 rounded bg-white font-mono"
+                                      className={`w-24 px-2 py-1 border rounded bg-white font-mono ${
+                                        activityId === 'pharmacy' ? 'border-emerald-300' : 'border-amber-300'
+                                      }`}
                                     />
                                   </td>
                                   <td className="py-1.5 px-2">
@@ -879,7 +1035,9 @@ export const ProductFamilyModal: React.FC<ProductFamilyModalProps> = ({
                                           )
                                         );
                                       }}
-                                      className="w-32 px-2 py-1 border border-emerald-300 rounded bg-white font-mono"
+                                      className={`w-32 px-2 py-1 border rounded bg-white font-mono ${
+                                        activityId === 'pharmacy' ? 'border-emerald-300' : 'border-amber-300'
+                                      }`}
                                     />
                                   </td>
                                 </>

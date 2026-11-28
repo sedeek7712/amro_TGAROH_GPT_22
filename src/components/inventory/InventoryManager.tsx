@@ -47,8 +47,12 @@ import {
 import { formatLocalDate } from '../../utils/localDate';
 import {
   formatVariantAttributesPairs,
+  getBatchExpiryStatus,
+  getFamilyFallbackProductIds,
   groupCatalogEntriesByFamily,
   matchesCatalogEntrySearch,
+  sanitizeSpecializedFieldsForActivity,
+  sortBatchesFefo,
 } from '../../utils/productCatalogUi';
 import { ProductMediaManager } from './ProductMediaManager';
 import { ProductPrimaryImage } from './ProductPrimaryImage';
@@ -112,6 +116,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [brands, setBrands] = useState<Brand[]>([]);
   const [families, setFamilies] = useState<ProductFamily[]>([]);
   const [catalogRefreshNonce, setCatalogRefreshNonce] = useState(0);
+  const [mediaRefreshNonce, setMediaRefreshNonce] = useState(0);
 
   // حقول نموذج الإضافة والتعديل
   const [formNameAr, setFormNameAr] = useState('');
@@ -130,6 +135,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
   const [formEquipmentType, setFormEquipmentType] = useState('');
   const [formSerialNumber, setFormSerialNumber] = useState('');
   const [formScientificName, setFormScientificName] = useState('');
+  const [formDosageForm, setFormDosageForm] = useState('');
   const [formTrackExpiry, setFormTrackExpiry] = useState(false);
   // حقول التشغيلة الأولية للصيدلية والغذاء
   const [formInitialBatch, setFormInitialBatch] = useState('');
@@ -204,10 +210,11 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     }
     if (filterType === 'expiring') {
       return (
-        p.batches &&
-        p.batches.some((b) => {
-          const diff = Math.ceil((new Date(b.expiryDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24));
-          return diff <= 60 && b.quantity > 0;
+        Boolean(p.batches) &&
+        p.batches!.some((b) => {
+          if (b.quantity <= 0) return false;
+          const { daysRemaining } = getBatchExpiryStatus(b.expiryDate);
+          return daysRemaining !== null && daysRemaining <= 60;
         })
       );
     }
@@ -234,6 +241,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setFormEquipmentType('');
     setFormSerialNumber('');
     setFormScientificName('');
+    setFormDosageForm('');
     setFormTrackExpiry(false);
     setFormInitialBatch('');
     setFormExpiryDate('');
@@ -360,6 +368,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     setFormEquipmentType(product.equipmentType || '');
     setFormSerialNumber(product.serialNumber || '');
     setFormScientificName(product.scientificName || '');
+    setFormDosageForm(product.dosageForm || '');
     setFormTrackExpiry(Boolean(product.trackExpiry));
     setFormError(null);
     setIsAddModalOpen(true);
@@ -407,6 +416,17 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
 
     setIsSubmitting(true);
     try {
+      const scopedFields = sanitizeSpecializedFieldsForActivity(activeTab, {
+        trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
+        scientificName: formScientificName,
+        dosageForm: formDosageForm,
+        oemNumber: formOemNumber,
+        manufacturer: formManufacturer,
+        compatibleModels: formCompatibility,
+        equipmentType: formEquipmentType,
+        serialNumber: formSerialNumber,
+      });
+
       if (editingProduct) {
         const updated: Product = {
           ...editingProduct,
@@ -418,13 +438,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           sellPrice: sell,
           minStockAlert: minAlert,
           storageLocation: formLocation.trim() || undefined,
-          oemNumber: formOemNumber.trim() || undefined,
-          manufacturer: formManufacturer.trim() || undefined,
-          compatibleModels: formCompatibility.trim() || undefined,
-          equipmentType: formEquipmentType.trim() || undefined,
-          serialNumber: formSerialNumber.trim() || undefined,
-          scientificName: formScientificName.trim() || undefined,
-          trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
+          ...scopedFields,
         };
         const saved = await dataService.saveProductAtomic(updated, true);
         if (!editingCatalogEntry?.family && formBrandId !== initialFormBrandId) {
@@ -435,8 +449,10 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
         }
       } else {
         const newProductId = storage.generateUUID();
+        const allowBatch =
+          activeTab === 'pharmacy' || (activeTab === 'grocery' && Boolean(scopedFields.trackExpiry));
         const batches: ProductBatch[] = [];
-        if (formInitialBatch.trim() && formExpiryDate.trim()) {
+        if (allowBatch && formInitialBatch.trim() && formExpiryDate.trim()) {
           batches.push({
             id: storage.generateUUID(),
             productId: newProductId,
@@ -465,13 +481,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           currentStock: totalStock,
           minStockAlert: minAlert,
           storageLocation: formLocation.trim() || undefined,
-          oemNumber: formOemNumber.trim() || undefined,
-          manufacturer: formManufacturer.trim() || undefined,
-          compatibleModels: formCompatibility.trim() || undefined,
-          equipmentType: formEquipmentType.trim() || undefined,
-          serialNumber: formSerialNumber.trim() || undefined,
-          scientificName: formScientificName.trim() || undefined,
-          trackExpiry: activeTab === 'pharmacy' ? true : formTrackExpiry,
+          ...scopedFields,
           batches: batches.length > 0 ? batches : undefined,
         };
         const saved = await dataService.saveProductAtomic(newProduct, false);
@@ -600,12 +610,28 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
     if (entry.brand && !options?.hideFamilyAndBrandMeta) {
       metaParts.push(`العلامة: ${entry.brand.nameAr}`);
     }
+    if (p.activityId === 'pharmacy') {
+      if (p.scientificName) metaParts.push(`الاسم العلمي: ${p.scientificName}`);
+      if (p.dosageForm) metaParts.push(`الشكل الدوائي: ${p.dosageForm}`);
+    } else if (p.activityId === 'bike_parts' || p.activityId === 'equipment_parts') {
+      if (p.manufacturer) metaParts.push(`الشركة: ${p.manufacturer}`);
+    }
     if (p.barcode) {
       metaParts.push(`باركود: ${p.barcode}`);
     }
     if (p.storageLocation) {
       metaParts.push(`موقع: ${p.storageLocation}`);
     }
+
+    const sortedBatches = p.batches && p.batches.length > 0 ? sortBatchesFefo(p.batches) : [];
+    const isPartsActivity = p.activityId === 'bike_parts' || p.activityId === 'equipment_parts';
+    const hasPartsSpecs =
+      isPartsActivity &&
+      Boolean(
+        p.oemNumber ||
+          p.compatibleModels ||
+          (p.activityId === 'equipment_parts' && (p.equipmentType || p.serialNumber))
+      );
 
     return (
       <tr
@@ -615,7 +641,11 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
         }`}
       >
         <td className="py-2 px-3 text-center">
-          <ProductPrimaryImage productId={p.id} productName={p.nameAr} />
+          <ProductPrimaryImage
+            productId={p.id}
+            productName={p.nameAr}
+            refreshKey={mediaRefreshNonce}
+          />
         </td>
         <td className="py-3 px-4 font-mono font-bold text-slate-900 tabular-nums whitespace-nowrap">
           {p.code}
@@ -657,18 +687,42 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
           {p.sellPrice.toFixed(2)} {currencySymbol}
         </td>
         <td className="py-3 px-4 text-center">
-          {p.batches && p.batches.length > 0 ? (
-            <div className="text-[11px] text-slate-600 tabular-nums">
-              {p.batches.map((b, i) => (
-                <div key={i} className="font-mono text-[10px]">
-                  {b.batchNumber}: {b.quantity} (انتهاء: {b.expiryDate})
-                </div>
-              ))}
+          {sortedBatches.length > 0 ? (
+            <div className="text-[11px] text-slate-600 tabular-nums space-y-0.5">
+              {sortedBatches.map((b, i) => {
+                const expStatus = getBatchExpiryStatus(b.expiryDate);
+                return (
+                  <div
+                    key={b.id || i}
+                    className={`font-mono text-[10px] ${
+                      expStatus.status === 'EXPIRED'
+                        ? 'text-rose-700 font-bold'
+                        : expStatus.status === 'EXPIRING_SOON'
+                        ? 'text-amber-700 font-semibold'
+                        : 'text-slate-600'
+                    }`}
+                  >
+                    {b.batchNumber}: {b.quantity} ({b.expiryDate})
+                    {expStatus.status === 'EXPIRED' && (
+                      <span className="font-sans mr-1">· منتهية</span>
+                    )}
+                    {expStatus.status === 'EXPIRING_SOON' && (
+                      <span className="font-sans mr-1">· قريبة</span>
+                    )}
+                  </div>
+                );
+              })}
             </div>
-          ) : p.oemNumber ? (
-            <div className="text-[10px] text-slate-600">
-              <span className="font-mono font-semibold">OEM: {p.oemNumber}</span>
+          ) : hasPartsSpecs ? (
+            <div className="text-[10px] text-slate-600 space-y-0.5">
+              {p.oemNumber && <div className="font-mono font-semibold">OEM: {p.oemNumber}</div>}
               {p.compatibleModels && <div>{p.compatibleModels}</div>}
+              {p.activityId === 'equipment_parts' && p.equipmentType && (
+                <div className="text-indigo-700">{p.equipmentType}</div>
+              )}
+              {p.activityId === 'equipment_parts' && p.serialNumber && (
+                <div className="font-mono text-slate-500">S/N: {p.serialNumber}</div>
+              )}
             </div>
           ) : (
             <span className="text-slate-400">-</span>
@@ -948,29 +1002,41 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                   className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-sm"
                 >
                   <div className="px-4 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3">
-                    <div className="space-y-0.5">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <Layers className="w-4 h-4 text-emerald-700 shrink-0" />
-                        <span className="font-bold text-sm text-slate-900">{group.family.nameAr}</span>
-                        {group.family.isActive === false && (
-                          <span className="text-[11px] font-semibold text-amber-700">· مجموعة مؤرشفة</span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap">
-                        {group.brand && <span>العلامة: {group.brand.nameAr}</span>}
-                        {group.brand && <span aria-hidden="true">·</span>}
-                        <span>
-                          الخيارات: {group.family.optionSchema.map((o) => o.labelAr).join('، ')}
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <span className="tabular-nums">
-                          {group.activeSkuCount} متغير نشط
-                          {group.archivedSkuCount > 0 ? ` (${group.archivedSkuCount} مؤرشف)` : ''}
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-semibold text-slate-700 tabular-nums">
-                          مجموع أرصدة المتغيرات (مشتق للعرض): {group.derivedTotalStock}
-                        </span>
+                    <div className="flex items-center gap-3 min-w-0">
+                      {group.entries.length > 0 && (
+                        <div className="shrink-0">
+                          <ProductPrimaryImage
+                            productId={group.entries[0].product.id}
+                            fallbackProductIds={getFamilyFallbackProductIds(group.entries)}
+                            productName={group.family.nameAr}
+                            refreshKey={mediaRefreshNonce}
+                          />
+                        </div>
+                      )}
+                      <div className="space-y-0.5 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <Layers className="w-4 h-4 text-emerald-700 shrink-0" />
+                          <span className="font-bold text-sm text-slate-900">{group.family.nameAr}</span>
+                          {group.family.isActive === false && (
+                            <span className="text-[11px] font-semibold text-amber-700">· مجموعة مؤرشفة</span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-500 flex items-center gap-1.5 flex-wrap">
+                          {group.brand && <span>العلامة: {group.brand.nameAr}</span>}
+                          {group.brand && <span aria-hidden="true">·</span>}
+                          <span>
+                            الخيارات: {group.family.optionSchema.map((o) => o.labelAr).join('، ')}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="tabular-nums">
+                            {group.activeSkuCount} متغير نشط
+                            {group.archivedSkuCount > 0 ? ` (${group.archivedSkuCount} مؤرشف)` : ''}
+                          </span>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-semibold text-slate-700 tabular-nums">
+                            مجموع أرصدة المتغيرات (مشتق للعرض): {group.derivedTotalStock}
+                          </span>
+                        </div>
                       </div>
                     </div>
 
@@ -1344,6 +1410,16 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
                         className="w-full px-3 py-1.5 border border-slate-200 rounded bg-white text-slate-900 focus:outline-none"
                       />
                     </div>
+                    <div>
+                      <label className="block text-slate-700 mb-1">الشكل الدوائي (Dosage Form)</label>
+                      <input
+                        type="text"
+                        value={formDosageForm}
+                        onChange={(e) => setFormDosageForm(e.target.value)}
+                        placeholder="مثال: أقراص، كبسولات، شراب، مرهم..."
+                        className="w-full px-3 py-1.5 border border-slate-200 rounded bg-white text-slate-900 focus:outline-none"
+                      />
+                    </div>
                   </div>
                 </div>
               )}
@@ -1649,6 +1725,7 @@ export const InventoryManager: React.FC<InventoryManagerProps> = ({
       {managingImagesProduct && (
         <ProductMediaManager
           product={managingImagesProduct}
+          onChanged={() => setMediaRefreshNonce((n) => n + 1)}
           onClose={() => setManagingImagesProduct(null)}
         />
       )}

@@ -5013,7 +5013,7 @@ export class DexieDataService implements IDataService {
                   `التشغيلة ${deduction.batchNumber} للصنف (${product.nameAr}) غير موجودة.`
                 );
               }
-              if (batch.expiryDate < todayStr) {
+              if (batch.expiryDate && batch.expiryDate < todayStr) {
                 throw new FinancialValidationError(
                   `محظور تماماً بيع التشغيلة (${batch.batchNumber}) لأنها منتهية الصلاحية بتاريخ ${batch.expiryDate}!`
                 );
@@ -5038,8 +5038,8 @@ export class DexieDataService implements IDataService {
               batch.quantity = roundMoney(batch.quantity - deduction.quantity, 4);
             } else {
               const validBatches = product.batches
-                .filter((b) => b.quantity > 0 && b.expiryDate >= todayStr)
-                .sort((a, b) => new Date(a.expiryDate).getTime() - new Date(b.expiryDate).getTime());
+                .filter((b) => b.quantity > 0 && (!b.expiryDate || b.expiryDate >= todayStr))
+                .sort((a, b) => String(a.expiryDate || '9999-12-31').localeCompare(String(b.expiryDate || '9999-12-31')));
 
               const totalValidQty = validBatches.reduce((sum, b) => sum + b.quantity, 0);
               if (totalValidQty + 0.0001 < deduction.quantity) {

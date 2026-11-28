@@ -58,6 +58,11 @@ import {
   resolvePosScanTarget,
 } from '../../utils/posCatalog';
 import {
+  getBatchExpiryStatus,
+  getFamilyFallbackProductIds,
+  sortBatchesFefo,
+} from '../../utils/productCatalogUi';
+import {
   computeSuggestedUnitPrice,
   formatUnitConversionSummary,
   resolveUnitConversionToBase,
@@ -1158,6 +1163,11 @@ export const PointOfSale: React.FC<POSProps> = ({
                           {leadEntry && (
                             <ProductPrimaryImage
                               productId={leadEntry.product.id}
+                              fallbackProductIds={getFamilyFallbackProductIds(
+                                card.sellableEntries.length > 0
+                                  ? card.sellableEntries
+                                  : card.activeEntries
+                              )}
                               productName={card.family.nameAr}
                               displaySize="pos"
                             />
@@ -1237,11 +1247,23 @@ export const PointOfSale: React.FC<POSProps> = ({
                           </div>
                         )}
 
-                        {p.oemNumber && (
-                          <div className="text-[10px] text-slate-500 mt-1 font-mono truncate">
-                            OEM: {p.oemNumber}
+                        {p.activityId === 'pharmacy' && (p.scientificName || p.dosageForm) && (
+                          <div className="text-[10px] text-slate-500 mt-1 truncate">
+                            {[p.scientificName, p.dosageForm].filter(Boolean).join(' · ')}
                           </div>
                         )}
+                        {(p.activityId === 'bike_parts' || p.activityId === 'equipment_parts') &&
+                          (p.oemNumber || p.manufacturer || (p.activityId === 'equipment_parts' && p.equipmentType)) && (
+                            <div className="text-[10px] text-slate-500 mt-1 truncate">
+                              {[
+                                p.oemNumber ? `OEM: ${p.oemNumber}` : null,
+                                p.manufacturer,
+                                p.activityId === 'equipment_parts' ? p.equipmentType : null,
+                              ]
+                                .filter(Boolean)
+                                .join(' · ')}
+                            </div>
+                          )}
                         {saleability.reason === 'EXPIRED' ? (
                           <div className="text-[10px] text-rose-700 mt-1 font-semibold">
                             منتهي الصلاحية - محظور البيع
@@ -1680,8 +1702,10 @@ export const PointOfSale: React.FC<POSProps> = ({
 
               <div className="text-[11px] font-semibold text-slate-500 pt-1">أو اختر تشغيلة محددة:</div>
 
-              {batchPickerTarget.product.batches?.map((batch) => {
-                const isExpired = inventory.isBatchExpired(batch.expiryDate);
+              {sortBatchesFefo(batchPickerTarget.product.batches || []).map((batch) => {
+                const expStatus = getBatchExpiryStatus(batch.expiryDate);
+                const isExpired = expStatus.status === 'EXPIRED';
+                const isExpiringSoon = expStatus.status === 'EXPIRING_SOON';
                 const isOutOfStock = batch.quantity <= 0;
                 return (
                   <button
@@ -1711,7 +1735,16 @@ export const PointOfSale: React.FC<POSProps> = ({
                         <div className="font-mono font-bold text-slate-900">تشغيلة: {batch.batchNumber}</div>
                         <div className="text-[10px] font-mono">
                           انتهاء: {batch.expiryDate}{' '}
-                          {isExpired && <span className="font-bold text-rose-700 font-sans mr-1">(منتهية الصلاحية - محظور البيع)</span>}
+                          {isExpired && (
+                            <span className="font-bold text-rose-700 font-sans mr-1">
+                              (منتهية الصلاحية - محظور البيع)
+                            </span>
+                          )}
+                          {isExpiringSoon && (
+                            <span className="font-bold text-amber-700 font-sans mr-1">
+                              (قريبة الانتهاء)
+                            </span>
+                          )}
                         </div>
                       </div>
                       <div className="text-left font-mono font-bold text-emerald-800">

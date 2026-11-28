@@ -2,16 +2,125 @@ import { inventory } from '../services/inventoryService';
 import type {
   Brand,
   CommercialActivityId,
+  Product,
   ProductBatch,
   ProductCatalogEntry,
   ProductFamily,
   ProductFamilyOption,
 } from '../types/erp';
+import { formatLocalDate } from './localDate';
 import {
   computeCanonicalVariantKeyAndAttributes,
   normalizeDisplayText,
   normalizeOptionSchema,
 } from './productCatalog';
+
+export interface ProductSpecializedFieldsInput {
+  trackExpiry?: boolean;
+  scientificName?: string;
+  dosageForm?: string;
+  oemNumber?: string;
+  manufacturer?: string;
+  compatibleModels?: string;
+  equipmentType?: string;
+  serialNumber?: string;
+}
+
+export type BatchExpiryStatus = 'EXPIRED' | 'EXPIRING_SOON' | 'VALID' | 'UNKNOWN';
+
+/** Returns only specialized fields applicable to the given activity, preventing cross-activity leakage. */
+export function sanitizeSpecializedFieldsForActivity(
+  activityId: CommercialActivityId,
+  input?: ProductSpecializedFieldsInput | null
+): ProductSpecializedFieldsInput {
+  const clean = (val?: string): string | undefined => {
+    const trimmed = normalizeDisplayText(val || '');
+    return trimmed || undefined;
+  };
+  if (activityId === 'pharmacy') {
+    return {
+      trackExpiry: true,
+      scientificName: clean(input?.scientificName),
+      dosageForm: clean(input?.dosageForm),
+      oemNumber: undefined,
+      manufacturer: undefined,
+      compatibleModels: undefined,
+      equipmentType: undefined,
+      serialNumber: undefined,
+    };
+  }
+  if (activityId === 'grocery') {
+    return {
+      trackExpiry: Boolean(input?.trackExpiry),
+      scientificName: undefined,
+      dosageForm: undefined,
+      oemNumber: undefined,
+      manufacturer: undefined,
+      compatibleModels: undefined,
+      equipmentType: undefined,
+      serialNumber: undefined,
+    };
+  }
+  if (activityId === 'bike_parts') {
+    return {
+      trackExpiry: false,
+      scientificName: undefined,
+      dosageForm: undefined,
+      oemNumber: clean(input?.oemNumber),
+      manufacturer: clean(input?.manufacturer),
+      compatibleModels: clean(input?.compatibleModels),
+      equipmentType: undefined,
+      serialNumber: undefined,
+    };
+  }
+  return {
+    trackExpiry: false,
+    scientificName: undefined,
+    dosageForm: undefined,
+    oemNumber: clean(input?.oemNumber),
+    manufacturer: clean(input?.manufacturer),
+    compatibleModels: clean(input?.compatibleModels),
+    equipmentType: clean(input?.equipmentType),
+    serialNumber: clean(input?.serialNumber),
+  };
+}
+
+export function getBatchExpiryStatus(
+  expiryDate?: string,
+  todayDate: string = formatLocalDate(),
+  warningDays = 60
+): { status: BatchExpiryStatus; daysRemaining: number | null } {
+  const clean = (expiryDate || '').trim();
+  if (!clean) return { status: 'UNKNOWN', daysRemaining: null };
+  const expMs = Date.parse(`${clean}T00:00:00Z`);
+  const todayMs = Date.parse(`${todayDate}T00:00:00Z`);
+  if (!Number.isFinite(expMs) || !Number.isFinite(todayMs)) {
+    return { status: 'UNKNOWN', daysRemaining: null };
+  }
+  const daysRemaining = Math.round((expMs - todayMs) / (1000 * 60 * 60 * 24));
+  if (daysRemaining < 0) return { status: 'EXPIRED', daysRemaining };
+  if (daysRemaining <= warningDays) return { status: 'EXPIRING_SOON', daysRemaining };
+  return { status: 'VALID', daysRemaining };
+}
+
+export function sortBatchesFefo<T extends Pick<ProductBatch, 'expiryDate' | 'batchNumber'>>(
+  batches: T[]
+): T[] {
+  return [...batches].sort((a, b) => {
+    const expA = (a.expiryDate || '').trim() || '9999-12-31';
+    const expB = (b.expiryDate || '').trim() || '9999-12-31';
+    if (expA !== expB) return expA.localeCompare(expB);
+    return (a.batchNumber || '').localeCompare(b.batchNumber || '');
+  });
+}
+
+export function getFamilyFallbackProductIds(entries: ProductCatalogEntry[]): string[] {
+  const active = entries.filter((e) => e.product.isActive !== false);
+  const archived = entries.filter((e) => e.product.isActive === false);
+  const inStock = active.filter((e) => Number(e.product.currentStock || 0) > 0);
+  const outOfStock = active.filter((e) => Number(e.product.currentStock || 0) <= 0);
+  return [...inStock, ...outOfStock, ...archived].map((e) => e.product.id);
+}
 
 export interface VariantSkuDraft {
   tempId: string;
@@ -240,6 +349,7 @@ export function validateFamilySkuDrafts(params: {
   activityId: CommercialActivityId;
   drafts: VariantSkuDraft[];
   todayDate: string;
+  trackExpiry?: boolean;
 }): VariantSkuDraft[] {
   const selected = params.drafts.filter((d) => d.selected);
   if (selected.length === 0) {
@@ -283,9 +393,10 @@ export function validateFamilySkuDrafts(params: {
       throw new Error(`الكمية أو حد التنبيه غير صالح للمتغير (${nameAr}).`);
     }
 
+    const batchNo = normalizeDisplayText(draft.batchNumber);
+    const expiry = normalizeDisplayText(draft.expiryDate);
+
     if (params.activityId === 'pharmacy') {
-      const batchNo = normalizeDisplayText(draft.batchNumber);
-      const expiry = normalizeDisplayText(draft.expiryDate);
       if (!batchNo) {
         throw new Error(`رقم التشغيلة إجباري لأصناف الصيدلية (${nameAr}).`);
       }
@@ -294,6 +405,13 @@ export function validateFamilySkuDrafts(params: {
       }
       if (expiry < params.todayDate) {
         throw new Error(`محظور تسجيل دواء منتهي الصلاحية (${nameAr}: ${expiry}).`);
+      }
+    } else if (params.activityId === 'grocery' && (batchNo || expiry)) {
+      if (!batchNo || !expiry) {
+        throw new Error(`عند إدخال تشغيلة للمتغير (${nameAr}) يجب تحديد رقم التشغيلة وتاريخ الصلاحية معاً.`);
+      }
+      if (expiry < params.todayDate) {
+        throw new Error(`محظور تسجيل تشغيلة منتهية الصلاحية (${nameAr}: ${expiry}).`);
       }
     }
   }
@@ -306,28 +424,16 @@ export function buildSkuProductPayload(params: {
   activityId: CommercialActivityId;
   categorySnapshot: string;
   generateId: () => string;
-}): {
-  id: string;
-  code: string;
-  activityId: CommercialActivityId;
-  barcode?: string;
-  nameAr: string;
-  category: string;
-  unit: string;
-  purchasePrice: number;
-  sellPrice: number;
-  currentStock: number;
-  minStockAlert: number;
-  trackExpiry?: boolean;
-  batches?: ProductBatch[];
-} {
+  specializedDefaults?: ProductSpecializedFieldsInput;
+}): Product {
   const productId = params.generateId();
   const purchasePrice = Number(params.draft.purchasePrice || 0);
   const sellPrice = Number(params.draft.sellPrice || 0);
   const currentStock = Math.max(0, Number(params.draft.currentStock || 0));
   const minStockAlert = Math.max(0, Number(params.draft.minStockAlert || 0));
-  const batchNumber = normalizeDisplayText(params.draft.batchNumber);
-  const expiryDate = normalizeDisplayText(params.draft.expiryDate);
+  const allowBatch = params.activityId === 'pharmacy' || params.activityId === 'grocery';
+  const batchNumber = allowBatch ? normalizeDisplayText(params.draft.batchNumber) : '';
+  const expiryDate = allowBatch ? normalizeDisplayText(params.draft.expiryDate) : '';
   const batches: ProductBatch[] = [];
   if (batchNumber && expiryDate) {
     batches.push({
@@ -339,6 +445,16 @@ export function buildSkuProductPayload(params: {
       costPrice: purchasePrice,
     });
   }
+
+  const scoped = sanitizeSpecializedFieldsForActivity(params.activityId, {
+    ...params.specializedDefaults,
+    trackExpiry:
+      params.activityId === 'pharmacy'
+        ? true
+        : params.activityId === 'grocery'
+        ? Boolean(params.specializedDefaults?.trackExpiry || batches.length > 0)
+        : false,
+  });
 
   return {
     id: productId,
@@ -352,7 +468,7 @@ export function buildSkuProductPayload(params: {
     sellPrice,
     currentStock: batches.length > 0 ? batches.reduce((s, b) => s + b.quantity, 0) : currentStock,
     minStockAlert,
-    trackExpiry: params.activityId === 'pharmacy' ? true : batches.length > 0,
+    ...scoped,
     ...(batches.length > 0 ? { batches } : {}),
   };
 }
@@ -391,6 +507,11 @@ export function matchesCatalogEntrySearch(
     (p.barcode && p.barcode.toLowerCase().includes(q)) ||
     (p.oemNumber && p.oemNumber.toLowerCase().includes(q)) ||
     (p.scientificName && p.scientificName.toLowerCase().includes(q)) ||
+    (p.dosageForm && p.dosageForm.toLowerCase().includes(q)) ||
+    (p.manufacturer && p.manufacturer.toLowerCase().includes(q)) ||
+    (p.compatibleModels && p.compatibleModels.toLowerCase().includes(q)) ||
+    (p.equipmentType && p.equipmentType.toLowerCase().includes(q)) ||
+    (p.serialNumber && p.serialNumber.toLowerCase().includes(q)) ||
     (p.category && p.category.toLowerCase().includes(q))
   ) {
     return true;

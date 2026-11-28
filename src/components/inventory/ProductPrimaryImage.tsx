@@ -6,27 +6,45 @@ interface ProductPrimaryImageProps {
   productId: string;
   productName: string;
   displaySize?: 'inventory' | 'pos';
+  refreshKey?: number;
+  fallbackProductIds?: string[];
 }
 
 export const ProductPrimaryImage: React.FC<ProductPrimaryImageProps> = ({
   productId,
   productName,
   displaySize = 'inventory',
+  refreshKey = 0,
+  fallbackProductIds,
 }) => {
   const [src, setSrc] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const rootRef = useRef<HTMLDivElement>(null);
+  const fallbackKey = (fallbackProductIds || []).join(',');
 
   useEffect(() => {
     let active = true;
+    setSrc(null);
     setLoading(true);
     const load = () => {
-      void productMediaService.getProductImages(productId)
-        .then(async (images) => {
+      const candidateIds = Array.from(
+        new Set([productId, ...(fallbackProductIds || [])].filter(Boolean))
+      );
+      void (async () => {
+        for (const candidateId of candidateIds) {
+          if (!active) return;
+          const images = await productMediaService.getProductImages(candidateId);
           const primary = images.find((image) => image.isPrimary) || images[0];
-          const value = primary ? await productMediaService.getImageDataUrl(primary.id, 'thumbnail') : null;
-          if (active) setSrc(value);
-        })
+          if (primary) {
+            const value = await productMediaService.getImageDataUrl(primary.id, 'thumbnail');
+            if (value) {
+              if (active) setSrc(value);
+              return;
+            }
+          }
+        }
+        if (active) setSrc(null);
+      })()
         .catch(() => {
           if (active) setSrc(null);
         })
@@ -52,7 +70,7 @@ export const ProductPrimaryImage: React.FC<ProductPrimaryImageProps> = ({
     return () => {
       active = false;
     };
-  }, [productId]);
+  }, [productId, refreshKey, fallbackKey]);
 
   const frameClass =
     displaySize === 'pos'

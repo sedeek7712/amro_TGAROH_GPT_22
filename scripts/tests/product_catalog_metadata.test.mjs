@@ -83,7 +83,7 @@ test('PVAR-004A migration preserves legacy products and enforces catalog relatio
     assert.equal(migratedLegacy.current_stock_decimal, '9.7500');
     assert.equal(database.prepare('SELECT COUNT(*) AS count FROM product_catalog_meta').get().count, 2);
     assert.deepEqual(database.prepare('PRAGMA foreign_key_check').all(), []);
-    assert.deepEqual(database.prepare('PRAGMA integrity_check').all(), [{ integrity_check: 'ok' }]);
+    assert.equal(database.prepare('PRAGMA integrity_check').get().integrity_check, 'ok');
 
     runtime.close();
   } finally {
